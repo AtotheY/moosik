@@ -5,7 +5,8 @@
 //!
 //! State is *polled* rather than delivered through mpv's event context. We already repaint a few
 //! times a second while playing, so a handful of property reads on those frames is cheaper and far
-//! simpler than running an event thread and a second channel.
+//! simpler than running an event thread and a second channel. The same frames drain mpv's event
+//! queue without waiting, for one thing only: its own error messages, which go to the log.
 
 use std::sync::Arc;
 
@@ -75,7 +76,7 @@ impl Player {
         // which framework last touched the locale.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         restore_c_locale();
-        Mpv::with_initializer(|init| {
+        let mpv = Mpv::with_initializer(|init| {
             // Audio only: never spend bandwidth or decode time on video.
             init.set_property("vid", "no")?;
             init.set_property("audio-display", "no")?;
@@ -133,7 +134,14 @@ impl Player {
             }
             Ok(())
         })
-        .context("could not initialise libmpv")
+        .context("could not initialise libmpv")?;
+        // A stream that loads and then goes idle without a sound leaves nothing in our own log;
+        // mpv's error-level messages say why. libmpv2 does not wrap this call.
+        // SAFETY: `ctx` is the live handle `mpv` owns, and the level is a static C string.
+        unsafe {
+            libmpv2_sys::mpv_request_log_messages(mpv.ctx.as_ptr(), c"error".as_ptr());
+        }
+        Ok(mpv)
     }
 
     /// A handle safe to move into a background task, initialising libmpv on the first call.
@@ -163,6 +171,9 @@ impl Player {
     }
 
     pub fn state(&self) -> PlayerState {
+        if let Some(mpv) = &self.mpv {
+            drain_events(mpv);
+        }
         let Some(mpv) = &self.mpv else {
             // Nothing loaded — idle, so the queue-advance check behaves as it did before a
             // context was created eagerly.
@@ -222,6 +233,50 @@ impl Player {
             let _ = mpv.set_property("volume", self.volume);
         }
     }
+}
+
+/// Log mpv's error messages and empty its event queue, without waiting. Only the UI thread calls
+/// this, through [`Player::state`]: mpv allows one reader per handle, and nothing else reads it.
+fn drain_events(mpv: &Mpv) {
+    use libmpv2::events::Event;
+    let home = directories::BaseDirs::new()
+        .map(|dirs| dirs.home_dir().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    while let Some(event) = mpv.wait_event(0.0) {
+        match event {
+            Ok(Event::LogMessage { prefix, text, .. }) => {
+                tracing::warn!(source = prefix, "mpv: {}", redact(text.trim_end(), &home));
+            }
+            // A file that ended with an error comes back this way, as mpv's bare error code.
+            Err(libmpv2::Error::Raw(code)) => {
+                // SAFETY: mpv returns a static string for every code, known or not.
+                let reason =
+                    unsafe { std::ffi::CStr::from_ptr(libmpv2_sys::mpv_error_string(code)) };
+                tracing::warn!(reason = %reason.to_string_lossy(), "mpv: playback ended with an error");
+            }
+            Err(e) => tracing::warn!(error = %e, "mpv: playback ended with an error"),
+            Ok(_) => {}
+        }
+    }
+}
+
+/// An mpv message made fit for a log people paste into bug reports. A direct stream URL carries
+/// the listener's IP address and a signature in its query (`ip=`, `sig=`), and mpv prints the
+/// whole URL when it fails to open one, so every query is cut to `?…`; the home folder, which
+/// names the user, becomes `~`.
+fn redact(text: &str, home: &str) -> String {
+    let text = if home.len() > 1 {
+        text.replace(home, "~")
+    } else {
+        text.to_owned()
+    };
+    text.split(' ')
+        .map(|word| match word.split_once('?') {
+            Some((before, _)) => format!("{before}?…"),
+            None => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Put `LC_NUMERIC` back to "C" — see `Player::init` for why. Declared here rather than through
@@ -372,7 +427,39 @@ pub struct NowPlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::gain_db;
+    use super::{gain_db, redact};
+
+    /// The lines mpv really prints for a stream it cannot open and a missing local file: no IP,
+    /// no signature and no username may survive into the log.
+    #[test]
+    fn mpv_messages_lose_the_ip_signature_and_home_folder() {
+        let stream = redact(
+            "Failed to open https://rr1---sn-x.googlevideo.com/videoplayback?expire=1&ip=203.0.113.7&sig=SECRET.",
+            "/home/iv",
+        );
+        assert_eq!(
+            stream,
+            "Failed to open https://rr1---sn-x.googlevideo.com/videoplayback?…"
+        );
+        let hook = redact(
+            "ERROR: [generic] videoplayback?expire=1&ip=203.0.113: Unable to download webpage",
+            "/home/iv",
+        );
+        assert!(!hook.contains("203.0.113"), "{hook}");
+        let file = redact(
+            "Cannot open file '/home/iv/Music/song.flac': No such file or directory",
+            "/home/iv",
+        );
+        assert_eq!(
+            file,
+            "Cannot open file '~/Music/song.flac': No such file or directory"
+        );
+        // A message with nothing to hide comes through untouched.
+        assert_eq!(
+            redact("Failed to recognize file format.", "/home/iv"),
+            "Failed to recognize file format."
+        );
+    }
 
     /// Loudness normalisation must never mute a track or blow one out, whatever YouTube reports.
     #[test]

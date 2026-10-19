@@ -12,7 +12,9 @@ fn main() -> eframe::Result {
     // Before any other thread exists: how glibc treats freed memory (see `memory.rs`).
     refryt::memory::tune();
 
-    refryt::init_tracing("warn,refryt=info");
+    // The Discord crate's one warning is "Discord isn't running", repeated on every retry while
+    // Rich Presence is on: a third of a long log, saying nothing.
+    refryt::init_tracing("warn,refryt=info,discord_rich_presence=error");
     // Record a panic before the abort so the next launch can offer it.
     refryt::crash::install_hook();
 
