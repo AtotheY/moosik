@@ -21,7 +21,10 @@ use tracing::{debug, warn};
 
 #[cfg(feature = "native-resolver")]
 use crate::NativeResolver;
-use crate::{AudioStream, GuestResolver, StreamResolver, VideoId, YtDlpResolver, is_sign_in_gate};
+use crate::{
+    AudioStream, GuestResolver, StreamResolver, VideoId, YtDlpResolver, is_premium_gate,
+    is_sign_in_gate,
+};
 
 /// Consecutive failures before a resolver is skipped.
 const FAILURES_BEFORE_TRIP: u32 = 3;
@@ -31,12 +34,14 @@ const COOLDOWN: Duration = Duration::from_secs(600);
 /// Whether a failure is about this one video rather than the resolver: the next video has no
 /// reason to fail the same way, so the breaker does not count it.
 fn is_video_specific(error: &anyhow::Error) -> bool {
-    if is_sign_in_gate(error) {
+    if is_sign_in_gate(error) || is_premium_gate(error) {
         return true;
     }
     let text = format!("{error:#}");
     [
         "Video unavailable",
+        // The guest path's own words for the same thing.
+        "This video is not available",
         "Private video",
         "This video has been removed",
     ]
@@ -210,6 +215,11 @@ impl StreamResolver for ChainResolver {
                 }
                 Err(e) => {
                     warn!(resolver = name, error = format!("{e:#}"), "resolver failed");
+                    // The guest path is anonymous by design: once it hears Premium-only, yt-dlp
+                    // can skip its own anonymous attempt and go straight to the account.
+                    if is_premium_gate(&e) {
+                        self.ytdlp.note_premium(id);
+                    }
                     if !is_video_specific(&e) {
                         self.record_failure(name);
                     }
@@ -370,5 +380,71 @@ mod tests {
             chain.resolve(&id()).await.unwrap();
         }
         assert_eq!(gated.calls.load(Ordering::SeqCst), 10);
+    }
+
+    /// The guest path's "not available" is a removed or blocked song, not a broken resolver.
+    #[tokio::test]
+    async fn unavailable_songs_do_not_trip_the_breaker() {
+        let guest = std::sync::Arc::new(Stub::failing_with(
+            "guest",
+            "guest player for x: UNPLAYABLE: This video is not available",
+        ));
+        let good = std::sync::Arc::new(Stub::new("good", false));
+        let chain = ChainResolver::new(vec![Box::new(guest.clone()), Box::new(good)]);
+
+        for _ in 0..10 {
+            chain.resolve(&id()).await.unwrap();
+        }
+        assert_eq!(guest.calls.load(Ordering::SeqCst), 10);
+    }
+
+    /// Premium-only refusals are about the song, so ten of them leave the breaker closed.
+    #[tokio::test]
+    async fn premium_refusals_do_not_trip_the_breaker() {
+        let premium = std::sync::Arc::new(Stub::failing_with(
+            "premium",
+            "UNPLAYABLE: This video is only available to Music Premium members",
+        ));
+        let good = std::sync::Arc::new(Stub::new("good", false));
+        let chain = ChainResolver::new(vec![Box::new(premium.clone()), Box::new(good)]);
+
+        for _ in 0..10 {
+            chain.resolve(&id()).await.unwrap();
+        }
+        assert_eq!(premium.calls.load(Ordering::SeqCst), 10);
+    }
+
+    /// When the guest path hears Premium-only, yt-dlp goes straight to the signed-in run: the
+    /// anonymous one would only hear the same refusal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_premium_refusal_from_the_guest_skips_yt_dlps_anonymous_run() {
+        use crate::ytdlp::tests::{PREMIUM_ONLY, gated_stub, signed_in_session};
+
+        let dir = std::env::temp_dir().join(format!("refryt-chain-premium-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (program, log) = gated_stub(&dir, PREMIUM_ONLY);
+        let ytdlp = std::sync::Arc::new(
+            YtDlpResolver::new()
+                .with_program(program)
+                .with_session(signed_in_session()),
+        );
+        let guest = std::sync::Arc::new(Stub::failing_with(
+            "guest",
+            "guest player for x: UNPLAYABLE: This video is only available to Music Premium members",
+        ));
+        let chain = ChainResolver {
+            ytdlp: std::sync::Arc::clone(&ytdlp),
+            guest: None,
+            resolvers: vec![Box::new(guest), Box::new(ytdlp)],
+            breakers: Mutex::new(HashMap::new()),
+        };
+
+        let stream = chain.resolve(&id()).await.unwrap();
+
+        let runs = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(stream.resolved_by, "yt-dlp");
+        assert_eq!(runs.lines().collect::<Vec<_>>(), ["signed"]);
     }
 }

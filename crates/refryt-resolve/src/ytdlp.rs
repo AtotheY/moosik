@@ -93,6 +93,15 @@ pub fn is_sign_in_gate(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains("Sign in to confirm")
 }
 
+/// The words both YouTube's player and yt-dlp use for a song only Music Premium may play.
+const PREMIUM_REFUSAL: &str = "only available to Music Premium members";
+
+/// Whether YouTube refused one song for not being a Premium listener. Unlike the bot check this
+/// is about the song, not the address: a Premium account gets it, and the next song is unaffected.
+pub fn is_premium_gate(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains(PREMIUM_REFUSAL)
+}
+
 /// How long a sign-in refusal is believed: while it holds, resolves go straight to the signed-in
 /// run instead of paying for an anonymous one that would fail. When YouTube gates anonymous
 /// clients it gates all of them from that address, not one video.
@@ -144,6 +153,9 @@ pub struct YtDlpResolver {
     session: Option<SessionCookie>,
     /// Until when YouTube is taken to be refusing anonymous clients; see [`GATE_MEMORY`].
     gated_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Songs an earlier resolver already found Premium-only, each taken once by the next resolve:
+    /// asking anonymously again would only repeat the refusal, at the cost of a whole run.
+    premium_hint: std::sync::Mutex<std::collections::HashSet<VideoId>>,
 }
 
 impl YtDlpResolver {
@@ -155,7 +167,23 @@ impl YtDlpResolver {
             timeout: Duration::from_secs(30),
             session: None,
             gated_until: std::sync::Mutex::new(None),
+            premium_hint: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Note that YouTube refused `id` as Premium-only, so the next resolve of it goes straight to
+    /// the signed-in run, or fails at once when there is no session to run as.
+    pub fn note_premium(&self, id: &VideoId) {
+        if let Ok(mut hint) = self.premium_hint.lock() {
+            hint.insert(id.clone());
+        }
+    }
+
+    fn take_premium_hint(&self, id: &VideoId) -> bool {
+        self.premium_hint
+            .lock()
+            .map(|mut hint| hint.remove(id))
+            .unwrap_or(false)
     }
 
     /// Run yt-dlp as the signed-in account whenever there is one.
@@ -255,13 +283,25 @@ impl YtDlpResolver {
     /// Each yt-dlp run costs seconds, so a refusal is remembered for [`GATE_MEMORY`]: in that
     /// window the anonymous attempt is skipped, and after it the next resolve tries anonymously
     /// again, so Opus comes back by itself once YouTube relents.
+    ///
+    /// A Premium-only refusal also retries signed in, but is not remembered: it is about one
+    /// song, and the next one still starts anonymously.
     async fn run_gated(&self, id: &VideoId, format: &str) -> Result<YtDlpFormat> {
         let signed_in = |cookies: CookieFile| async move {
             self.run_json(id, &format!("{format}/best"), Some(&cookies))
                 .await
         };
+        let cookies = || self.session.as_ref().and_then(CookieFile::for_session);
+        if self.take_premium_hint(id) {
+            return match cookies() {
+                Some(cookies) => signed_in(cookies)
+                    .await
+                    .with_context(|| format!("retried signed in after: {PREMIUM_REFUSAL}")),
+                None => bail!("{id} is {PREMIUM_REFUSAL}, and there is no session to run as"),
+            };
+        }
         if self.gated()
-            && let Some(cookies) = self.session.as_ref().and_then(CookieFile::for_session)
+            && let Some(cookies) = cookies()
         {
             return signed_in(cookies).await;
         }
@@ -269,13 +309,16 @@ impl YtDlpResolver {
         let Err(refusal) = &anonymous else {
             return anonymous;
         };
-        if !is_sign_in_gate(refusal) {
+        let premium = is_premium_gate(refusal);
+        if !premium && !is_sign_in_gate(refusal) {
             return anonymous;
         }
-        let Some(cookies) = self.session.as_ref().and_then(CookieFile::for_session) else {
+        let Some(cookies) = cookies() else {
             return anonymous;
         };
-        self.remember_gate();
+        if !premium {
+            self.remember_gate();
+        }
         signed_in(cookies)
             .await
             .with_context(|| format!("retried signed in after: {refusal:#}"))
@@ -448,7 +491,7 @@ impl VideoResolver for YtDlpResolver {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The bot check and the age gate retry signed in; anything else (a removed video, a
@@ -463,6 +506,20 @@ mod tests {
         assert!(is_sign_in_gate(&bot));
         assert!(is_sign_in_gate(&age));
         assert!(!is_sign_in_gate(&gone));
+    }
+
+    /// The Premium refusal is its own kind: it retries signed in, but is not the bot check.
+    #[test]
+    fn a_premium_refusal_is_not_a_sign_in_gate() {
+        let premium = anyhow!(
+            "yt-dlp failed for x: ERROR: [youtube] x: This video is only available to Music Premium members"
+        );
+        let guest = anyhow!(
+            "guest player for x: UNPLAYABLE: This video is only available to Music Premium members"
+        );
+        assert!(is_premium_gate(&premium));
+        assert!(is_premium_gate(&guest));
+        assert!(!is_sign_in_gate(&premium));
     }
 
     /// Each pair becomes one `.youtube.com` line; stray separators and empty names are
@@ -592,10 +649,14 @@ mod tests {
         assert!(video_stream_from(&parsed, &id()).is_err());
     }
 
-    /// A stub yt-dlp that refuses anonymous runs with YouTube's bot check and answers signed-in
-    /// ones, recording every run in `log`.
+    const BOT_CHECK: &str = "ERROR: [youtube] x: Sign in to confirm you are not a bot.";
+    pub(crate) const PREMIUM_ONLY: &str =
+        "ERROR: [youtube] x: This video is only available to Music Premium members";
+
+    /// A stub yt-dlp that refuses anonymous runs with `refusal` and answers signed-in ones,
+    /// recording every run in `log`.
     #[cfg(unix)]
-    fn gated_stub(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+    pub(crate) fn gated_stub(dir: &std::path::Path, refusal: &str) -> (String, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let log = dir.join("runs");
         let script = dir.join("yt-dlp");
@@ -607,7 +668,7 @@ mod tests {
                  *--cookies*) echo signed >> '{log}'; \
                  echo '{{\"url\":\"https://example.com/a\",\"acodec\":\"mp4a.40.2\",\"format_id\":\"18\"}}' ;;\n\
                  *) echo anonymous >> '{log}'; \
-                 echo 'ERROR: [youtube] x: Sign in to confirm you are not a bot.' >&2; exit 1 ;;\n\
+                 echo '{refusal}' >&2; exit 1 ;;\n\
                  esac\n",
                 log = log.display()
             ),
@@ -623,12 +684,10 @@ mod tests {
     async fn a_refusal_is_remembered_so_the_next_track_runs_yt_dlp_once() {
         let dir = std::env::temp_dir().join(format!("refryt-gate-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (program, log) = gated_stub(&dir);
-        let session: SessionCookie =
-            std::sync::Arc::new(std::sync::RwLock::new(Some("SID=abc".to_owned())));
+        let (program, log) = gated_stub(&dir, BOT_CHECK);
         let resolver = YtDlpResolver::new()
             .with_program(program)
-            .with_session(session);
+            .with_session(signed_in_session());
 
         let first = resolver
             .resolve(&VideoId::new("dQw4w9WgXcQ").unwrap())
@@ -645,5 +704,54 @@ mod tests {
             runs.lines().collect::<Vec<_>>(),
             ["anonymous", "signed", "signed"]
         );
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn signed_in_session() -> SessionCookie {
+        std::sync::Arc::new(std::sync::RwLock::new(Some("SID=abc".to_owned())))
+    }
+
+    /// A Premium-only song retries as the account, but the next song still starts anonymously:
+    /// the refusal was about that one song.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_premium_refusal_retries_signed_in_but_is_not_remembered() {
+        let dir = std::env::temp_dir().join(format!("refryt-premium-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (program, log) = gated_stub(&dir, PREMIUM_ONLY);
+        let resolver = YtDlpResolver::new()
+            .with_program(program)
+            .with_session(signed_in_session());
+
+        for id in ["dQw4w9WgXcQ", "TiebZllW8As"] {
+            let stream = resolver.resolve(&VideoId::new(id).unwrap()).await;
+            assert_eq!(stream.unwrap().itag, 18);
+        }
+
+        let runs = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            runs.lines().collect::<Vec<_>>(),
+            ["anonymous", "signed", "anonymous", "signed"]
+        );
+    }
+
+    /// Signed out, a song already known to be Premium-only fails without running yt-dlp at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_premium_hint_without_a_session_fails_without_a_run() {
+        let dir = std::env::temp_dir().join(format!("refryt-hint-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (program, log) = gated_stub(&dir, PREMIUM_ONLY);
+        let resolver = YtDlpResolver::new().with_program(program);
+        let id = VideoId::new("dQw4w9WgXcQ").unwrap();
+
+        resolver.note_premium(&id);
+        let error = resolver.resolve(&id).await.unwrap_err();
+
+        let ran = log.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(is_premium_gate(&error));
+        assert!(!ran);
     }
 }

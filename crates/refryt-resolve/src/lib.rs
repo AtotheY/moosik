@@ -26,7 +26,8 @@ pub use guest::{GUEST_USER_AGENT, GuestQuality, GuestResolver};
 pub use native::{NativeConfig, NativeResolver};
 pub use proxy::{Refresh, StreamProxy};
 pub use ytdlp::{
-    CookieFile, SessionCookie, VIDEO_FORMAT, YtDlpResolver, is_sign_in_gate, ytdlp_permit,
+    CookieFile, SessionCookie, VIDEO_FORMAT, YtDlpResolver, is_premium_gate, is_sign_in_gate,
+    ytdlp_permit,
 };
 
 /// Audio codec of a resolved stream.
