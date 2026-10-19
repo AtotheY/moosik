@@ -198,6 +198,14 @@ impl Player {
         self.set_paused(!self.state().paused);
     }
 
+    /// Unload whatever is playing. mpv keeps the outgoing file until the next one loads, so a
+    /// track that never loads would otherwise leave the previous song playing under it.
+    pub fn stop(&self) {
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.command("stop", &[]);
+        }
+    }
+
     pub fn seek(&self, seconds: f64) {
         if let Some(mpv) = &self.mpv {
             let _ = mpv.command("seek", &[&format!("{seconds:.3}"), "absolute"]);

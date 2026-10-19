@@ -5534,6 +5534,12 @@ impl App {
                         self.video_open = false;
                         self.toast("Video failed — playing the song instead");
                         self.reload_current();
+                    } else if let Some(player) = &self.player {
+                        // The song before this one is still loaded and would play on under the
+                        // error, with play/pause now aimed at the failed track instead of it.
+                        // Not on the video path: `reload_current` reads the position from what
+                        // is still playing, to carry on from there.
+                        player.stop();
                     }
                 }
                 Event::PlaybackFailed { .. } => {}
