@@ -40,6 +40,7 @@ pub mod persist;
 pub mod playback;
 pub mod player;
 pub mod queue;
+pub mod search_history;
 pub mod settings;
 pub mod stats;
 pub mod theme;

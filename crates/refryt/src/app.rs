@@ -1329,6 +1329,11 @@ pub struct App {
     /// state the list opens in — means nothing is highlighted and Enter searches exactly what
     /// was typed, so the first Down reaches the *first* suggestion rather than skipping it.
     pub(crate) suggestion_cursor: Option<usize>,
+    /// What was searched before, offered by the search box while it is focused and empty.
+    pub(crate) search_history: crate::search_history::SearchHistory,
+    /// Escape closed the recent-searches list. Without this it would reopen on the next frame,
+    /// the box still being focused and empty; typing or refocusing clears it.
+    pub(crate) recent_dismissed: bool,
     /// A search waiting for `poll_search` to fire it. Search is submit-driven — Enter, a chosen
     /// suggestion, or the `--search` CLI — never a keystroke.
     pending_search: bool,
@@ -1915,6 +1920,8 @@ impl App {
             suggestions: Vec::new(),
             suggestions_for: None,
             suggestion_cursor: None,
+            search_history: crate::search_history::load(),
+            recent_dismissed: false,
             pending_search: search.is_some(),
             searched: String::new(),
             searching: false,
@@ -3143,6 +3150,13 @@ impl App {
         }
         if matches!(self.current_route(), Route::Home) {
             self.refresh_home_if_stale();
+            // Home is a fresh start: the last search's text would read as still in play.
+            self.query.clear();
+            self.clear_suggestions();
+        }
+        // Back or forward onto the results puts their words back in the box Home emptied.
+        if matches!(self.current_route(), Route::Search) && self.query.is_empty() {
+            self.query = self.searched.clone();
         }
         if matches!(self.current_route(), Route::History) {
             self.history_error = None;
@@ -4257,6 +4271,11 @@ impl App {
     /// `--search` CLI — never mid-keystroke. This is what keeps a network round trip from firing
     /// for every character and what lets the listener finish typing before the page moves.
     pub(crate) fn submit_search(&mut self) {
+        // Enter on a blank box is not a search. Going to the Search page anyway showed the last
+        // results, as if that search had been asked for again.
+        if self.query.trim().is_empty() {
+            return;
+        }
         if !matches!(self.current_route(), Route::Search) {
             self.navigate(Route::Search);
         }
@@ -4264,6 +4283,14 @@ impl App {
         // immediately re-open its suggestion list for the query that was just submitted.
         self.suggestions_for = Some(self.query.trim().to_owned());
         self.pending_search = true;
+    }
+
+    /// Write the recent searches out. A failure only costs the list on the next launch, so it is
+    /// logged and never stops a search.
+    pub(crate) fn save_search_history(&self) {
+        if let Err(e) = crate::search_history::save(&self.search_history) {
+            tracing::warn!(error = %format!("{e:#}"), "could not save the search history");
+        }
     }
 
     /// Drop the autocomplete list and its cursor state.
@@ -4280,7 +4307,13 @@ impl App {
             return;
         }
         let query = self.query.trim().to_owned();
-        if query.is_empty() || query == self.searched {
+        if query.is_empty() {
+            return;
+        }
+        // Before the repeat check below: searching the same thing again still moves it up.
+        self.search_history.record(&query);
+        self.save_search_history();
+        if query == self.searched {
             return;
         }
 
