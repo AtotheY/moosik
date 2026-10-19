@@ -79,6 +79,15 @@ From a source checkout, `./scripts/appimage-install.sh install` copies the AppIm
 
 mpv and yt-dlp are included. Inside the sandbox the browser import and the Launch on startup setting are hidden, because neither can work there.
 
+### Linux, Arch Linux (AUR)
+
+An unofficial [AUR package](https://aur.archlinux.org/packages/refryt-bin), `refryt-bin`, repacks the AppImage above with a launcher entry and icons:
+
+1. Install it with an AUR helper, for example `yay -S refryt-bin` or `paru -S refryt-bin`.
+2. Start it from the application launcher, or with `refryt`.
+
+It depends on the system `webkit2gtk-4.1` (for the in-app sign-in window) and `yt-dlp`, and tracks upstream releases.
+
 ### Windows
 
 1. Download `refryt-<version>-windows-x86_64-setup.exe` and run it. It installs to Program Files, adds a Start menu entry and registers an uninstaller. The installer is unsigned, so SmartScreen warns on the first run.
