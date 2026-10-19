@@ -178,7 +178,7 @@ The project is before 1.0 and changes quickly.
 
 Podcasts are not supported. YouTube changes its internal API without notice, and a change can break playback or a page until a fix is released, usually within a few days.
 
-Bugs go to the [issue tracker](https://github.com/gridoe/refryt/issues). The log in the config folder usually shows what went wrong.
+Bugs go to the [issue tracker](https://github.com/gridoe/refryt/issues). The log in the config folder usually shows what went wrong; [CONTRIBUTING.md](CONTRIBUTING.md) lists what to include, and how to send a fix.
 
 ## Build from source
 

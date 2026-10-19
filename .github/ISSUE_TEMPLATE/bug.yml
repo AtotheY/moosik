@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as it should.
+labels: [bug]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - Linux AppImage
+        - Linux Flatpak
+        - Arch Linux AUR (refryt-bin)
+        - Windows setup (.exe)
+        - Windows MSI
+        - Windows zip
+        - Windows ARM64 (MSI or zip)
+        - macOS DMG
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in Settings, for example 0.1.10.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: For example "Fedora 43, KDE Plasma, Wayland" or "Windows 11 24H2".
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What happened, what was expected, and the steps to get there.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        The end of `refryt.log` from the config folder:
+        Linux `~/.config/refryt`, Flatpak `~/.var/app/io.github.gridoe.refryt/config/refryt`,
+        macOS `~/Library/Application Support/refryt`, Windows `%APPDATA%\refryt\config`.
+      render: shell
+  - type: checkboxes
+    id: private
+    attributes:
+      label: Before posting
+      options:
+        - label: I looked over the log and removed anything private. I did not attach `browser.json` or `oauth.json`.
+          required: true

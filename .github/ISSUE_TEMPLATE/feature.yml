@@ -1,0 +1,16 @@
+name: Feature request
+description: An idea for something new or different.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What it would do, and what it is for.
+    validations:
+      required: true
+  - type: textarea
+    id: now
+    attributes:
+      label: How it works now
+      description: What happens today instead, or how it is done in YouTube Music or another app.
