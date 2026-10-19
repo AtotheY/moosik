@@ -5,7 +5,7 @@
 //! played shows up as a shelf item here too, and History reads better as one consistent list of
 //! rows than as a row/card mix that changes shape by what happened to be played that day.
 
-use crate::app::{App, Route};
+use crate::app::App;
 use crate::auth::AuthState;
 use crate::theme;
 use crate::ui::{centered, entry_rows, failed, section};
@@ -43,7 +43,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.add_space(12.0);
             if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
-                app.navigate(Route::Settings);
+                app.sign_in();
             }
         }
     }

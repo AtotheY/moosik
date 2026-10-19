@@ -4380,6 +4380,20 @@ impl App {
         self.backend.search_scoped(self.searched.clone(), scope);
     }
 
+    /// Open the sign-in window: what every Sign in button outside Settings does. The prompts on
+    /// Home, Library and History used to only go to Settings, where a second Sign in opened it.
+    /// Elsewhere there is no window, and Settings' browser import is the way in.
+    pub(crate) fn sign_in(&mut self) {
+        // Deliberately not `auth = Checking`: that state means "verifying a stored session at
+        // startup", which is what tells `AuthChanged` whether the loaded home feed was already
+        // personalised or is the anonymous one this sign-in just invalidated. Same reason as the
+        // Settings buttons.
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+        self.backend.sign_in_from_window();
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        self.navigate(Route::Settings);
+    }
+
     /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
     /// failure, or YouTube's "Did you mean" spelling.
     pub(crate) fn search_again(&mut self, query: String) {

@@ -789,18 +789,7 @@ fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response, signed_in: bo
         }
     });
     match choice {
-        Some(Choice::LogIn) => {
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            {
-                // Deliberately not `auth = Checking`: that state means "verifying a stored
-                // session at startup", which is what tells `AuthChanged` whether the loaded home
-                // feed was already personalised or is the anonymous one this sign-in just
-                // invalidated. Same reason as the Settings buttons.
-                app.backend.sign_in_from_window();
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-            app.navigate(Route::Settings);
-        }
+        Some(Choice::LogIn) => app.sign_in(),
         Some(Choice::Profile(id)) => app.navigate(Route::Artist(id)),
         Some(Choice::Switch(page_id)) => {
             let ctx = ui.ctx().clone();

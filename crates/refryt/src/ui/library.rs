@@ -82,7 +82,7 @@ fn prompt(app: &mut App, ui: &mut egui::Ui) {
     );
     ui.add_space(12.0);
     if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
-        app.navigate(Route::Settings);
+        app.sign_in();
     }
 }
 

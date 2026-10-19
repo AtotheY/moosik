@@ -591,6 +591,8 @@ pub fn install(ctx: &egui::Context) {
 
 /// Push a palette into egui's own style, so built-in widgets agree with our custom ones.
 pub fn apply(ctx: &egui::Context, palette: &Palette) {
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    crate::webview_login::set_dark(palette.dark);
     let mut style = (*ctx.global_style()).clone();
 
     style.visuals = if palette.dark {

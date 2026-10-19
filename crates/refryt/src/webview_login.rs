@@ -87,6 +87,22 @@ const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=yout
 /// store's contents without a network round trip, and a poll only ever runs while the window is.
 const POLL: Duration = Duration::from_secs(1);
 
+/// Set in the child's environment when the app's own theme is dark; see [`set_dark`].
+#[cfg(target_os = "linux")]
+const DARK_ENV: &str = "REFRYT_SIGN_IN_DARK";
+
+/// Whether the app's theme is dark, kept current by [`crate::theme::apply`].
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Record the app's polarity, so the sign-in window opens in the same one.
+///
+/// On Linux WebKitGTK follows GTK's dark preference for the page's `prefers-color-scheme`, and a
+/// Flatpak's GTK cannot see the desktop's own setting, so the page came up light there while it
+/// was dark from the AppImage. Following the app instead makes both agree with what is on screen.
+pub fn set_dark(dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Open the sign-in window and return the session it captures.
 ///
 /// Runs the window as a child of this same binary — see the module doc for why it cannot be a
@@ -141,6 +157,9 @@ pub async fn capture() -> Result<String> {
         {
             command.env("__NV_DISABLE_EXPLICIT_SYNC", "1");
         }
+        if DARK.load(std::sync::atomic::Ordering::Relaxed) {
+            command.env(DARK_ENV, "1");
+        }
     }
 
     let output = command
@@ -158,14 +177,24 @@ pub async fn capture() -> Result<String> {
         return Ok(cookie);
     }
 
-    // The child's stderr is its explanation — the last line it printed, which is the specific
-    // reason rather than a protocol trace.
+    // A crash leaves no reason of ours behind, only whatever GTK or WebKit last warned about
+    // ("Can't connect to a11y bus" and the like), which would read as the cause.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if output.status.signal().is_some() {
+            bail!("the sign-in window crashed. Try again");
+        }
+    }
+    // Otherwise the child's stderr is its explanation — the last line it printed, which is the
+    // specific reason rather than a protocol trace. Library warnings (GLib's `** (…): WARNING **`
+    // form) are skipped for the same reason as above.
     let stderr = String::from_utf8_lossy(&output.stderr);
     let why = stderr
         .lines()
         .rev()
-        .find(|line| !line.trim().is_empty())
         .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("** ("))
         .unwrap_or_default();
     if why.is_empty() {
         bail!("the sign-in window exited unexpectedly ({})", output.status);
@@ -320,6 +349,11 @@ fn run_window() -> Result<String> {
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
 
     gtk::init().context("could not start GTK")?;
+    if std::env::var_os(DARK_ENV).is_some()
+        && let Some(settings) = gtk::Settings::default()
+    {
+        settings.set_gtk_application_prefer_dark_theme(true);
+    }
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_title("Sign in to YouTube Music");
     window.set_default_size(560, 780);

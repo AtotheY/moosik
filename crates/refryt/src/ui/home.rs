@@ -265,7 +265,7 @@ fn sign_in_note(app: &mut App, ui: &mut egui::Ui) {
     });
     ui.add_space(6.0);
     if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
-        app.navigate(Route::Settings);
+        app.sign_in();
     }
     ui.add_space(4.0);
 }
