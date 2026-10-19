@@ -754,6 +754,12 @@ pub fn shelf_expansion(items: Vec<Entry>, preview: &[Entry]) -> Vec<Entry> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchResults {
     pub items: Vec<Entry>,
+    /// YouTube answered "No results for …" itself: an empty list that is the real answer, not a
+    /// parse that found nothing.
+    pub no_results: bool,
+    /// The spelling YouTube offers ("Did you mean: …"), with an empty answer or with a few loose
+    /// matches for text it could not place.
+    pub did_you_mean: Option<String>,
 }
 
 impl SearchResults {
@@ -1516,6 +1522,7 @@ mod tests {
     fn playing_a_row_maps_past_the_unplayable_ones() {
         let r = SearchResults {
             items: vec![artist("a"), song("s1"), artist("b"), song("s2")],
+            ..Default::default()
         };
         assert_eq!(r.playable().len(), 2);
         assert_eq!(r.playable_index(1), Some(0));

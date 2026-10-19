@@ -27,6 +27,7 @@ use ytmapi_rs::parse::{
 use ytmapi_rs::query::AddHistoryItemQuery;
 use ytmapi_rs::query::SearchQuery;
 use ytmapi_rs::query::search::BasicSearch;
+use ytmapi_rs::query::search::{AlbumsFilter, FilteredSearch, FilteredSearchType};
 use ytmapi_rs::query::song::GetSongTrackingUrlQuery;
 use ytmapi_rs::query::{GetArtistAlbumsQuery, GetArtistQuery};
 
@@ -456,7 +457,10 @@ impl Api {
                         std::fs::write(path, serde_json::to_vec_pretty(&json).unwrap_or_default());
                 }
                 let results = innertube::parse_search(&json);
-                if !results.is_empty() {
+                // An empty answer YouTube gave in words is the answer. The filtered queries
+                // would go and find something anyway: for gibberish, songs from the account's
+                // own history.
+                if !results.is_empty() || results.no_results {
                     return Ok(results);
                 }
                 tracing::warn!(%query, "ranked search parsed to nothing; using filtered queries");
@@ -541,11 +545,32 @@ impl Api {
                     ClientRef::NoAuth(yt) => yt.search_albums(query).await,
                     ClientRef::Browser(yt) => yt.search_albums(query).await,
                 }
-                .with_context(|| format!("album search failed for {query:?}"))?;
-                Ok(albums
-                    .into_iter()
-                    .map(|a| model::Entry::Album(map_album_ref(a)))
-                    .collect())
+                .with_context(|| format!("album search failed for {query:?}"));
+                match albums {
+                    Ok(albums) => Ok(albums
+                        .into_iter()
+                        .map(|a| model::Entry::Album(map_album_ref(a)))
+                        .collect()),
+                    // `ytmapi-rs` wants every row to read "Album • Artist • Year", and one row
+                    // that does not fails the whole list. Our own row parser takes what it can
+                    // read and skips the rest.
+                    Err(e) => {
+                        tracing::warn!(error = %format!("{e:#}"), "album search: reading the raw reply instead");
+                        let json = match &client {
+                            ClientRef::NoAuth(yt) => {
+                                run_filtered_json::<_, AlbumsFilter>(yt, query).await
+                            }
+                            ClientRef::Browser(yt) => {
+                                run_filtered_json::<_, AlbumsFilter>(yt, query).await
+                            }
+                        }?;
+                        Ok(innertube::parse_search(&json)
+                            .items
+                            .into_iter()
+                            .filter(|e| matches!(e, model::Entry::Album(_)))
+                            .collect())
+                    }
+                }
             }
             model::SearchScope::Playlists => {
                 let playlists = match &client {
@@ -583,20 +608,29 @@ impl Api {
                 )
             }
         };
+        // One kind failing to parse costs that kind, not the search: `ytmapi-rs` rejects a whole
+        // album list over one row it cannot read. Only all three failing is an error.
+        if let (Err(e), Err(_), Err(_)) = (&songs, &artists, &albums) {
+            return Err(anyhow::anyhow!("{e}"))
+                .with_context(|| format!("search failed for {query:?}"));
+        }
+        fn or_empty<T>(kind: &str, r: ytmapi_rs::Result<Vec<T>>) -> Vec<T> {
+            r.unwrap_or_else(|e| {
+                tracing::warn!(kind, error = %e, "filtered search: one kind failed; showing the rest");
+                Vec::new()
+            })
+        }
         // Interleaved rather than concatenated: without YouTube's ranking, leading with twenty
         // songs would bury the artist you were probably looking for.
-        let songs: Vec<_> = songs
-            .with_context(|| format!("song search failed for {query:?}"))?
+        let songs: Vec<_> = or_empty("songs", songs)
             .into_iter()
             .map(|s| model::Entry::Song(map_song(s)))
             .collect();
-        let artists: Vec<_> = artists
-            .with_context(|| format!("artist search failed for {query:?}"))?
+        let artists: Vec<_> = or_empty("artists", artists)
             .into_iter()
             .map(|a| model::Entry::Artist(map_artist_ref(a)))
             .collect();
-        let albums: Vec<_> = albums
-            .with_context(|| format!("album search failed for {query:?}"))?
+        let albums: Vec<_> = or_empty("albums", albums)
             .into_iter()
             .map(|a| model::Entry::Album(map_album_ref(a)))
             .collect();
@@ -606,7 +640,10 @@ impl Api {
         items.extend(albums.into_iter().take(1));
         let mut rest: Vec<model::Entry> = songs;
         items.append(&mut rest);
-        Ok(model::SearchResults { items })
+        Ok(model::SearchResults {
+            items,
+            ..Default::default()
+        })
     }
 
     /// An artist page, parsed by us so the per-song covers survive.
@@ -2431,6 +2468,21 @@ fn note_write_failure(op: &str, id: &str, error: &(dyn std::error::Error + 'stat
 /// The raw JSON for a search, so [`crate::innertube`] can read the shape `ytmapi-rs` cannot.
 async fn run_search_json<A: AuthToken>(yt: &YtMusic<A>, query: &str) -> Result<serde_json::Value> {
     let sq: SearchQuery<'_, BasicSearch> = query.into();
+    yt.json_query(sq)
+        .await
+        .map(ytmapi_rs::json::Json::into_inner)
+        .with_context(|| format!("search failed for {query:?}"))
+}
+
+/// The raw JSON for a search under one of the result filters (Albums, Songs, …), for when the
+/// typed parse of that filter fails.
+async fn run_filtered_json<A, F>(yt: &YtMusic<A>, query: &str) -> Result<serde_json::Value>
+where
+    A: AuthToken,
+    F: FilteredSearchType,
+    for<'a> SearchQuery<'a, FilteredSearch<F>>: ytmapi_rs::query::Query<A> + From<&'a str>,
+{
+    let sq: SearchQuery<'_, FilteredSearch<F>> = query.into();
     yt.json_query(sq)
         .await
         .map(ytmapi_rs::json::Json::into_inner)

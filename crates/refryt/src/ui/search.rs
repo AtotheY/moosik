@@ -27,8 +27,22 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     };
     crate::ui::page_title(ui, &app.palette, &heading);
 
-    if let Some(status) = &app.status {
-        centered(app, ui, status);
+    if let Some(status) = app.status.clone() {
+        if app.search_failed {
+            // The raw chain is in the log; the page says it plainly, and no connection reads
+            // as the offline page.
+            let message = if crate::api::looks_offline(&status) {
+                status
+            } else {
+                "Couldn't search right now.".to_owned()
+            };
+            crate::ui::failed(app, ui, message, |app| {
+                let query = app.searched.clone();
+                app.search_again(query);
+            });
+        } else {
+            no_results(app, ui, &status);
+        }
         return;
     }
     if app.results.is_empty() {
@@ -44,6 +58,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     }
 
     scope_chips(app, ui, true);
+    if app.search_scope == SearchScope::All {
+        did_you_mean(app, ui);
+    }
 
     if app.search_scope == SearchScope::All {
         if !app
@@ -59,7 +76,17 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         widgets::skeleton_rows(ui, &app.palette, 12);
         return;
     } else if let Some(error) = app.scoped_error.clone() {
-        centered(app, ui, &error);
+        // The raw chain (a JSON path into YouTube's reply) is for the log, not the page; the
+        // offline check still gets it, so no connection reads as the offline page.
+        let message = if crate::api::looks_offline(&error) {
+            error
+        } else {
+            format!(
+                "Couldn't load {} for this search.",
+                app.search_scope.label().to_lowercase()
+            )
+        };
+        crate::ui::failed(app, ui, message, App::retry_scoped_search);
         return;
     } else if app.scoped_results.is_empty() {
         centered(app, ui, "Nothing of that kind found.");
@@ -69,6 +96,76 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "search").show(ui, |ui| {
         results_list(app, ui);
     });
+}
+
+/// YouTube's empty answer, in its own words, with its "Did you mean" spelling under it.
+fn no_results(app: &mut App, ui: &mut egui::Ui, message: &str) {
+    ui.add_space((ui.available_height() * 0.3).max(24.0));
+    ui.vertical_centered(|ui| {
+        ui.set_max_width(ui.available_width().min(460.0));
+        ui.label(
+            egui::RichText::new(message)
+                .font(crate::theme::regular(13.0))
+                .color(app.palette.dim),
+        );
+        if app.results.did_you_mean.is_some() {
+            ui.add_space(8.0);
+            // A horizontal row does not centre itself, so it is placed by last frame's width.
+            let id = ui.id().with("did-you-mean-width");
+            let width: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                let start = ui.cursor().min.x;
+                let end = did_you_mean_line(app, ui);
+                ui.ctx().data_mut(|d| d.insert_temp(id, end - start));
+            });
+        }
+    });
+}
+
+/// "Did you mean: …" above results YouTube matched loosely.
+fn did_you_mean(app: &mut App, ui: &mut egui::Ui) {
+    if app.results.did_you_mean.is_none() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        did_you_mean_line(app, ui);
+    });
+    ui.add_space(6.0);
+}
+
+/// The line itself, its suggestion a link that searches it. Returns where the line ends.
+fn did_you_mean_line(app: &mut App, ui: &mut egui::Ui) -> f32 {
+    let Some(suggestion) = app.results.did_you_mean.clone() else {
+        return ui.cursor().min.x;
+    };
+    let p = app.palette;
+    ui.spacing_mut().item_spacing.x = 4.0;
+    ui.label(
+        egui::RichText::new("Did you mean:")
+            .font(crate::theme::regular(13.0))
+            .color(p.secondary),
+    );
+    let link = ui.add(
+        egui::Label::new(
+            egui::RichText::new(&suggestion)
+                .font(crate::theme::bold(13.0))
+                .color(p.text),
+        )
+        .sense(egui::Sense::click()),
+    );
+    if link.hovered() {
+        ui.painter().hline(
+            link.rect.x_range(),
+            link.rect.bottom() - 1.0,
+            egui::Stroke::new(1.0, p.text),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if link.clicked() {
+        app.search_again(suggestion);
+    }
+    link.rect.right()
 }
 
 /// Picks which tier of the page renders: `All` narrows the same ranked list down to one kind

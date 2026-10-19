@@ -1384,6 +1384,8 @@ pub struct App {
     pub(crate) scoped_results: Vec<Entry>,
     pub(crate) scoped_loading: bool,
     pub(crate) scoped_error: Option<String>,
+    /// `status` holds a failed search's error chain rather than a message for the page.
+    pub(crate) search_failed: bool,
     scoped_for: Option<(String, SearchScope)>,
     /// Cache for `ui::search`'s `All`-scope filtered index list: the `results_generation` it was
     /// computed for, and the indices themselves. Recomputed only when the generation moves on.
@@ -1943,6 +1945,7 @@ impl App {
             scoped_results: Vec::new(),
             scoped_loading: false,
             scoped_error: None,
+            search_failed: false,
             scoped_for: None,
             search_all_indices: None,
             artist: None,
@@ -3843,8 +3846,7 @@ impl App {
         match self.current_route() {
             Route::Search => {
                 if self.status.is_some() && !self.searched.is_empty() {
-                    self.query = self.searched.clone();
-                    self.submit_search();
+                    self.search_again(self.searched.clone());
                 }
             }
             _ => self.retry_route(),
@@ -4378,6 +4380,21 @@ impl App {
         self.backend.search_scoped(self.searched.clone(), scope);
     }
 
+    /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
+    /// failure, or YouTube's "Did you mean" spelling.
+    pub(crate) fn search_again(&mut self, query: String) {
+        self.searched.clear();
+        self.query = query;
+        self.submit_search();
+    }
+
+    /// Try again after a failed per-category fetch: the failed pair still counts as done, so it
+    /// is forgotten first.
+    pub(crate) fn retry_scoped_search(&mut self) {
+        self.scoped_for = None;
+        self.fetch_scoped_search(self.search_scope);
+    }
+
     fn handle_events(&mut self, ctx: &egui::Context) {
         // Mouse side buttons walk the history, like a browser — on press, not on click.
         // A click needs a clean press/release cycle and egui tracks one shared press
@@ -4420,7 +4437,10 @@ impl App {
                 // replace fresher results.
                 Event::SearchDone { query, results } if query == self.searched => {
                     self.searching = false;
-                    self.status = results.is_empty().then(|| "No results".to_owned());
+                    self.search_failed = false;
+                    self.status = results
+                        .is_empty()
+                        .then(|| format!("No results for “{query}”."));
                     self.results = results;
                     self.results_generation += 1;
                     let playable = self.results.playable();
@@ -4430,7 +4450,9 @@ impl App {
                     }
                 }
                 Event::SearchFailed { query, error } if query == self.searched => {
+                    tracing::warn!(error = %error, "search failed");
                     self.searching = false;
+                    self.search_failed = true;
                     self.status = Some(error);
                 }
                 Event::SearchDone { .. } | Event::SearchFailed { .. } => {}
@@ -4459,6 +4481,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|(q, s)| q == &query && *s == scope) =>
                 {
+                    tracing::warn!(scope = scope.label(), error = %error, "scoped search failed");
                     self.scoped_loading = false;
                     self.scoped_error = Some(error);
                 }

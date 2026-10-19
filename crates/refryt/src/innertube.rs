@@ -466,6 +466,20 @@ fn plain_tail(segs: &[Segment]) -> String {
     }
 }
 
+/// An album row's artist when no field links to one: the plain fields after the type word,
+/// minus the year. `"Album • Various Artists • 2018"` is `"Various Artists"`, and
+/// `"Album • 2011"`, a row that credits nobody, is empty rather than `"2011"`.
+fn plain_album_artist(segs: &[Segment]) -> String {
+    let year = year_segment(segs);
+    segs.iter()
+        .filter(|s| s.target.is_none())
+        .skip(1)
+        .filter(|s| Some(&s.text) != year.as_ref())
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" • ")
+}
+
 /// Whether a playlist card's own menu offers to edit it — which is what makes it a playlist
 /// you can add songs to.
 ///
@@ -835,11 +849,32 @@ pub fn parse_search(root: &Value) -> SearchResults {
 
     let mut items = Vec::new();
     let mut card = None;
+    let mut no_results = false;
+    let mut did_you_mean = None;
 
     for section in sections.into_iter().flatten() {
         if let Some(shelf) = section.get("musicCardShelfRenderer") {
             card = parse_search_card(shelf);
             continue;
+        }
+        // An empty answer comes as a message ("No results for …"), sometimes after a
+        // "Did you mean: …" carrying the corrected query.
+        for item in section
+            .pointer("/itemSectionRenderer/contents")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if item.get("messageRenderer").is_some() {
+                no_results = true;
+            }
+            if let Some(q) = item
+                .pointer("/didYouMeanRenderer/correctedQueryEndpoint/searchEndpoint/query")
+                .and_then(Value::as_str)
+                .filter(|q| !q.trim().is_empty())
+            {
+                did_you_mean = Some(q.to_owned());
+            }
         }
         let rows = section
             .pointer("/itemSectionRenderer/contents")
@@ -868,7 +903,13 @@ pub fn parse_search(root: &Value) -> SearchResults {
         }
     }
 
-    SearchResults { items }
+    // A message beside real rows is not an empty answer.
+    let no_results = no_results && items.is_empty();
+    SearchResults {
+        did_you_mean,
+        items,
+        no_results,
+    }
 }
 
 /// The identity search results are deduplicated by — video id for a song/video, browse id for
@@ -955,7 +996,7 @@ fn parse_search_row(row: &Value) -> Option<Entry> {
             id,
             title,
             // The album's artist is a linked field; the year is the bare four digits.
-            artist: artist_line(&segs).unwrap_or_else(|| plain_tail(&segs)),
+            artist: artist_line(&segs).unwrap_or_else(|| plain_album_artist(&segs)),
             year: year_segment(&segs),
             kind: None,
             thumbnail: thumb,
@@ -2651,6 +2692,117 @@ mod tests {
                 }}
             ]}}
         ]}}}}]}}})
+    }
+
+    /// The reply's sections as they came for `moves like jagger livw` (2026-10-19), with `rows`
+    /// added after the "Did you mean" for the gibberish case.
+    fn no_results_reply(rows: Vec<serde_json::Value>) -> serde_json::Value {
+        let mut second = vec![serde_json::json!({"didYouMeanRenderer": {
+            "didYouMean": {"runs": [{"text": "Did you mean:"}]},
+            "correctedQuery": {"runs": [{"text": "moves like jagger live"}]},
+            "correctedQueryEndpoint": {"searchEndpoint": {"query": "moves like jagger live"}}
+        }})];
+        second.extend(rows);
+        if second.len() == 1 {
+            second.push(serde_json::json!({"messageRenderer": {
+                "text": {"runs": [{"text": "No results for moves like jagger livw."}]}
+            }}));
+        }
+        serde_json::json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
+            {"itemSectionRenderer": {"contents": [{"messageRenderer": {"style": {"value": "RENDER_STYLE_PANEL"}}}]}},
+            {"itemSectionRenderer": {"contents": second}}
+        ]}}}}]}}})
+    }
+
+    #[test]
+    fn youtubes_own_no_results_answer_is_read_with_its_spelling() {
+        let r = parse_search(&no_results_reply(vec![]));
+        assert!(r.items.is_empty());
+        assert!(
+            r.no_results,
+            "the message was not read as YouTube's empty answer"
+        );
+        assert_eq!(r.did_you_mean.as_deref(), Some("moves like jagger live"));
+    }
+
+    /// Gibberish gets a few loose matches *and* the messages: that is results, not an empty
+    /// answer, but the spelling is still offered.
+    #[test]
+    fn loose_matches_beside_the_message_are_results_with_a_spelling() {
+        let row = album_row("Songs About Jane", serde_json::json!([{"text": "Album"}]));
+        let r = parse_search(&no_results_reply(vec![row]));
+        assert_eq!(r.items.len(), 1);
+        assert!(!r.no_results);
+        assert_eq!(r.did_you_mean.as_deref(), Some("moves like jagger live"));
+    }
+
+    /// An ordinary reply has neither.
+    #[test]
+    fn an_ordinary_reply_is_not_an_empty_answer() {
+        let root = serde_json::json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [album_row("Songs About Jane", serde_json::json!([{"text": "Album"}]))]}}
+        ]}}}}]}}});
+        let r = parse_search(&root);
+        assert!(!r.no_results && r.did_you_mean.is_none());
+        // Nothing at all, and no message either: that is a parse that found nothing, which is
+        // what sends `Api::search` to its fallback.
+        assert!(!parse_search(&serde_json::json!({})).no_results);
+    }
+
+    /// An album search row: `byline` is column 1's runs, the artist linked when `artist_id` is
+    /// given.
+    fn album_row(title: &str, byline: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"musicResponsiveListItemRenderer": {
+            "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "MPREb_test",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ALBUM"}}
+            }},
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": title}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": byline}}}
+            ]
+        }})
+    }
+
+    /// The three bylines the Albums tab returned for `moves like jagger livw` (2026-10-19):
+    /// a linked artist, an unlinked one, and none at all. The year never ends up in the artist.
+    #[test]
+    fn an_album_rows_artist_never_takes_the_year() {
+        let linked = serde_json::json!([
+            {"text": "Album"}, {"text": " • "},
+            {"text": "Maroon 5", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCmaroon",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}
+            }}},
+            {"text": " • "}, {"text": "2002"}
+        ]);
+        let unlinked = serde_json::json!([
+            {"text": "Album"}, {"text": " • "}, {"text": "Various Artists"}, {"text": " • "}, {"text": "2018"}
+        ]);
+        let none = serde_json::json!([{"text": "Album"}, {"text": " • "}, {"text": "2011"}]);
+        let root = serde_json::json!({"contents": {"tabbedSearchResultsRenderer": {"tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [
+                album_row("Songs About Jane", linked),
+                album_row("Live Aid", unlinked),
+                album_row("We Found Love", none),
+            ]}}
+        ]}}}}]}}});
+        let got: Vec<(String, Option<String>)> = parse_search(&root)
+            .items
+            .into_iter()
+            .map(|e| match e {
+                Entry::Album(a) => (a.artist, a.year),
+                other => panic!("not an album: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Maroon 5".to_owned(), Some("2002".to_owned())),
+                ("Various Artists".to_owned(), Some("2018".to_owned())),
+                (String::new(), Some("2011".to_owned())),
+            ]
+        );
     }
 
     /// The original `travis` shape, isolated: the ranked list's own leading row is *also* an
