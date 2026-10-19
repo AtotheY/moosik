@@ -22,10 +22,12 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-command -v wixl > /dev/null || {
-    echo "error: wixl not found; install msitools (Arch: pacman -S msitools)" >&2
-    exit 1
-}
+for tool in wixl msibuild; do
+    command -v "$tool" > /dev/null || {
+        echo "error: $tool not found; install msitools (Arch: pacman -S msitools)" >&2
+        exit 1
+    }
+done
 
 version="$(cargo metadata --no-deps --format-version 1 \
     | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
@@ -118,6 +120,24 @@ EOF
 
 mkdir -p dist
 wixl -a x64 -o "$out" "$work/refryt.wxs"
+
+# wixl leaves the File table's Version column empty, and Windows Installer then treats every file
+# as unversioned. On an upgrade it compares that against the file already installed, which does
+# carry a version resource (libmpv, WebView2Loader, yt-dlp), decides the installed one is "higher"
+# and skips the component; RemoveExistingProducts then deletes the old copy, and the app is left
+# without its DLLs. So copy each PE file's fixed version (VS_FIXEDFILEINFO) into the table.
+python3 - "$stage" <<'PY' | while read -r name ver; do
+import pathlib, struct, sys
+for f in sorted(pathlib.Path(sys.argv[1]).iterdir()):
+    data = f.read_bytes()
+    # The VS_FIXEDFILEINFO signature followed by its structure version, 1.0.
+    i = data.find(b"\xbd\x04\xef\xfe\x00\x00\x01\x00")
+    if i >= 0:
+        ms, ls = struct.unpack_from("<II", data, i + 8)
+        print(f.name, f"{ms >> 16}.{ms & 0xffff}.{ls >> 16}.{ls & 0xffff}")
+PY
+    msibuild "$out" -q "UPDATE \`File\` SET \`Version\` = '$ver' WHERE \`FileName\` = '$name'"
+done
 if [ "$platform" != x64 ]; then
     # Rewrites the whole summary stream: title, subject (the name argument), author, platform
     # and a fresh package code. The schema version (500) and the rest carry over.
