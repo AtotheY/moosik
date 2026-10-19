@@ -150,7 +150,7 @@ A song is selected with one click and played with two, as in Spotify. The "Doubl
 
 The 23 bundled themes are plain CSS files in the `themes` folder of the config folder, and [docs/THEMES.md](docs/THEMES.md) describes the format. A theme file can be edited, added or deleted. The app reads the folder when its window regains focus and when Settings is opened. Album and playlist headers can take their colour from the cover art, which is on by default.
 
-Settings has a transparency slider and a background blur switch. Blur depends on the compositor: it works on KDE Plasma under Wayland, in compositors that implement the ext-background-effect protocol (niri, GNOME 51 and newer), and on macOS. It has been tested on KDE Plasma. Windows has neither transparency nor blur, because the window shows a flat grey there instead of the desktop. A Card outlines switch adds a thin edge around each panel, and it is on by default.
+Settings has a transparency slider and a background blur switch. Blur depends on the system: it works on KDE Plasma under Wayland, in compositors that implement the ext-background-effect protocol (niri, GNOME 51 and newer), on Windows, where it is the system's acrylic, and on macOS. It has been tested on KDE Plasma. A Card outlines switch adds a thin edge around each panel, and it is on by default.
 
 ### Signing in
 
