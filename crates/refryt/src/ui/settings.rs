@@ -5,7 +5,8 @@
 //! *cannot* work, because `document.cookie` is specified not to expose `HttpOnly` cookies and the
 //! ones that authenticate a YouTube session — `HSID`, `SSID`, `LOGIN_INFO`, `__Secure-1PSID`,
 //! `__Secure-3PSID` — are all HttpOnly. Pasting from the console produces a cookie that
-//! `ytmapi-rs` accepts and YouTube ignores.
+//! `ytmapi-rs` accepts and YouTube ignores. The `Cookie` *request header* from the Network tab
+//! does carry them, and that is what the Paste cookies window asks for (`ui::paste_cookies`).
 
 use egui::RichText;
 
@@ -691,7 +692,24 @@ fn sign_in(app: &mut App, ui: &mut egui::Ui) {
         if !crate::flatpak::sandboxed() {
             browser_import(app, ui, g);
         }
+        paste_cookies(app, ui, g);
     });
+}
+
+/// The way in when neither of the others can be used: the cookie header from a browser's
+/// developer tools, pasted into [`crate::ui::paste_cookies`].
+fn paste_cookies(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
+    let p = app.palette;
+    let mut clicked = false;
+    g.row(
+        ui,
+        "Or paste cookies",
+        "Copies the session from a browser's developer tools.",
+        |ui| clicked = widgets::outline_button(ui, &p, "Paste").clicked(),
+    );
+    if clicked {
+        app.paste_cookies_open = true;
+    }
 }
 
 /// The path that needs no browser already signed in: the app's own window owns the session it

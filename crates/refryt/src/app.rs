@@ -1690,6 +1690,10 @@ pub struct App {
     pub(crate) settings_tab: ui::settings::SettingsTab,
     /// The "Order of homepage" window is open.
     pub(crate) home_order_open: bool,
+    /// The "Paste cookies" window is open, and what has been pasted into it so far. Cleared the
+    /// moment the window closes or hands it over.
+    pub(crate) paste_cookies_open: bool,
+    pub(crate) pasted_cookie: String,
     /// A crash the previous run left behind, offered once on this launch and then cleared.
     pub(crate) crash_report: Option<crate::crash::Crash>,
     /// What is downloaded to `~/Music/refryt`, indexed by video id. Pushed into the backend so a
@@ -2077,6 +2081,8 @@ impl App {
             help_open: false,
             settings_tab: ui::settings::SettingsTab::default(),
             home_order_open: false,
+            paste_cookies_open: false,
+            pasted_cookie: String::new(),
             crash_report: crate::crash::last(),
             downloads: crate::downloads::Index::default(),
             downloaded_ids: Default::default(),
@@ -7727,6 +7733,7 @@ impl eframe::App for App {
         ui::playlist::modals(self, ui);
         ui::help::modal(self, ui);
         ui::home_order::modal(self, ui);
+        ui::paste_cookies::modal(self, ui);
         ui::crash::modal(self, ui);
 
         if !self.decorated && !maximized {

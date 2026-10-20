@@ -2083,6 +2083,26 @@ impl Backend {
         });
     }
 
+    /// Sign in with a `Cookie` header pasted from a browser's developer tools.
+    ///
+    /// No source is stored with it: there is nowhere to renew a pasted session from, so when it
+    /// expires the user is told and pastes again.
+    pub fn sign_in_with_cookie(&self, raw: String) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let event = match api.install_cookie(raw, None).await {
+                Ok(account) => {
+                    Self::forget_legacy_token();
+                    Event::AuthChanged(AuthState::SignedIn { account })
+                }
+                Err(e) => Event::SignInFailed {
+                    error: format!("{e:#}"),
+                },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
+    }
+
     /// Sign in through the app's own sign-in window (Windows' WebView2, Linux's WebKitGTK).
     ///
     /// The path for a machine whose only browser is a modern Chromium, and on Linux simply the

@@ -16,6 +16,7 @@ pub mod library;
 pub mod lyrics;
 pub mod mood;
 pub mod moods;
+pub mod paste_cookies;
 pub mod player_bar;
 pub mod playlist;
 pub mod releases;

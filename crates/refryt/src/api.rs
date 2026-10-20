@@ -293,8 +293,9 @@ impl Api {
             .context("could not build the signed-in client")?;
 
         let account = account_name(&yt).await?.context(
-            "YouTube did not recognise that session. If you pasted it, the cookie is probably \
-             missing its HttpOnly parts; import from your browser instead.",
+            "YouTube did not recognise that session. If you pasted it, copy the cookie header \
+             from the Network tab rather than document.cookie from the Console, which leaves \
+             out the parts that sign you in.",
         )?;
 
         auth::save_session(&cookie, source)?;
