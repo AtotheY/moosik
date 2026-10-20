@@ -97,6 +97,13 @@ It depends on the system `webkit2gtk-4.1` (for the in-app sign-in window) and `y
 
 To build any of these from source, see [Build from source](#build-from-source).
 
+### Updates
+
+When refryt starts, it asks GitHub for the latest release. If that release is newer, refryt offers it. Nothing is installed until you click, and you can turn the check off, or run it yourself, in Settings, About.
+
+- The Windows setup and MSI, and the AppImage, update themselves. **Update and restart** downloads the new file and checks it against the release's `SHA256SUMS`. On Windows, refryt then closes, runs the installer and starts again. Windows may ask for permission. The AppImage replaces itself and restarts.
+- The Flatpak, the macOS image, the Windows zip and the AUR package only show that a new version is out, with a link to the release. Update those the way you installed them.
+
 ## Disclaimer
 
 > [!IMPORTANT]

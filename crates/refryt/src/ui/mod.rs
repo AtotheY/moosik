@@ -25,6 +25,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod splash;
 pub mod topbar;
+pub mod update;
 pub mod upnext;
 pub mod video;
 

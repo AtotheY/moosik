@@ -97,6 +97,55 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     if open_help {
         app.help_open = true;
     }
+
+    // Updates: the launch check's switch, and what the last check found.
+    let mut check = app.settings.check_for_updates;
+    let (mut check_now, mut show) = (false, false);
+    let (title, detail) = match &app.update.available {
+        Some(release) => (
+            format!("refryt {} is available", release.version),
+            format!("You have {}.", crate::update::current_version()),
+        ),
+        None if app.update.checking => (
+            "Checking for updates…".to_owned(),
+            "Asking GitHub for the latest release.".to_owned(),
+        ),
+        None if app.update.up_to_date => (
+            "refryt is up to date".to_owned(),
+            format!("{} is the latest release.", env!("CARGO_PKG_VERSION")),
+        ),
+        None => (
+            "Latest version".to_owned(),
+            "Asks GitHub for the latest release.".to_owned(),
+        ),
+    };
+    widgets::setting_group(ui, &p, Some("Updates"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-check-updates",
+            "Check for updates",
+            "Looks for a new release on GitHub when refryt starts.",
+            &mut check,
+        );
+        g.row(ui, &title, &detail, |ui| {
+            if app.update.available.is_some() {
+                show = widgets::outline_button(ui, &p, "Update").clicked();
+            } else if !app.update.checking {
+                check_now = widgets::outline_button(ui, &p, "Check now").clicked();
+            }
+        });
+    });
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| s.check_for_updates = check);
+    if check_now {
+        app.check_for_update(true);
+    }
+    if show {
+        app.update.open = true;
+    }
+
     if app.logo.is_none() {
         app.logo = crate::logo_texture(ui.ctx());
     }

@@ -315,6 +315,12 @@ pub struct Settings {
     pub sidebar_width: Option<f32>,
     /// The queue/lyrics panel's width as last dragged. Still capped by the window on the way in.
     pub panel_width: Option<f32>,
+    /// Ask GitHub for the latest release at launch, and offer it when it is newer. One request,
+    /// nothing installed without a click (see `crate::update`).
+    pub check_for_updates: bool,
+    /// A release the user chose to skip: the launch check does not offer it again, though About
+    /// still shows it and a manual check still offers it.
+    pub skipped_update: Option<String>,
 }
 
 impl Default for Settings {
@@ -348,6 +354,8 @@ impl Default for Settings {
             playlist_default_sort: crate::app::PlaylistSort::Default,
             sidebar_width: None,
             panel_width: None,
+            check_for_updates: true,
+            skipped_update: None,
         }
     }
 }

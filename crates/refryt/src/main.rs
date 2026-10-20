@@ -306,5 +306,7 @@ fn main() -> eframe::Result {
     // this line is the log's proof that teardown finished: a slow quit that never reaches it is
     // stuck in one of the drops `App::drop` starts.
     tracing::info!("event loop exited");
+    // An update chosen in the app runs now that nothing holds its files.
+    refryt::update::finish();
     result
 }

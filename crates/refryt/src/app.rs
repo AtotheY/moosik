@@ -1710,6 +1710,8 @@ pub struct App {
     pub(crate) pasted_cookie: String,
     /// A crash the previous run left behind, offered once on this launch and then cleared.
     pub(crate) crash_report: Option<crate::crash::Crash>,
+    /// What the update check found, and how far an install has got (see `crate::update`).
+    pub(crate) update: ui::update::State,
     /// What is downloaded to `~/Music/refryt`, indexed by video id. Pushed into the backend so a
     /// downloaded track plays from disk.
     pub(crate) downloads: crate::downloads::Index,
@@ -2099,6 +2101,7 @@ impl App {
             paste_cookies_open: false,
             pasted_cookie: String::new(),
             crash_report: crate::crash::last(),
+            update: ui::update::State::default(),
             downloads: crate::downloads::Index::default(),
             downloaded_ids: Default::default(),
             downloaded_tracks: Default::default(),
@@ -2145,6 +2148,15 @@ impl App {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if let Err(e) = crate::autostart::sync(app.settings.start_on_boot) {
             tracing::warn!(error = %format!("{e:#}"), "could not update the autostart entry");
+        }
+        // Not on a scripted run: a timing, a screenshot or a stats line should measure the app,
+        // not an update window or the request behind it.
+        if app.settings.check_for_updates
+            && !startup_timing
+            && app.screenshot.is_none()
+            && app.stats_after.is_none()
+        {
+            app.check_for_update(false);
         }
         if let Some(after) = tray_test {
             app.spawn_tray_test(after);
@@ -2392,6 +2404,30 @@ impl App {
         if let Err(e) = crate::settings::save(&self.settings) {
             tracing::warn!(error = %format!("{e:#}"), "could not save settings");
         }
+    }
+
+    /// Ask GitHub for the latest release. `manual` is the About tab's "Check now": it asks at
+    /// once, and answers even when there is nothing new.
+    pub(crate) fn check_for_update(&mut self, manual: bool) {
+        if self.update.checking || self.update.progress.is_some() {
+            return;
+        }
+        self.update.checking = true;
+        let delay = Duration::from_secs(if manual { 0 } else { 5 });
+        self.backend.check_for_update(delay, manual);
+    }
+
+    /// Download and install the release the check found. The window closes once it is ready.
+    pub(crate) fn install_update(&mut self) {
+        let Some(release) = self.update.available.clone() else {
+            return;
+        };
+        if self.update.progress.is_some() || !release.installable() {
+            return;
+        }
+        self.update.progress = Some(0.0);
+        self.update.error = None;
+        self.backend.install_update(release);
     }
 
     /// The titlebar's own close button was clicked: hide to the tray if that's configured,
@@ -4591,6 +4627,51 @@ impl App {
                 Event::LocalScanFailed { error } => {
                     self.local_scanning = false;
                     self.local_scan_error = Some(error);
+                }
+
+                Event::UpdateChecked { release, manual } => {
+                    self.update.checking = false;
+                    self.update.error = None;
+                    match release {
+                        Some(release) => {
+                            let skipped = self.settings.skipped_update.as_deref()
+                                == Some(release.version.as_str());
+                            tracing::info!(version = %release.version, "update available");
+                            self.update.open |= manual || !skipped;
+                            self.update.available = Some(*release);
+                        }
+                        None => {
+                            self.update.available = None;
+                            self.update.up_to_date = true;
+                            if manual {
+                                self.toast("refryt is up to date");
+                            }
+                        }
+                    }
+                }
+                Event::UpdateCheckFailed { error, manual } => {
+                    self.update.checking = false;
+                    tracing::warn!(%error, "update check failed");
+                    // The launch check stays quiet: being offline is not worth a toast.
+                    if manual {
+                        self.toast_error(&failure_text("Could not check for updates", &error));
+                    }
+                }
+                Event::UpdateProgress { percent } => {
+                    if self.update.progress.is_some() {
+                        self.update.progress = Some(percent);
+                    }
+                }
+                Event::UpdateReady => {
+                    tracing::info!("update staged, closing");
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Event::UpdateFailed { error } => {
+                    tracing::warn!(%error, "update failed");
+                    self.update.progress = None;
+                    self.update.error = Some(error);
+                    self.update.open = true;
                 }
 
                 // A reply is kept only when it answers the fetch still outstanding. Matching on
@@ -7769,6 +7850,7 @@ impl eframe::App for App {
         ui::home_order::modal(self, ui);
         ui::paste_cookies::modal(self, ui);
         ui::crash::modal(self, ui);
+        ui::update::modal(self, ui);
 
         if !self.decorated && !maximized {
             chrome::resize_handles(ui);

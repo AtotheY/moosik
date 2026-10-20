@@ -77,6 +77,25 @@ pub enum Event {
     LocalScanFailed {
         error: String,
     },
+    /// The update check's answer: a newer release, or `None` when this build is the latest.
+    /// `manual` is a click on "Check now", which wants an answer either way.
+    UpdateChecked {
+        release: Option<Box<crate::update::Release>>,
+        manual: bool,
+    },
+    UpdateCheckFailed {
+        error: String,
+        manual: bool,
+    },
+    /// The update's download, 0–100.
+    UpdateProgress {
+        percent: f32,
+    },
+    /// The update is downloaded, checked and staged: close the window and `main` runs it.
+    UpdateReady,
+    UpdateFailed {
+        error: String,
+    },
     ArtistLoaded {
         id: String,
         artist: Artist,
@@ -1080,6 +1099,47 @@ impl Backend {
         if big {
             crate::memory::trim_after_parse();
         }
+    }
+
+    /// Ask GitHub whether a newer release is out, after `delay`: the launch check waits until
+    /// the first pages have had the network to themselves.
+    pub fn check_for_update(&self, delay: std::time::Duration, manual: bool) {
+        let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
+        self.rt.spawn(async move {
+            tokio::time::sleep(delay).await;
+            let event = match crate::update::check(&http).await {
+                Ok(release) => Event::UpdateChecked {
+                    release: release.map(Box::new),
+                    manual,
+                },
+                Err(e) => Event::UpdateCheckFailed {
+                    error: format!("{e:#}"),
+                    manual,
+                },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    /// Download the release, check it, and stage it for `main` to run once the window closes.
+    pub fn install_update(&self, release: crate::update::Release) {
+        let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
+        self.rt.spawn(async move {
+            let progress = |percent| Self::emit(&tx, &ctx, Event::UpdateProgress { percent });
+            let staged = match crate::update::download(&http, &release, progress).await {
+                Ok(file) => tokio::task::spawn_blocking(move || crate::update::stage(&file))
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}"))),
+                Err(e) => Err(e),
+            };
+            let event = match staged {
+                Ok(()) => Event::UpdateReady,
+                Err(e) => Event::UpdateFailed {
+                    error: format!("{e:#}"),
+                },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
     }
 
     /// Synchronous check used to pick the initial auth UI state. Everything else that needs the
