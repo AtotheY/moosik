@@ -154,7 +154,7 @@ Settings has a transparency slider and a background blur switch. Blur depends on
 
 ### Signing in
 
-The app can sign in from its own window on Linux, Windows and macOS. It can also use the session of a browser that is already signed in: Chrome, Chromium, Firefox, Brave, Vivaldi or Edge. On Windows only Firefox is offered, because the other browsers encrypt their cookies in a way other programs cannot read. The Flatpak cannot see browser profiles, so it hides the browser option and signs in through the app's own window.
+The app can sign in from its own window on Linux, Windows and macOS. It can also use the session of a browser that is already signed in: Chrome, Chromium, Firefox, Brave, Vivaldi or Edge. On Windows only Firefox is offered, because the other browsers encrypt their cookies in a way other programs cannot read. The Flatpak cannot see browser profiles, so it hides the browser option and signs in through the app's own window. A third option on Settings' Account tab is pasting the cookie request header copied from a browser's developer tools, for when neither of the other two can be used.
 
 Signed out, the app still searches and plays. It has no library.
 
