@@ -707,11 +707,11 @@ impl Drop for Cleanup {
     }
 }
 
-#[cfg(test)]
+// Only the macOS store has logic of its own to test; the window itself needs a display.
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn the_store_id_round_trips_through_its_file_text() {
         let id: [u8; 16] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
@@ -720,7 +720,6 @@ mod tests {
         assert_eq!(macos_store::parse(&format!("{text}\n")), Some(id));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn a_damaged_store_id_reads_as_none() {
         assert_eq!(macos_store::parse(""), None);
