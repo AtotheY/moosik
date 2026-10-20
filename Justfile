@@ -92,9 +92,10 @@ release-prep version:
 release-verify version:
     ./scripts/release.sh verify {{version}}
 
-# Tags, pushes and creates the GitHub release; a dry run unless --yes is added by hand.
-release-publish version notes:
-    ./scripts/release.sh publish {{version}} --notes {{notes}}
+# By hand: tags, pushes and creates the GitHub release; a dry run unless --yes is added by hand.
+# The notes default to release-notes/<version>.md. Pushing the tag lets the release workflow do it.
+release-publish version notes="":
+    ./scripts/release.sh publish {{version}} {{ if notes == "" { "" } else { "--notes " + notes } }}
 
 # Resolve + play through mpv, no GUI.
 play id:

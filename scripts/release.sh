@@ -2,30 +2,36 @@
 # Cutting a release: bump the version, check what was built, publish it.
 #
 #   scripts/release.sh prep <version> [--dry-run] [--skip-gate] [--perf]
-#       Sets the version (Cargo.toml, Cargo.lock) and the Flatpak metainfo release entry, runs the
-#       gate (fmt, clippy, tests; with --perf also scripts/perf.sh), and commits "Release <version>".
+#       Sets the version (Cargo.toml, Cargo.lock) and the Flatpak metainfo release entry, starts the
+#       release notes (release-notes/<version>.md, from release-notes/TEMPLATE.md), runs the gate
+#       (fmt, clippy, tests; with --perf also scripts/perf.sh), and commits "Release <version>".
+#       Write the notes, then `git commit -a --amend --no-edit` before pushing the tag.
 #       Refuses a dirty tree, a tree carrying the private local patch, a version that
 #       is not newer than the current one, or one whose tag already exists.
 #
-#   scripts/release.sh verify <version>
+#   scripts/release.sh verify <version> [--repo-only] [--strict]
 #       Checks that the repo and everything in dist/ agree on <version>: the version in Cargo.toml,
-#       the metainfo, a consistent Cargo.lock, a clean tree, a tag (if there is one) on HEAD, and
-#       that each artifact exists, is newer than HEAD's commit (so it was built from it) and has
-#       the right contents. The macOS image is built on a Mac, so its absence is a warning.
+#       the metainfo, a consistent Cargo.lock, a clean tree, a tag (if there is one) on HEAD, the
+#       release notes, and that each artifact exists, is newer than HEAD's commit (so it was built
+#       from it) and has the right contents. The macOS image is built on a Mac, so its absence is
+#       a warning; --strict makes it a failure (CI builds it). --repo-only stops after the repo
+#       checks, before any artifact is looked for.
 #
-#   scripts/release.sh publish <version> --notes FILE [--without-macos] [--yes]
+#   scripts/release.sh publish <version> [--notes FILE] [--without-macos] [--yes]
 #       Verifies, then tags v<version>, pushes main and the tag, and creates the GitHub release
-#       with the artifacts attached, then its checksums. Prints what it would do unless --yes is
-#       given.
+#       with the artifacts attached, then its checksums. The notes default to
+#       release-notes/<version>.md. Prints what it would do unless --yes is given. Pushing a v*
+#       tag also starts .github/workflows/release.yml, which builds and publishes on its own: this
+#       command is the manual fallback.
 #
 #   scripts/release.sh checksums <version> [--yes]
 #       Downloads the published release's files and writes refryt-<version>-SHA256SUMS.txt for
 #       them; with --yes it is attached to the release, replacing an older one. Run it again after
 #       adding the macOS image, so the sums cover it too. Works on the Mac as well.
 #
-# Nothing here builds: run `just appimage`, `./scripts/build-windows.sh`,
-# `./scripts/build-msi.sh`, the same two with `ARCH=aarch64`, `just flatpak` (and
-# `./scripts/build-macos.sh` on the Mac) after `prep` and before `verify`.
+# Nothing here builds: the release workflow does (.github/workflows/release.yml), or run
+# `just appimage`, `./scripts/build-windows.sh`, `./scripts/build-msi.sh`, the same two with
+# `ARCH=aarch64`, `just flatpak` (and `./scripts/build-macos.sh` on the Mac) after `prep`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -155,6 +161,19 @@ if 'version="%s"' % new not in s:
     assert entry in s, "no <releases> block in the metainfo"
     open(p, "w").write(s)
 EOF
+    # The notes start from the template, with the commits since the last release listed to write
+    # from. Its marker keeps `verify` from letting an unwritten file through.
+    if [ -f release-notes/TEMPLATE.md ]; then
+        python3 - "$cur" "$v" <<'PY'
+import subprocess, sys
+cur, new = sys.argv[1:3]
+text = open("release-notes/TEMPLATE.md").read().replace("@VERSION@", new).replace("@PREVIOUS@", cur)
+log = subprocess.run(
+    ["git", "log", "--format=%h %s", "v%s..HEAD" % cur], capture_output=True, text=True
+).stdout.strip()
+open("release-notes/%s.md" % new, "w").write(text.replace("@COMMITS@", log or "(none)"))
+PY
+    fi
     # The lock file records the workspace crates' versions; refresh just those.
     cargo update --workspace --offline > /dev/null
     [ "$(current_version)" = "$v" ] || die "the version did not change to $v"
@@ -172,18 +191,32 @@ EOF
     fi
 
     git add Cargo.toml Cargo.lock packaging/flatpak/io.github.gridoe.refryt.metainfo.xml
+    [ ! -f "release-notes/$v.md" ] || git add "release-notes/$v.md"
     git commit -q -m "Release $v"
     echo "committed: $(git log -1 --oneline)"
     echo
-    echo "next: build the artifacts, then scripts/release.sh verify $v"
+    if [ -f "release-notes/$v.md" ]; then
+        echo "write release-notes/$v.md, then: git commit -a --amend --no-edit"
+        echo
+    fi
+    echo "next: push main and the tag v$v (the release workflow builds and publishes), or build the"
+    echo "      artifacts by hand and run scripts/release.sh verify $v:"
     echo "      just appimage && ./scripts/build-windows.sh && ./scripts/build-msi.sh"
     echo "      ARCH=aarch64 ./scripts/build-windows.sh && ARCH=aarch64 ./scripts/build-msi.sh"
     echo "      just flatpak   (and the macOS image on a Mac)"
 }
 
 cmd_verify() {
-    local v="${1:-}"
-    valid_version "$v" || die "usage: release.sh verify <major.minor.patch>"
+    local v="${1:-}"; shift || true
+    local repo_only=0 strict=0
+    for a in "$@"; do
+        case "$a" in
+            --repo-only) repo_only=1 ;;
+            --strict) strict=1 ;;
+            *) die "unknown option $a" ;;
+        esac
+    done
+    valid_version "$v" || die "usage: release.sh verify <major.minor.patch> [--repo-only] [--strict]"
     local errors=0 warnings=0
     bad() { echo "  FAIL  $*"; errors=$((errors + 1)); }
     ok() { echo "  ok    $*"; }
@@ -213,11 +246,30 @@ cmd_verify() {
         ok "tag v$v not made yet"
     fi
 
+    # The notes are read by the release workflow and published as they are, so a missing file or
+    # the template's marker still in it stops the release here, not after twenty minutes of builds.
+    # Releases before the notes folder existed have none; TEMPLATE.md says it is in use.
+    if [ -f release-notes/TEMPLATE.md ]; then
+        if [ ! -s "release-notes/$v.md" ]; then
+            bad "release-notes/$v.md is missing"
+        elif grep -q "TODO: write" "release-notes/$v.md"; then
+            bad "release-notes/$v.md still has its TODO marker"
+        else
+            ok "release-notes/$v.md is written"
+        fi
+    fi
+    if [ "$repo_only" = 1 ]; then
+        echo
+        echo "$errors failure(s), $warnings warning(s)"
+        [ "$errors" -eq 0 ]
+        return
+    fi
+
     echo "== artifacts =="
     local kind path
     while read -r kind path; do
         if [ ! -f "$path" ]; then
-            if [ "$kind" = macos ]; then
+            if [ "$kind" = macos ] && [ "$strict" = 0 ]; then
                 meh "$path is missing: build it on the Mac (scripts/build-macos.sh) and copy it into dist/"
             else
                 bad "$path is missing"
@@ -286,8 +338,9 @@ cmd_publish() {
         esac
         shift
     done
-    valid_version "$v" || die "usage: release.sh publish <version> --notes FILE [--yes]"
-    [ -f "$notes" ] || die "--notes needs a notes file"
+    valid_version "$v" || die "usage: release.sh publish <version> [--notes FILE] [--yes]"
+    [ -n "$notes" ] || notes="release-notes/$v.md"
+    [ -f "$notes" ] || die "no notes file: write $notes or pass --notes"
     need_branch_main
     cmd_verify "$v" || die "verify failed; fix that first"
     local assets=() kind path
@@ -365,5 +418,5 @@ case "${1:-}" in
     verify) shift; cmd_verify "$@" ;;
     publish) shift; cmd_publish "$@" ;;
     checksums) shift; cmd_checksums "$@" ;;
-    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

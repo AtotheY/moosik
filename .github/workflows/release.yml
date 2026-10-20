@@ -1,0 +1,299 @@
+name: Release
+
+# Pushing a v* tag builds every artifact, checks them with scripts/release.sh, and publishes the
+# GitHub release with its checksums. Running it by hand (Actions > Release > Run workflow) does
+# everything except the publishing, so a change to the scripts or this file can be tried first.
+#
+# The scripts are the ones used on a developer machine; this file only installs what they need.
+#
+#   scripts/release.sh prep 0.1.13    # version, notes template, gate, "Release 0.1.13"
+#   (write release-notes/0.1.13.md and amend the commit)
+#   git push origin main && git tag -a v0.1.13 -m "refryt 0.1.13" && git push origin v0.1.13
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Wine would stop to ask about Mono and Gecko on its first start, with nobody there to answer.
+  WINEDLLOVERRIDES: mscoree,mshtml=
+  WINEDEBUG: -all
+  # llvm-mingw builds the Windows ARM64 binary. Pinned with the checksum GitHub lists for the asset.
+  LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20261006/llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64.tar.xz
+  LLVM_MINGW_SHA256: 5f9c6ed95b2d4bdb2869a488c5fd5857fbdabcf288a0aa3eb1da43f6a08d8ab4
+  # Inno Setup 6 compiles the Windows setup .exe, under Wine, as scripts/build-windows.sh does.
+  INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+  INNO_SETUP_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
+  # flatpak-builder 1.4.12, built from source for the Flatpak job (see there).
+  FLATPAK_BUILDER_URL: https://github.com/flatpak/flatpak-builder/releases/download/1.4.12/flatpak-builder-1.4.12.tar.xz
+  FLATPAK_BUILDER_SHA256: 8d5b791f7a8449d6a8ebcff0c8d6abd5335113f56703bf5777ee4c7db4bda378
+
+jobs:
+  # Fast failures first: a wrong version, a tag that is not on main, or unwritten notes would
+  # otherwise show up after half an hour of builds.
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Work out the version
+        id: version
+        run: |
+          cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$cargo_version" ]; then
+              echo "::error::the tag is $GITHUB_REF_NAME but Cargo.toml says $cargo_version"
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::$GITHUB_REF_NAME is not on main"
+              exit 1
+            fi
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+      - name: Download the crates (the lock check reads them offline)
+        run: cargo fetch --locked
+      - name: Repository checks
+        run: scripts/release.sh verify "${{ steps.version.outputs.version }}" --repo-only
+
+  windows:
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config curl zip unzip p7zip-full msitools wixl \
+            mingw-w64 wine wine32:i386 xvfb \
+            libmpv-dev libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcb1-dev libssl-dev python3-pil
+      - name: Install llvm-mingw
+        run: |
+          curl -fsSL -o llvm-mingw.tar.xz "$LLVM_MINGW_URL"
+          echo "$LLVM_MINGW_SHA256  llvm-mingw.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/llvm-mingw
+          sudo tar -xJf llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1
+          rm llvm-mingw.tar.xz
+      - name: Rust targets
+        run: rustup target add x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm
+      - name: Install Inno Setup under Wine
+        run: |
+          curl -fsSL -o innosetup.exe "$INNO_SETUP_URL"
+          echo "$INNO_SETUP_SHA256  innosetup.exe" | sha256sum -c -
+          Xvfb :99 -screen 0 1024x768x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          sleep 2
+          # Wine's first start is flaky (the installer has exited non-zero on a run that
+          # worked the time before), and its exit code says little: try again, and judge by
+          # whether the compiler is there.
+          iscc=""
+          for attempt in 1 2 3; do
+            DISPLAY=:99 wine innosetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART || true
+            # This installer puts Inno Setup in "Program Files" when the prefix is 64-bit; the
+            # script looks under "Program Files (x86)", where older installers put it. Find it
+            # and link it to where the script looks.
+            iscc="$(find "$HOME/.wine/drive_c" -iname ISCC.exe | head -1)"
+            [ -n "$iscc" ] && break
+            echo "attempt $attempt: no ISCC.exe yet"
+            wineserver -k || true
+            sleep 5
+          done
+          if [ -z "$iscc" ]; then
+            echo "::error::Inno Setup did not install; the Wine prefix holds:"
+            find "$HOME/.wine/drive_c" -maxdepth 3 -type d | head -40
+            exit 1
+          fi
+          echo "ISCC is at $iscc"
+          want="$HOME/.wine/drive_c/Program Files (x86)/Inno Setup 6"
+          if [ ! -f "$want/ISCC.exe" ]; then
+            mkdir -p "$(dirname "$want")"
+            ln -sfn "$(dirname "$iscc")" "$want"
+          fi
+          test -f "$want/ISCC.exe"
+          rm innosetup.exe
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+      - name: Windows x64 (zip, setup, MSI)
+        run: |
+          ./scripts/build-windows.sh
+          ./scripts/build-msi.sh
+      - name: Windows ARM64 (zip, MSI)
+        run: |
+          ARCH=aarch64 ./scripts/build-windows.sh
+          ARCH=aarch64 ./scripts/build-msi.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/refryt-*-windows-*.zip
+            dist/refryt-*-windows-*-setup.exe
+            dist/refryt-*-windows-*.msi
+          if-no-files-found: error
+          retention-days: 14
+
+  # The AppImage bundles every library short of glibc, so it has to be built on a system at least
+  # as new as the ones it will run on: bundled from Ubuntu 24.04, its older glib is found first and
+  # breaks against a newer host's own libraries (an undefined g_sort_array from the host's
+  # libgstreamer, on Arch). Arch is where it is built by hand, and it is a rolling release.
+  appimage:
+    needs: check
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install packages
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git curl cmake rust mpv webkit2gtk-4.1 \
+            gtk3 libsoup3 libayatana-appindicator xdotool libxkbcommon wayland python-pillow \
+            zip unzip file
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: appimage
+      - name: AppImage
+        run: ./scripts/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/refryt-*-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  flatpak:
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # flatpak-builder is built from its release, not taken from Ubuntu: Ubuntu 24.04's 1.4.2
+      # does not pass CMAKE_INSTALL_LIBDIR=lib to cmake modules (1.4.3 and later do), so the tray
+      # library installed into lib64 and the next module could not find it. This is the version
+      # the Flatpak is built with by hand.
+      - name: Install Flatpak and build flatpak-builder
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak elfutils debugedit appstream \
+            curl git meson ninja-build xz-utils patch
+          sudo apt-get build-dep -y flatpak-builder
+          curl -fsSL -o flatpak-builder.tar.xz "$FLATPAK_BUILDER_URL"
+          echo "$FLATPAK_BUILDER_SHA256  flatpak-builder.tar.xz" | sha256sum -c -
+          tar -xJf flatpak-builder.tar.xz
+          (cd flatpak-builder-* && meson setup _build --prefix=/usr/local -Ddocs=disabled -Dtests=false \
+            && ninja -C _build && sudo ninja -C _build install)
+          rm -rf flatpak-builder.tar.xz flatpak-builder-*
+          flatpak-builder --version
+      - name: Install the runtimes
+        run: |
+          # Ubuntu's AppArmor stops bubblewrap, which the builder runs every module in, from
+          # making a user namespace.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub \
+            org.gnome.Platform//49 org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+      - uses: actions/cache@v4
+        with:
+          path: packaging/flatpak/.flatpak-builder
+          key: flatpak-builder-${{ hashFiles('packaging/flatpak/io.github.gridoe.refryt.yml') }}
+          restore-keys: flatpak-builder-
+      - name: Build the bundle
+        run: ./scripts/build-flatpak.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: dist/refryt-*-x86_64.flatpak
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    needs: check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # build-macos.sh needs Xcode 26 for actool, which draws the icon. Use the newest one the
+      # image carries, and say so plainly when none is 26 or later.
+      - name: Select Xcode 26
+        run: |
+          newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+          major="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
+          if [ "${major:-0}" -lt 26 ]; then
+            echo "::error::this runner image has Xcode ${major:-?}; build-macos.sh needs 26 or later"
+            exit 1
+          fi
+      - run: brew install mpv dylibbundler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos
+      - run: ./scripts/build-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/refryt-*-macos-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  # The same checks as a local release, over everything the jobs above built.
+  verify:
+    needs: [check, windows, appimage, flatpak, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends msitools unzip
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cargo fetch --locked
+      - name: Verify the release
+        run: scripts/release.sh verify "${{ needs.check.outputs.version }}" --strict
+
+  # Only a tag publishes. The release stays a draft until every file and the checksums are on it,
+  # so nobody, the in-app updater included, sees one that is half there.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [check, verify]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          # Written outside dist/ and moved in after: the list is read before the file exists.
+          (cd dist && sha256sum refryt-*) > sums.txt
+          cat sums.txt
+          mv sums.txt "dist/refryt-$VERSION-SHA256SUMS.txt"
+          gh release create "v$VERSION" dist/refryt-* \
+            --title "refryt $VERSION" --notes-file "release-notes/$VERSION.md" \
+            --verify-tag --draft
+          gh release edit "v$VERSION" --draft=false

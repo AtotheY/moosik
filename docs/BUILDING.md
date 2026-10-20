@@ -175,31 +175,62 @@ script reads it from there, so the AppImage, the Windows zips, installers and MS
 the Flatpak all name themselves after it. The one other place is the Flatpak's metainfo, which
 lists each release by hand. `scripts/release.sh` does the bumping and checks the rest:
 
+Pushing a `v*` tag builds and publishes the release on GitHub
+(`.github/workflows/release.yml`), so a release is:
+
 ```sh
-just release-prep 0.1.7      # version, Cargo.lock, metainfo, the gate, and a "Release 0.1.7" commit
-just appimage                # then build what ships, on the machine that can:
+just release-prep 0.1.13     # version, Cargo.lock, metainfo, the gate, release-notes/0.1.13.md,
+                             # and a "Release 0.1.13" commit
+$EDITOR release-notes/0.1.13.md                    # write the changes
+git commit -a --amend --no-edit
+git push origin main
+git tag -a v0.1.13 -m "refryt 0.1.13" && git push origin v0.1.13
+```
+
+`prep` refuses a dirty tree, a version that isn't newer, a tag that already exists, and a tree
+with the private local patch applied (that patch is a build for one machine and never part of a
+release). The notes start from `release-notes/TEMPLATE.md`: the install section is filled in for
+the version, and a marker stays in the changes section until it is written, since `verify` fails
+while it is there.
+
+The workflow checks the tag first (it is on `main` and matches `Cargo.toml`, and the notes are
+written), then builds on three runners: the AppImage, the Windows files and the Flatpak on
+Ubuntu, and the macOS image on macOS. It then runs `scripts/release.sh verify --strict` over all
+of them, and only then creates the release, as a draft with every file and
+`refryt-<version>-SHA256SUMS.txt`, and publishes it. A run started by hand from the Actions tab
+does the same without the publishing, which is how a change to the scripts or the workflow is
+tried. The build scripts are the ones used locally; the workflow only installs their tools.
+
+### By hand
+
+The same steps run on a developer machine, which is the way to release when Actions is
+unavailable, or for a build that is only for one machine:
+
+```sh
+just release-prep 0.1.13
+just appimage                # build what ships, on the machine that can:
 ./scripts/build-windows.sh   #   Linux and Windows build here,
 ARCH=aarch64 ./scripts/build-windows.sh && ARCH=aarch64 ./scripts/build-msi.sh   # Windows on ARM,
 ./scripts/build-msi.sh       #   the Windows MSI from that build (needs msitools' wixl),
 just flatpak                 #   the Flatpak here too,
 ./scripts/build-macos.sh     #   and the macOS image on a Mac, copied into dist/
-just release-verify 0.1.7    # checks the repo and dist/ agree
-just release-publish 0.1.7 notes.md      # shows what it would do
-./scripts/release.sh publish 0.1.7 --notes notes.md --yes      # does it
+just release-verify 0.1.13   # checks the repo and dist/ agree
+just release-publish 0.1.13  # shows what it would do
+./scripts/release.sh publish 0.1.13 --yes      # does it
 ```
 
-`prep` refuses a dirty tree, a version that isn't newer, a tag that already exists, and a tree
-with the private local patch applied (that patch is a build for one machine and
-never part of a release). `verify` checks that each file in `dist/` exists, was built after
-`HEAD`'s commit (an older one is stale), and has the right things in it. A missing macOS image is
-a warning, since it can only come from a Mac. `publish` runs `verify` again, then tags `v<version>`,
-pushes `main` and the tag, and creates the release with every artifact attached, then a
-`refryt-<version>-SHA256SUMS.txt` for them. A macOS image uploaded later from the Mac needs the
+`verify` checks that each file in `dist/` exists, was built after `HEAD`'s commit (an older one is
+stale), and has the right things in it. A missing macOS image is a warning here, since by hand it
+can only come from a Mac; `--strict` makes it a failure, as in the workflow. `publish` runs
+`verify` again, then tags `v<version>`, pushes `main` and the tag, and creates the release with
+every artifact attached, then the sums file. A macOS image uploaded later from the Mac needs the
 sums redone: `./scripts/release.sh checksums <version> --yes` reads the published files, from any
-machine, and replaces the old sums file.
+machine, and replaces the old sums file. Pushing the tag also starts the workflow, so by hand
+means publishing before the tag is pushed from anywhere else, or cancelling that run.
 
-There's no CI yet, so the gate in `prep` (fmt, clippy `-D warnings`, the tests, and with `--perf`
-the memory and frame-time gates) is the only thing standing between a change and a release.
+The gate in `prep` (fmt, clippy `-D warnings`, the tests, and with `--perf` the memory and
+frame-time gates) is still the only check between a change and a release: no workflow runs on
+ordinary pushes.
 
 ## Packaged size
 
