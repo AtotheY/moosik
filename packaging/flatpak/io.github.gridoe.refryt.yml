@@ -76,8 +76,9 @@ modules:
       - -Dlcms=disabled
       - -Dunwind=disabled
     sources:
+      # GitHub's mirror of VideoLAN's repository: the same tag, on a host the build can reach.
       - type: git
-        url: https://code.videolan.org/videolan/libplacebo.git
+        url: https://github.com/haasn/libplacebo.git
         tag: v7.351.0
         commit: 98c1416e95b21cd767b84ac9ee430ccadf263ff6
 
