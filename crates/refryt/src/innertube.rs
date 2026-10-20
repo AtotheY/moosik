@@ -1969,13 +1969,43 @@ fn parse_watch_row(row: &Value) -> Option<Track> {
 ///
 /// A `messageRenderer` where a shelf belongs is what an anonymous request gets — the app used to
 /// surface the resulting missing-key error as "could not load your songs: Key /contents/…".
+///
+/// A message alone is not proof, though: a signed-in account whose section is simply empty gets
+/// one too ("No songs uploaded yet"), in the same place and with no Sign in button. Taking that
+/// for a dead session sends such an account into a refresh on every launch, the likely cause of
+/// #4, where it opened the sign-in window. So the answer comes from YouTube's own `logged_in`
+/// flag, and only when a response lacks it from the message carrying a Sign in button, which
+/// the signed-out prompt has and an empty section does not.
 pub fn looks_signed_out(root: &Value) -> bool {
+    if let Some(logged_in) = logged_in(root) {
+        return !logged_in;
+    }
     find_section_list(root).is_some_and(|sections| {
         sections.iter().any(|s| {
-            s.pointer("/itemSectionRenderer/contents/0/messageRenderer")
-                .is_some()
+            s.pointer(
+                "/itemSectionRenderer/contents/0/messageRenderer/button/buttonRenderer\
+                 /navigationEndpoint/signInEndpoint",
+            )
+            .is_some()
         })
     })
+}
+
+/// YouTube's own word on whether the request was signed in: the `logged_in` parameter it reports
+/// for its feedback service in every response's `responseContext`. `None` when it is missing.
+fn logged_in(root: &Value) -> Option<bool> {
+    root.pointer("/responseContext/serviceTrackingParams")?
+        .as_array()?
+        .iter()
+        .filter_map(|service| service.get("params")?.as_array())
+        .flatten()
+        .find(|param| param.get("key").and_then(Value::as_str) == Some("logged_in"))
+        .and_then(|param| match param.get("value")?.as_str()? {
+            "1" | "true" => Some(true),
+            "0" | "false" => Some(false),
+            // A value we do not recognise is no answer: the Sign in button decides instead.
+            _ => None,
+        })
 }
 
 /// The channels an account can browse as, from an `account/accounts_list` response.
@@ -4017,21 +4047,77 @@ mod tests {
         assert!(parse_artist_albums(&Value::Null).is_empty());
     }
 
+    /// A library section's message card, as YouTube sends it, with or without the signed-out
+    /// prompt's Sign in button.
+    fn library_message(text: &str, sign_in_button: bool) -> Value {
+        let mut message = serde_json::json!({"text": {"runs": [{"text": text}]}});
+        if sign_in_button {
+            message["button"] = serde_json::json!({"buttonRenderer": {
+                "text": {"runs": [{"text": "Sign in"}]},
+                "navigationEndpoint": {"signInEndpoint": {"hack": true}}}});
+        }
+        serde_json::json!({"contents": {"singleColumnBrowseResultsRenderer": {
+        "tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
+            {"itemSectionRenderer": {"contents": [{"messageRenderer": message}]}}
+        ]}}}}]}}})
+    }
+
+    fn with_logged_in(mut response: Value, value: &str) -> Value {
+        response["responseContext"] = serde_json::json!({"serviceTrackingParams": [
+            {"service": "CSI", "params": [{"key": "c", "value": "WEB_REMIX"}]},
+            {"service": "GFEEDBACK", "params": [{"key": "logged_in", "value": value}]}
+        ]});
+        response
+    }
+
     /// The response that produced "could not load your songs: Key /contents/… not found". It must
-    /// read as "nothing here", and be distinguishable from a genuinely empty library.
+    /// read as "nothing here", and be distinguishable from a genuinely empty library. Shaped as
+    /// an anonymous request to `FEmusic_liked_albums` comes back (fetched 2026-10-20).
     #[test]
     fn the_signed_out_empty_state_is_recognised_not_an_error() {
-        let anonymous = serde_json::json!({"contents": {"singleColumnBrowseResultsRenderer": {
-        "tabs": [{"tabRenderer": {"content": {"sectionListRenderer": {"contents": [
-            {"itemSectionRenderer": {"contents": [
-                {"messageRenderer": {"text": {"runs": [{"text": "Explore your favorites"}]}}}
-            ]}}
-        ]}}}}]}}});
+        let anonymous = with_logged_in(library_message("Explore your favorites", true), "0");
         assert!(parse_library_section(&anonymous).is_empty());
         assert!(
             looks_signed_out(&anonymous),
             "the signed-out prompt must be recognised, or the session cannot be refreshed"
         );
+        // A response without the flag still has the prompt's Sign in button to go by.
+        assert!(looks_signed_out(&library_message(
+            "Explore your favorites",
+            true
+        )));
+    }
+
+    /// The likely false alarm behind #4: a section with nothing in it answers with a message
+    /// where the list would be — signed in, with no Sign in button and `logged_in` 1, as the
+    /// Uploads sections of an account without uploads came back (2026-10-20). That is an empty
+    /// section, not a dead session, and must not send the app off to refresh it.
+    #[test]
+    fn an_empty_section_of_a_signed_in_library_is_not_signed_out() {
+        let empty = library_message("No songs uploaded yet", false);
+        assert!(!looks_signed_out(&with_logged_in(empty.clone(), "1")));
+        assert!(!looks_signed_out(&empty));
+        assert!(parse_library_section(&empty).is_empty());
+    }
+
+    /// YouTube's flag wins over the page's look either way: a Sign in button on a request it
+    /// reports as signed in is not taken for an expired session.
+    #[test]
+    fn youtubes_logged_in_flag_decides() {
+        let prompt = library_message("Explore your favorites", true);
+        assert!(!looks_signed_out(&with_logged_in(prompt, "1")));
+        let empty = library_message("No songs uploaded yet", false);
+        assert!(looks_signed_out(&with_logged_in(empty, "0")));
+    }
+
+    /// A flag in a form we do not know is no answer either way: the Sign in button decides, as
+    /// it does when the flag is missing.
+    #[test]
+    fn an_unrecognised_logged_in_value_falls_back_to_the_sign_in_button() {
+        let prompt = library_message("Explore your favorites", true);
+        assert!(looks_signed_out(&with_logged_in(prompt, "maybe")));
+        let empty = library_message("No songs uploaded yet", false);
+        assert!(!looks_signed_out(&with_logged_in(empty, "maybe")));
     }
 
     #[test]

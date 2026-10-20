@@ -1289,15 +1289,6 @@ impl Api {
         Ok(feed)
     }
 
-    /// What you played, in dated shelves. Same shape as every other shelf feed, so the page
-    /// reuses the ordinary shelf renderer — playing, right-clicking and rating work for free.
-    ///
-    /// Unlike New Releases/Charts (never legitimately empty, so an empty parse there means the
-    /// parser broke), History genuinely can be empty — a fresh account, paused watch history,
-    /// or just nothing played yet — so it is not treated as an error on its own. Only the
-    /// signed-out placeholder shape is: that one really does mean something went wrong (an
-    /// expired session slipping through as if it were anonymous), which `looks_signed_out`
-    /// already recognises for the library feed's own empty state.
     /// Whether the signed-in account holds YouTube Premium, read off its "Paid memberships"
     /// page — see [`innertube::parse_premium`]. Signed out is `Ok(false)`: there is no account
     /// to hold anything.
@@ -1310,6 +1301,15 @@ impl Api {
         Ok(innertube::parse_premium(&json))
     }
 
+    /// What you played, in dated shelves. Same shape as every other shelf feed, so the page
+    /// reuses the ordinary shelf renderer — playing, right-clicking and rating work for free.
+    ///
+    /// Unlike New Releases/Charts (never legitimately empty, so an empty parse there means the
+    /// parser broke), History genuinely can be empty — a fresh account, paused watch history,
+    /// or just nothing played yet — so it is not treated as an error on its own. Only a
+    /// signed-out answer is: that one really does mean something went wrong (an expired
+    /// session slipping through as if it were anonymous), and `looks_signed_out` tells it from
+    /// an empty history by YouTube's own `logged_in` flag.
     pub async fn history(&self) -> Result<Vec<model::Shelf>> {
         let json = self.browse(HISTORY).await?;
         if innertube::looks_signed_out(&json) {
