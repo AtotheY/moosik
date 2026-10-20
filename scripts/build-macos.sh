@@ -102,7 +102,17 @@ curl -fsSL -o "$app/Contents/MacOS/yt-dlp" \
 chmod +x "$app/Contents/MacOS/yt-dlp"
 
 echo "signing (ad hoc)"
-codesign --force --deep --sign - "$app"
+# codesign fails now and then on a CI runner with nothing to say, and passes on the next try.
+signed=0
+for attempt in 1 2 3; do
+    if codesign --force --deep --sign - "$app"; then
+        signed=1
+        break
+    fi
+    echo "codesign failed (attempt $attempt of 3)" >&2
+    sleep 3
+done
+[ "$signed" = 1 ] || { echo "error: codesign failed" >&2; exit 1; }
 
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
