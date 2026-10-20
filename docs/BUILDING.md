@@ -194,8 +194,10 @@ the version, and a marker stays in the changes section until it is written, sinc
 while it is there.
 
 The workflow checks the tag first (it is on `main` and matches `Cargo.toml`, and the notes are
-written), then builds on three runners: the AppImage, the Windows files and the Flatpak on
-Ubuntu, and the macOS image on macOS. It then runs `scripts/release.sh verify --strict` over all
+written), then builds on four runners: the Windows files and the Flatpak on Ubuntu, the
+AppImage in an Arch Linux container, and the macOS image on macOS. The AppImage bundles every
+library short of glibc, so it is built on a system as new as the ones it runs on, as it is by
+hand: bundled from Ubuntu's older glib, it fails to start on a newer host. It then runs `scripts/release.sh verify --strict` over all
 of them, and only then creates the release, as a draft with every file and
 `refryt-<version>-SHA256SUMS.txt`, and publishes it. A run started by hand from the Actions tab
 does the same without the publishing, which is how a change to the scripts or the workflow is
