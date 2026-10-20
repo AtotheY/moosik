@@ -35,7 +35,11 @@ const HERO_ARC_STEPS: usize = 10;
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     if app.artist_loading {
-        skeleton(app, ui);
+        if app.loading_a_profile() {
+            profile_skeleton(app, ui);
+        } else {
+            skeleton(app, ui);
+        }
         return;
     }
     if let Some(err) = app.artist_error.clone() {
@@ -210,6 +214,99 @@ fn skeleton(app: &App, ui: &mut egui::Ui) {
     widgets::skeleton_heading(ui, &p, false);
     ui.add_space(4.0);
     widgets::skeleton_grid(ui, &p, 1, widgets::ArtShape::Square);
+}
+
+/// The placeholder for a person's channel: the circle header, the control row and, on someone
+/// else's page, the first shelf. It is [`circle_header`] and [`action_row`] laid out with grey
+/// shapes, so nothing moves when the page lands. Your own page has no Subscribe and, as far as
+/// the account list can tell, nothing to put under the row; another person's has Subscribe and
+/// its shelves (Videos, Playlists), of which the first stands in. Their banner, when they have
+/// one, is the one thing this cannot know and still arrives as a surprise.
+fn profile_skeleton(app: &App, ui: &mut egui::Ui) {
+    use crate::ui::{CREDIT_AIR, CREDIT_CAP_HALF, DETAIL_TITLE_MAX, HEADER_ART_FLOOR_PT};
+    let p = app.palette;
+    let small = egui::CornerRadius::same(crate::theme::RADIUS_SMALL);
+    let own = app.artist_id().is_some() && app.artist_id() == app.own_channel_id();
+
+    // `page_header`'s art, circle, and the text block on its bottom edge.
+    let top = ui.cursor().top();
+    let available = ui.available_width();
+    let art_size = HEADER_ART_PT.min((available - 20.0 - 8.0 - 140.0).max(HEADER_ART_FLOOR_PT));
+    let art = egui::Rect::from_min_size(
+        ui.cursor().min + vec2(0.0, crate::theme::HEADER_TOP_PAD),
+        vec2(art_size, art_size),
+    );
+    widgets::skeleton_fill(
+        ui,
+        art,
+        egui::CornerRadius::same((art_size / 2.0) as u8),
+        &p,
+    );
+    let tx = art.right() + 20.0;
+    let text_w = (available - art_size - 20.0 - 8.0).max(0.0);
+    let title_font = crate::theme::bold(DETAIL_TITLE_MAX);
+    let title_rel = DETAIL_TITLE_MAX * 0.5;
+    let title_ink = widgets::ink_drop(ui, "Title", &title_font);
+    // One line under the title, the audience: `circle_header` passes it as `second_plain`.
+    let audience = title_rel + title_ink + CREDIT_AIR + CREDIT_CAP_HALF + 4.0;
+    let text_top = art.top() + (art_size - (audience + 7.0)).max(0.0);
+    let baseline = text_top + title_rel + title_ink;
+    let cap = DETAIL_TITLE_MAX * 0.727;
+    widgets::skeleton_fill(
+        ui,
+        egui::Rect::from_min_max(
+            pos2(tx, baseline - cap),
+            pos2(tx + (text_w * 0.3).min(320.0), baseline),
+        ),
+        small,
+        &p,
+    );
+    widgets::skeleton_fill(
+        ui,
+        egui::Rect::from_min_size(
+            pos2(tx, text_top + audience - 4.5),
+            vec2((text_w * 0.36).clamp(60.0_f32.min(text_w), 380.0), 9.0),
+        ),
+        small,
+        &p,
+    );
+    ui.add_space(art.bottom() - top + 4.0);
+
+    // The row: Subscribe, off your own page, then •••, which both have. The same calls as
+    // `action_row`, so the spacing is its own.
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        if !own {
+            let font = crate::theme::semibold(13.0);
+            let label_w = ui.fonts_mut(|f| {
+                f.layout_no_wrap("Subscribe".to_owned(), font, egui::Color32::PLACEHOLDER)
+                    .size()
+                    .x
+            });
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(label_w + 28.0, 32.0), egui::Sense::hover());
+            widgets::skeleton_fill(ui, rect, egui::CornerRadius::same(16), &p);
+            ui.add_space(6.0);
+        }
+        // `icon_button(.., 16.0, ..)`: a 30 pt box round a 16 pt glyph, drawn once the
+        // placeholders are.
+        let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::hover());
+        if widgets::skeleton_visible(ui) {
+            crate::icons::Icon::Ellipsis.image(p.dim, 16.0).paint_at(
+                ui,
+                egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)),
+            );
+        }
+    });
+
+    if !own {
+        // The first shelf, as `artist_shelf` draws it.
+        ui.add_space(20.0);
+        widgets::skeleton_heading(ui, &p, false);
+        ui.add_space(4.0);
+        widgets::skeleton_grid(ui, &p, 1, widgets::ArtShape::Square);
+    }
 }
 
 /// Where the hero's scrim starts: its gradient covers the lower 60% of the band, and never less

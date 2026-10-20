@@ -358,6 +358,16 @@ const WINDOW_FIT_TRIES: u8 = 12;
 
 const HOME_STALE: Duration = Duration::from_secs(30 * 60);
 
+/// Whether the channel page for `loading` is a person's: marked as one when it was opened, or
+/// the signed-in account's own channel.
+fn is_profile(
+    loading: Option<&str>,
+    marked: &std::collections::HashSet<String>,
+    own_channel: Option<&str>,
+) -> bool {
+    loading.is_some_and(|id| marked.contains(id) || own_channel == Some(id))
+}
+
 /// Whether a feed fetched at `loaded_at` is due a refresh by `now`. A feed with no time is
 /// not stale: it has not loaded yet, and loading it is `load_home`'s job.
 fn home_is_stale(loaded_at: Option<Instant>, now: Instant) -> bool {
@@ -1655,6 +1665,10 @@ pub struct App {
     pub(crate) settings: crate::settings::Settings,
     /// The channels this account can browse as. Empty until Settings asks.
     pub(crate) accounts: Vec<crate::model::Account>,
+    /// Channels opened from a link that names a person rather than an artist (a playlist's
+    /// owner). The page cannot tell, before it loads, which kind of channel it is opening; this
+    /// is how its skeleton takes the profile's shape instead of the artist's.
+    profile_ids: std::collections::HashSet<String>,
     /// Live counters behind `--stats`; free when off.
     pub(crate) stats: Stats,
     /// Print one line of counters and exit, once this much time has passed. Used by
@@ -2071,6 +2085,7 @@ impl App {
             images: Images::new(),
             settings,
             accounts: Vec::new(),
+            profile_ids: std::collections::HashSet::new(),
             autoscroll: autoscroll.then_some(0.0),
             autoscroll_max: autoscroll_max.unwrap_or(f32::INFINITY),
             scroll_to_top: true,
@@ -3565,6 +3580,25 @@ impl App {
     /// empty). `artist_for` is by construction the id the load used.
     pub(crate) fn artist_id(&self) -> Option<&str> {
         self.artist_for.as_deref()
+    }
+
+    /// Remember that `id` is somebody's profile, before navigating to it.
+    pub(crate) fn mark_profile(&mut self, id: &str) {
+        self.profile_ids.insert(id.to_owned());
+    }
+
+    /// Whether the channel page now loading is a profile (a person's) and not an artist's: your
+    /// own, or one opened from an owner link. Decides which skeleton stands in for it.
+    pub(crate) fn loading_a_profile(&self) -> bool {
+        is_profile(self.artist_id(), &self.profile_ids, self.own_channel_id())
+    }
+
+    /// The signed-in account's own channel, once the account list is in.
+    pub(crate) fn own_channel_id(&self) -> Option<&str> {
+        self.accounts
+            .iter()
+            .find(|account| account.selected)
+            .and_then(|account| account.channel_id.as_deref())
     }
 
     fn album_is_for(&self, id: &str) -> bool {
@@ -8001,6 +8035,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_channel_page_is_a_profile_when_marked_or_your_own() {
+        let marked: std::collections::HashSet<String> = ["UCowner".to_owned()].into();
+        let none = std::collections::HashSet::new();
+        assert!(is_profile(Some("UCowner"), &marked, None));
+        assert!(is_profile(Some("UCme"), &none, Some("UCme")));
+        assert!(!is_profile(Some("UCartist"), &marked, Some("UCme")));
+        assert!(!is_profile(None, &marked, Some("UCme")));
+    }
 
     fn artist(id: &str) -> Route {
         Route::Artist(id.to_owned())

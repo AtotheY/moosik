@@ -4,7 +4,7 @@
 //! description under the title and the owner linked into the meta line below it ("Owner •
 //! N songs • duration"). The ••• also carries Edit and Delete for your own lists.
 
-use crate::app::{App, PlaylistSort};
+use crate::app::{App, PlaylistSort, Route};
 use crate::model::Playlist;
 use crate::ui::{ListClick, PAGE_ART_SIZE, failed, track_rows_quiet};
 use crate::widgets;
@@ -420,6 +420,11 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(route) = out.link {
+        // The header links only the owner: a person, whose page loads under the profile's
+        // skeleton, not the artist's.
+        if let Route::Artist(id) = &route {
+            app.mark_profile(id);
+        }
         app.navigate(route);
         return;
     }
