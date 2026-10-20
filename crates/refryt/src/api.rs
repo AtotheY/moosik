@@ -124,6 +124,10 @@ pub struct Api {
     /// a rotated cookie at once (`Self::library`'s four sections fetch concurrently), and without
     /// this each would launch its own `yt-dlp` cookie re-import in parallel.
     refresh: Mutex<()>,
+    /// The cookie the last failed refresh was for. Every caller that meets a stale session asks
+    /// for a refresh, and a failure changes nothing they could notice, so without this each one
+    /// tried again — at launch that was one sign-in window (or Keychain prompt) per caller.
+    refresh_failed: Mutex<Option<String>>,
 }
 
 impl Api {
@@ -140,6 +144,7 @@ impl Api {
             browser: Mutex::new(None),
             session: Mutex::new(session),
             refresh: Mutex::new(()),
+            refresh_failed: Mutex::new(None),
         })
     }
 
@@ -253,6 +258,16 @@ impl Api {
             .await
     }
 
+    /// Renew a window session in the background — [`Self::sign_in_from_window`] without the
+    /// window. `install_cookie` still checks the result with YouTube, so a refresh that only
+    /// found the same stale cookie fails rather than being saved.
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    async fn refresh_from_window(&self) -> Result<String> {
+        let cookie = crate::webview_login::refresh().await?;
+        self.install_cookie(cookie, Some(crate::webview_login::SOURCE))
+            .await
+    }
+
     /// Install a cookie, verify with YouTube that it is really a session, and persist it.
     ///
     /// Three gates, because the first two are each insufficient on their own:
@@ -283,6 +298,7 @@ impl Api {
         )?;
 
         auth::save_session(&cookie, source)?;
+        *self.refresh_failed.lock().await = None;
         self.share_with_ytdlp(Some(&cookie));
         *self.session.lock().await = Some(auth::Session {
             cookie,
@@ -402,6 +418,10 @@ impl Api {
         if after != before {
             return after.is_some();
         }
+        // This very cookie has already failed to refresh: trying again would only repeat it.
+        if after.is_some() && *self.refresh_failed.lock().await == after {
+            return false;
+        }
         let source = self
             .session
             .lock()
@@ -412,10 +432,11 @@ impl Api {
             return false;
         };
         let refreshed = match source.as_str() {
-            // Not a browser `--cookies-from-browser` knows about: reopening the sign-in window
-            // finds Google's session still in its profile, so this is normally a plain capture.
+            // Not a browser `--cookies-from-browser` knows about: the sign-in window, run hidden,
+            // finds Google's session still in its profile. It never shows a login page here —
+            // a refresh is not the user asking to sign in.
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            crate::webview_login::SOURCE => self.sign_in_from_window().await,
+            crate::webview_login::SOURCE => self.refresh_from_window().await,
             _ => self.sign_in_from_browser(&source).await,
         };
         match refreshed {
@@ -425,6 +446,7 @@ impl Api {
             }
             Err(e) => {
                 tracing::warn!(%source, error = %format!("{e:#}"), "could not refresh the session");
+                *self.refresh_failed.lock().await = after;
                 false
             }
         }

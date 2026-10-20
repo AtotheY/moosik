@@ -434,6 +434,10 @@ pub enum Event {
     SignInFailed {
         error: String,
     },
+    /// The stored session was checked at launch, YouTube no longer knows it, and it could not be
+    /// renewed in the background. Said out loud because the only other sign was the library
+    /// quietly emptying.
+    SessionExpired,
     /// `generation` is the value `Backend::play`/`play_video` returned when this attempt was
     /// started — see `App::play_generation`'s own doc comment for why every one of these three
     /// carries it.
@@ -2044,7 +2048,8 @@ impl Backend {
                     // Not deleted: a rotated credential whose refresh failed looks identical to a
                     // dead one, and the next run may well recover it.
                     api.forget_session().await;
-                    Event::AuthChanged(AuthState::SignedOut)
+                    Self::emit(&tx, &ctx, Event::AuthChanged(AuthState::SignedOut));
+                    Event::SessionExpired
                 }
                 // We could not ask. Keep the session — being offline is not being signed out.
                 Err(e) => {

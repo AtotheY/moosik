@@ -147,8 +147,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow", "NSView",
     "NSScreen",
 ] }
-# `window_fullscreen.rs` saves and restores the window frame (an `NSRect`).
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+# `window_fullscreen.rs` saves and restores the window frame (an `NSRect`); `webview_login.rs`
+# asks `NSProcessInfo` whether this macOS has named WebKit data stores (14 and later).
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "NSGeometry", "NSProcessInfo",
+] }
 
 # Embeds refryt.ico as the .exe's own icon resource (build.rs) — unconditional, not under a
 # `cfg(target_os = "windows")` table: build scripts always compile for the *host*, so a

@@ -36,9 +36,19 @@
 //!   `cookies_for_url` on macOS only returns cookies whose domain exactly equals the page's host,
 //!   and the session cookies are set on `.youtube.com`, so it never found them and the window
 //!   waited forever.
-//! - The web view uses a non-persistent store, because WKWebView ignores a data directory. Google's
-//!   session therefore does not outlive the window, so a refresh asks for the password again,
-//!   and `forget` has no profile folder to delete.
+//! - WKWebView ignores a data directory, so the profile is a named WebKit data store instead
+//!   (macOS 14 and later). Its id lives in `sign-in-window.id` next to the session; `forget`
+//!   deletes that file, and the next window starts a new store and removes the old one. Before
+//!   macOS 14 there are no named stores, so the window runs incognito and a refresh cannot
+//!   happen without the user signing in again.
+//!
+//! # Refreshing in the background
+//!
+//! Google's cookies go stale on their own, and `Api::refresh_from_source` renews them by running
+//! this window again with `--silent`: hidden, pointed at YouTube Music rather than the login
+//! page, and given a few seconds after the page loads for Google to renew the session. If the
+//! profile is no longer signed in either, it gives up instead of showing a login page nobody
+//! asked for. A window only ever appears because the user clicked Sign in.
 //!
 //! Both desktop platforms get it: on Windows it is the only path left (the browser import cannot
 //! read a modern Chromium store), and on Linux it is the one that needs no browser already signed
@@ -46,9 +56,7 @@
 //! itself is not bundled into the AppImage; the host's own is used, which most desktops carry.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -65,7 +73,7 @@ use tao::platform::windows::EventLoopBuilderExtWindows;
 use tao::window::WindowBuilder;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use wry::WebContext;
-use wry::WebViewBuilder;
+use wry::{PageLoadEvent, WebViewBuilder};
 
 /// The value stored as the session's `source` so a stale cookie can be refreshed by reopening
 /// this same window — see `Api::refresh_from_source`.
@@ -74,6 +82,9 @@ pub const SOURCE: &str = "window";
 /// The argument that puts the binary into sign-in-window mode, followed by the file to write the
 /// captured cookie to.
 pub const ARG: &str = "--sign-in-window";
+
+/// Follows [`ARG`]'s file to make the child a background refresh: no window, no login page.
+pub const SILENT_ARG: &str = "--silent";
 
 /// The sign-in page, pointed back at YouTube Music when it finishes.
 ///
@@ -86,6 +97,25 @@ const SIGN_IN_URL: &str = "https://accounts.google.com/ServiceLogin?service=yout
 /// How often the cookie jar is looked at while the window is open. Cheap: the API returns the
 /// store's contents without a network round trip, and a poll only ever runs while the window is.
 const POLL: Duration = Duration::from_secs(1);
+
+/// Where a background refresh points the window. YouTube Music itself, not `SIGN_IN_URL`: with
+/// Google still signed in the profile, loading it is what renews the session; without, it would
+/// be a login page in a window nobody can see.
+const REFRESH_URL: &str = "https://music.youtube.com/";
+
+/// How long a background refresh waits after the last page load before reading the jar. The
+/// cookies on disk are the stale ones until the page has been answered and Google's own script
+/// has renewed the short-lived `__Secure-1PSIDTS`, so the first read cannot be the moment the
+/// page finishes. Counted from the *last* load because the page can move on by itself: a
+/// signed-out profile ends on Google's consent or login page, which settles to "not signed in"
+/// within seconds rather than at [`REFRESH_TIMEOUT`].
+const SETTLE: Duration = Duration::from_secs(3);
+
+/// The longest a background refresh may take, page load included, before it gives up.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Why a background refresh came back empty.
+const NOT_REMEMBERED: &str = "the saved sign-in has ended; sign in again";
 
 /// Set in the child's environment when the app's own theme is dark; see [`set_dark`].
 #[cfg(target_os = "linux")]
@@ -109,15 +139,35 @@ pub fn set_dark(dark: bool) {
 /// thread here — and waits for it, so the cookie only comes back once the user is done (or the
 /// window is closed, which is an error with the child's own explanation).
 pub async fn capture() -> Result<String> {
+    run_child(false).await
+}
+
+/// Renew a stale session from the window's profile without showing anything.
+///
+/// Fails at once when there is no profile to renew from — never signed in through the window,
+/// signed out since, or macOS before 14 — and otherwise when Google no longer knows the profile
+/// either. Either way the caller tells the user to sign in again; this never opens a login page
+/// by itself.
+pub async fn refresh() -> Result<String> {
+    if !remembers() {
+        bail!(NOT_REMEMBERED);
+    }
+    run_child(true).await
+}
+
+/// Start the window as a child of this binary and wait for the session it writes.
+async fn run_child(silent: bool) -> Result<String> {
     let jar = temp_cookie_path();
     // The file holds a live session: gone whether this returns, fails, or the future is dropped.
     let _guard = Cleanup(jar.clone());
 
     let exe = std::env::current_exe().context("could not find refryt's own executable")?;
     let mut command = tokio::process::Command::new(exe);
+    command.arg(ARG).arg(&jar);
+    if silent {
+        command.arg(SILENT_ARG);
+    }
     command
-        .arg(ARG)
-        .arg(&jar)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -208,33 +258,159 @@ pub async fn capture() -> Result<String> {
 /// window's own profile and silently re-captures the same account: no account to choose and no
 /// way to sign in as anyone else. Best effort — the profile is only a cache of credentials, and
 /// a failed delete just means the old behaviour.
+///
+/// On macOS the profile is a WebKit data store, which only a process with WebKit running can
+/// delete. Removing its id is what counts: the next window starts a new store, and removes the
+/// old one as it opens (see `macos_store::remove_others`).
 pub fn forget() {
+    #[cfg(not(target_os = "macos"))]
     if let Ok(dir) = profile_dir() {
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[cfg(target_os = "macos")]
+    if let Ok(path) = macos_store::id_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Whether the window has a profile a background refresh could renew the session from.
+fn remembers() -> bool {
+    #[cfg(not(target_os = "macos"))]
+    return profile_dir().is_ok_and(|dir| dir.is_dir());
+    #[cfg(target_os = "macos")]
+    return macos_store::available() && matches!(macos_store::id(false), Ok(Some(_)));
 }
 
 /// The child half: open the window, and on success write the cookie to `path`.
 ///
-/// Called from `main` when [`ARG`] is present. A failure is printed by `main` and exits non-zero,
-/// which is what tells [`capture`] the missing file is a failed sign-in rather than a bug.
-pub fn capture_here(path: &Path) -> Result<()> {
-    let cookie = run_window()?;
+/// Called from `main` when [`ARG`] is present, with `silent` when [`SILENT_ARG`] follows. A
+/// failure is printed by `main` and exits non-zero, which is what tells [`capture`] the missing
+/// file is a failed sign-in rather than a bug.
+pub fn capture_here(path: &Path, silent: bool) -> Result<()> {
+    let cookie = run_window(silent)?;
     std::fs::write(path, cookie)
         .with_context(|| format!("could not write the session to {}", path.display()))
 }
 
-/// Where the sign-in window keeps its WebView2 profile.
-///
-/// Under refryt's config directory so Google's own session outlives the process: reopening the
-/// window later — including for a refresh — usually captures a fresh cookie without the user
-/// typing anything.
-fn profile_dir() -> Result<PathBuf> {
+/// A file or folder next to the stored session, in refryt's config directory.
+fn beside_session(name: &str) -> Result<PathBuf> {
     let path = crate::auth::cookie_path()?;
     let parent = path
         .parent()
         .context("the cookie path has no directory to put the profile in")?;
-    Ok(parent.join("sign-in-window"))
+    Ok(parent.join(name))
+}
+
+/// Where the sign-in window keeps its WebView2 / WebKitGTK profile.
+///
+/// Under refryt's config directory so Google's own session outlives the process: reopening the
+/// window later — including for a refresh — usually captures a fresh cookie without the user
+/// typing anything.
+#[cfg(not(target_os = "macos"))]
+fn profile_dir() -> Result<PathBuf> {
+    beside_session("sign-in-window")
+}
+
+/// The macOS profile: a WebKit data store named by a random id kept beside the session.
+///
+/// WKWebView takes no data directory, so a named store (macOS 14+) is the only way for Google's
+/// session to outlive the window and still be something `forget` can drop.
+#[cfg(target_os = "macos")]
+mod macos_store {
+    use std::io::Read;
+    use std::path::PathBuf;
+
+    use anyhow::{Context, Result};
+
+    pub fn id_path() -> Result<PathBuf> {
+        super::beside_session("sign-in-window.id")
+    }
+
+    /// Whether this macOS has named data stores. They arrived in macOS 14; refryt runs from 11.
+    pub fn available() -> bool {
+        use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
+        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+            majorVersion: 14,
+            minorVersion: 0,
+            patchVersion: 0,
+        })
+    }
+
+    /// The store's id, made and saved on first use when `create` is set.
+    pub fn id(create: bool) -> Result<Option<[u8; 16]>> {
+        let path = id_path()?;
+        if let Some(id) = std::fs::read_to_string(&path).ok().and_then(|s| parse(&s)) {
+            return Ok(Some(id));
+        }
+        if !create {
+            return Ok(None);
+        }
+        let mut id = [0u8; 16];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut id))
+            .context("could not make an id for the sign-in window's profile")?;
+        std::fs::write(&path, format(&id))
+            .with_context(|| format!("could not write {}", path.display()))?;
+        Ok(Some(id))
+    }
+
+    /// Delete every store this app owns except `keep`: what is left after a sign-out.
+    ///
+    /// Must run on the main thread with the event loop going, since WebKit answers through
+    /// completion handlers. Best effort; a store that cannot be removed now is tried next time.
+    pub fn remove_others(keep: [u8; 16]) {
+        use wry::{WebView, WebViewExtDarwin};
+        let _ = WebView::fetch_data_store_identifiers(move |ids| {
+            for id in ids.into_iter().filter(|id| *id != keep) {
+                WebView::remove_data_store(&id, |_| {});
+            }
+        });
+    }
+
+    pub fn parse(text: &str) -> Option<[u8; 16]> {
+        let text = text.trim();
+        if text.len() != 32 {
+            return None;
+        }
+        let mut id = [0u8; 16];
+        for (i, byte) in id.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(id)
+    }
+
+    pub fn format(id: &[u8; 16]) -> String {
+        id.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+/// What one look at the window found: [`poll`]'s answer to both event loops.
+enum Poll {
+    Done(Result<String>),
+    Wait,
+}
+
+/// One look at the window. A sign-in waits for as long as the user takes. A background refresh
+/// waits only until no page has loaded for [`SETTLE`], then takes what is there, and never runs past
+/// [`REFRESH_TIMEOUT`].
+fn poll(webview: &wry::WebView, silent: bool, started: Instant, loaded: Option<Instant>) -> Poll {
+    if silent {
+        let now = Instant::now();
+        if !loaded.is_some_and(|at| now >= at + SETTLE) {
+            return if now >= started + REFRESH_TIMEOUT {
+                Poll::Done(Err(anyhow!(NOT_REMEMBERED)))
+            } else {
+                Poll::Wait
+            };
+        }
+    }
+    match session_cookie(webview) {
+        Ok(Some(cookie)) => Poll::Done(Ok(cookie)),
+        // Loaded, settled, and still signed out: Google's own session in the profile has ended.
+        Ok(None) if silent => Poll::Done(Err(anyhow!(NOT_REMEMBERED))),
+        Ok(None) => Poll::Wait,
+        Err(e) => Poll::Done(Err(e)),
+    }
 }
 
 /// The window and its whole event loop. Blocks until the session is captured or the window is
@@ -243,14 +419,28 @@ fn profile_dir() -> Result<PathBuf> {
 /// Windows and macOS: tao's loop with wry's WebView2 / WKWebView — see the module doc for why
 /// the window cannot share the app's own loop. On macOS the child process owns its main thread,
 /// which AppKit insists the event loop run on.
+///
+/// `silent` is a background refresh: the window is never shown (and on macOS the child takes no
+/// Dock icon), and the page is YouTube Music rather than the login page.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn run_window() -> Result<String> {
+fn run_window(silent: bool) -> Result<String> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     #[cfg(target_os = "windows")]
     let dir = {
         let dir = profile_dir()?;
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("could not create {}", dir.display()))?;
         dir
+    };
+    // The store is chosen before anything opens. A sign-in makes one if there is none yet (the
+    // first sign-in, or the first after a sign-out); a refresh only runs when one exists.
+    #[cfg(target_os = "macos")]
+    let store = if macos_store::available() {
+        macos_store::id(true)?
+    } else {
+        None
     };
 
     // This process is the one that exists for this window, so the loop may as well own its
@@ -259,19 +449,39 @@ fn run_window() -> Result<String> {
     let mut builder = EventLoopBuilder::new();
     #[cfg(target_os = "windows")]
     builder.with_any_thread(true);
+    #[allow(unused_mut)]
     let mut event_loop = builder.build();
+    // A Dock icon appearing and vanishing at launch would be the one visible trace of a refresh.
+    #[cfg(target_os = "macos")]
+    if silent {
+        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+        event_loop.set_activation_policy(ActivationPolicy::Prohibited);
+    }
     let window = WindowBuilder::new()
         .with_title("Sign in to YouTube Music")
         .with_inner_size(LogicalSize::new(560.0, 780.0))
         .with_min_inner_size(LogicalSize::new(420.0, 560.0))
+        .with_visible(!silent)
         .build(&event_loop)
         .context("could not create the sign-in window")?;
+
+    let url = if silent { REFRESH_URL } else { SIGN_IN_URL };
+    let loaded: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let on_load = {
+        let loaded = Rc::clone(&loaded);
+        move |event: PageLoadEvent, _url: String| {
+            if matches!(event, PageLoadEvent::Finished) {
+                loaded.set(Some(Instant::now()));
+            }
+        }
+    };
 
     #[cfg(target_os = "windows")]
     let webview = {
         let mut context = WebContext::new(Some(dir));
         WebViewBuilder::new_with_web_context(&mut context)
-            .with_url(SIGN_IN_URL)
+            .with_url(url)
+            .with_on_page_load_handler(on_load)
             .build(&window)
             .context(
                 "could not open the sign-in window. It needs the Microsoft Edge WebView2 \
@@ -279,39 +489,51 @@ fn run_window() -> Result<String> {
                  Evergreen runtime from Microsoft and try again",
             )?
     };
-    // WKWebView ignores a data directory, so the profile cannot live under the config folder
-    // where `forget` could delete it. A non-persistent store makes signing out forget the Google
-    // session by construction, at the price of typing the password again on a refresh.
+    // WKWebView ignores a data directory, so the profile is a named data store (macOS 14+) that
+    // `forget` drops by forgetting its id. Older macOS has no named stores, and there the window
+    // stays non-persistent: signing out still forgets Google's session, at the price of
+    // `refresh` never being able to renew one.
     #[cfg(target_os = "macos")]
-    let webview = WebViewBuilder::new()
-        .with_incognito(true)
-        // A bare WKWebView sends no `Version/x Safari/x` token, and YouTube Music answers that
-        // with its "not optimised for your browser" dialog over the page. Say Safari, as
-        // Safari does (the macOS token is frozen at 10_15_7 on purpose).
-        .with_user_agent(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
-             (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-        )
-        .with_url(SIGN_IN_URL)
-        .build(&window)
-        .context("could not open the sign-in window")?;
+    let webview = {
+        use wry::WebViewBuilderExtDarwin;
+        let builder = match store {
+            Some(id) => WebViewBuilder::new().with_data_store_identifier(id),
+            None => WebViewBuilder::new().with_incognito(true),
+        };
+        builder
+            // A bare WKWebView sends no `Version/x Safari/x` token, and YouTube Music answers
+            // that with its "not optimised for your browser" dialog over the page. Say Safari,
+            // as Safari does (the macOS token is frozen at 10_15_7 on purpose).
+            .with_user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+                 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+            )
+            .with_url(url)
+            .with_on_page_load_handler(on_load)
+            .build(&window)
+            .context("could not open the sign-in window")?
+    };
 
+    let started = Instant::now();
     let mut outcome: Option<Result<String>> = None;
-    let mut deadline = Instant::now() + POLL;
+    let mut deadline = started + POLL;
     event_loop.run_return(|event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(deadline);
         match event {
+            // The stores a sign-out left behind go now, while WebKit is running to delete them.
+            #[cfg(target_os = "macos")]
+            Event::NewEvents(StartCause::Init) => {
+                if let Some(id) = store {
+                    macos_store::remove_others(id);
+                }
+            }
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-                match session_cookie(&webview) {
-                    Ok(Some(cookie)) => {
-                        outcome = Some(Ok(cookie));
+                match poll(&webview, silent, started, loaded.get()) {
+                    Poll::Done(result) => {
+                        outcome = Some(result);
                         *control_flow = ControlFlow::Exit;
                     }
-                    Ok(None) => deadline = Instant::now() + POLL,
-                    Err(e) => {
-                        outcome = Some(Err(e));
-                        *control_flow = ControlFlow::Exit;
-                    }
+                    Poll::Wait => deadline = Instant::now() + POLL,
                 }
             }
             Event::WindowEvent {
@@ -337,9 +559,12 @@ fn run_window() -> Result<String> {
 /// widget never paints, leaving an empty window. `build_gtk` embeds the widget in an ordinary
 /// GTK window instead, which is the path wry recommends on Linux and the one that behaves on
 /// Wayland and X11 alike.
+///
+/// `silent` builds into a `gtk::OffscreenWindow`: WebKitGTK loads and renders there as it would
+/// on screen, but nothing is ever mapped.
 #[cfg(target_os = "linux")]
-fn run_window() -> Result<String> {
-    use std::cell::RefCell;
+fn run_window(silent: bool) -> Result<String> {
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use gtk::prelude::*;
@@ -354,17 +579,31 @@ fn run_window() -> Result<String> {
     {
         settings.set_gtk_application_prefer_dark_theme(true);
     }
-    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    let window: gtk::Window = if silent {
+        gtk::OffscreenWindow::new().upcast()
+    } else {
+        gtk::Window::new(gtk::WindowType::Toplevel)
+    };
     window.set_title("Sign in to YouTube Music");
     window.set_default_size(560, 780);
     window.set_size_request(420, 560);
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
     window.add(&vbox);
 
+    let loaded: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let on_load = {
+        let loaded = Rc::clone(&loaded);
+        move |event: PageLoadEvent, _url: String| {
+            if matches!(event, PageLoadEvent::Finished) {
+                loaded.set(Some(Instant::now()));
+            }
+        }
+    };
     let mut context = WebContext::new(Some(dir));
     let webview = Rc::new(
         WebViewBuilder::new_with_web_context(&mut context)
-            .with_url(SIGN_IN_URL)
+            .with_url(if silent { REFRESH_URL } else { SIGN_IN_URL })
+            .with_on_page_load_handler(on_load)
             .build_gtk(&vbox)
             .context(
                 "could not open the sign-in window. It needs WebKitGTK (webkit2gtk-4.1) and \
@@ -388,17 +627,15 @@ fn run_window() -> Result<String> {
     {
         let outcome = Rc::clone(&outcome);
         let webview = Rc::clone(&webview);
-        glib::timeout_add_local(POLL, move || match session_cookie(&webview) {
-            Ok(Some(cookie)) => {
-                *outcome.borrow_mut() = Some(Ok(cookie));
-                gtk::main_quit();
-                glib::ControlFlow::Break
-            }
-            Ok(None) => glib::ControlFlow::Continue,
-            Err(e) => {
-                *outcome.borrow_mut() = Some(Err(e));
-                gtk::main_quit();
-                glib::ControlFlow::Break
+        let started = Instant::now();
+        glib::timeout_add_local(POLL, move || {
+            match poll(&webview, silent, started, loaded.get()) {
+                Poll::Done(result) => {
+                    *outcome.borrow_mut() = Some(result);
+                    gtk::main_quit();
+                    glib::ControlFlow::Break
+                }
+                Poll::Wait => glib::ControlFlow::Continue,
             }
         });
     }
@@ -467,5 +704,28 @@ struct Cleanup(PathBuf);
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_store_id_round_trips_through_its_file_text() {
+        let id: [u8; 16] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
+        let text = macos_store::format(&id);
+        assert_eq!(text.len(), 32);
+        assert_eq!(macos_store::parse(&format!("{text}\n")), Some(id));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_damaged_store_id_reads_as_none() {
+        assert_eq!(macos_store::parse(""), None);
+        assert_eq!(macos_store::parse("abc"), None);
+        assert_eq!(macos_store::parse(&"zz".repeat(16)), None);
+        assert_eq!(macos_store::parse(&"ab".repeat(17)), None);
     }
 }

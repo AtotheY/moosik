@@ -144,7 +144,9 @@ fn main() -> eframe::Result {
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     if let Some(at) = args.iter().position(|a| a == refryt::webview_login::ARG) {
         let path = args.get(at + 1).cloned().unwrap_or_default();
-        return match refryt::webview_login::capture_here(std::path::Path::new(&path)) {
+        let silent =
+            args.get(at + 2).map(String::as_str) == Some(refryt::webview_login::SILENT_ARG);
+        return match refryt::webview_login::capture_here(std::path::Path::new(&path), silent) {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("{e:#}");

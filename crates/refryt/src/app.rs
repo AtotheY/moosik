@@ -5105,6 +5105,16 @@ impl App {
                     self.settings_tab = ui::settings::SettingsTab::Account;
                 }
 
+                // Told rather than shown a login window: the user did not ask to sign in, and
+                // Home, Library and History each carry a Sign in button for when they want to.
+                Event::SessionExpired => {
+                    const EXPIRED: &str =
+                        "Your sign-in expired. Sign in again to see your library.";
+                    self.toast_error(EXPIRED);
+                    self.sign_in_error = Some(EXPIRED.to_owned());
+                    self.settings_tab = ui::settings::SettingsTab::Account;
+                }
+
                 Event::AuthChanged(state) => {
                     // `Checking` → `SignedIn` is the ordinary *startup* confirmation of a stored
                     // session, and the flag is read before the assignment below because that
