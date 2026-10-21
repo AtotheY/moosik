@@ -1,19 +1,17 @@
 //! The system tray icon: Show/Hide and Quit, shown only while "Hide tray on close" is on.
 //!
-//! Winit runs its own event loop and never touches GTK, but `tray-icon`'s Linux backend
-//! (libappindicator) is built on GTK and needs GTK's own loop pumping to show anything or
-//! deliver a click — so on Linux the tray lives on a dedicated thread that does nothing but
-//! `gtk::init()` then block in `gtk::main()`, fully decoupled from egui's render thread. On
-//! Windows and macOS the tray icon can be built directly on the calling thread — see the
-//! crate's own `examples/egui.rs`, which this follows.
+//! The icon is built directly on the calling thread on every platform — see the crate's own
+//! `examples/egui.rs`, which this follows. On Linux that is `tray-icon`'s `ksni` backend: a
+//! StatusNotifierItem spoken over D-Bus from a worker thread the crate runs itself. The default
+//! libappindicator backend was used before, and it needed a GTK loop on a thread of its own,
+//! never reported a click on the icon (Plasma's left click got "No handler for Activate", so
+//! the left-click toggle below never ran), and showed no tooltip.
 //!
 //! [`spawn`] is called at most once per process, the first time "Hide tray on close" is turned
-//! on — not once per toggle. `gtk::main()` never returns (nothing here ever calls
-//! `gtk_main_quit`), so an earlier version that called `spawn` again on every toggle leaked a
-//! thread, a GTK loop and a duplicate tray icon each time the setting was flipped off and back
-//! on. [`Tray::set_visible`] is the fix: it shows or hides the one icon that was ever built,
-//! over a channel into the GTK thread, so the thread and its `TrayIcon` live for the rest of
-//! the run regardless of how many times the setting changes.
+//! on — not once per toggle. An earlier version that called `spawn` again on every toggle left a
+//! duplicate tray icon behind each time the setting was flipped off and back on.
+//! [`Tray::set_visible`] is the fix: it shows or hides the one icon that was ever built, so it
+//! lives for the rest of the run regardless of how many times the setting changes.
 //!
 //! macOS adds one constraint of its own. While the window is hidden, winit stops delivering
 //! frames to it, and that includes the repaint requests that normally wake the UI. A click on
@@ -21,8 +19,8 @@
 //! ordering the window back on screen through AppKit first (`bring_window_forward`), without
 //! waiting for a frame; the next frame then reads the queued action as usual.
 //!
-//! `TrayIconEvent`/`MenuEvent` arrive on whichever thread the crate's backend runs on — the GTK
-//! thread on Linux, the icon's own message pump on Windows — never the render thread, and the
+//! `TrayIconEvent`/`MenuEvent` arrive on whichever thread the crate's backend runs on — the D-Bus
+//! worker on Linux, the icon's own message pump on Windows — never the render thread, and the
 //! crate's own channels do not wake winit. So [`spawn`] installs the crate's process-wide event
 //! handlers instead of leaving the events to be polled: each handler queues a [`TrayAction`]
 //! and calls `egui::Context::request_repaint`. The repaint is the half that matters: an idle
@@ -190,27 +188,17 @@ fn menu() -> Menu {
     Menu::with_items(&[&show_hide, &quit]).unwrap_or_else(|_| Menu::new())
 }
 
-/// A live tray icon's handle, kept for the rest of the run once built. On Linux this is a
-/// channel into the thread that actually owns the `TrayIcon` (GTK objects can't cross
-/// threads); on Windows/macOS the `TrayIcon` can just live here directly. Either way,
-/// `set_visible` is the only thing this is for after construction — see the module doc comment
-/// for why toggling visibility, not rebuilding the icon, is what a setting toggle should do.
+/// A live tray icon, kept for the rest of the run once built. `set_visible` is the only thing
+/// this is for after construction — see the module doc comment for why toggling visibility, not
+/// rebuilding the icon, is what a setting toggle should do.
 pub struct Tray {
-    #[cfg(target_os = "linux")]
-    visibility: Option<glib::Sender<bool>>,
-    #[cfg(not(target_os = "linux"))]
     icon: Option<tray_icon::TrayIcon>,
 }
 
 impl Tray {
-    /// Show or hide the icon. A no-op if [`spawn`] never managed to build one (GTK init or the
-    /// icon build failed) — reported already, at construction time, so this stays quiet.
+    /// Show or hide the icon. A no-op if [`spawn`] never managed to build one — reported already,
+    /// at construction time, so this stays quiet.
     pub fn set_visible(&self, visible: bool) {
-        #[cfg(target_os = "linux")]
-        if let Some(tx) = &self.visibility {
-            let _ = tx.send(visible);
-        }
-        #[cfg(not(target_os = "linux"))]
         if let Some(icon) = &self.icon {
             let _ = icon.set_visible(visible);
         }
@@ -224,82 +212,27 @@ pub fn spawn(ctx: &egui::Context) -> Tray {
     // Installed even if the icon itself never gets built: the handlers are what wake the UI,
     // and they are harmless with no icon to click.
     install_handlers(ctx);
-    #[cfg(target_os = "linux")]
-    {
-        // Rendezvous with the GTK thread once, to hand back the channel that will control it
-        // for the rest of the run — `recv()` blocks only until that thread finishes its
-        // one-time setup (or gives up), not for the thread's whole lifetime.
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            if let Err(e) = gtk::init() {
-                tracing::warn!(%e, "could not init gtk; no tray icon this run");
-                let _ = ready_tx.send(None);
-                return;
-            }
-            let Some(icon) = icon() else {
-                tracing::warn!("could not decode the tray icon");
-                let _ = ready_tx.send(None);
-                return;
-            };
-            let tray_icon = match TrayIconBuilder::new()
-                .with_menu(Box::new(menu()))
-                .with_icon(icon)
-                .with_tooltip("Refryt")
-                .build()
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(%e, "could not create the tray icon");
-                    let _ = ready_tx.send(None);
-                    return;
-                }
-            };
-            // A GLib channel, not `std::sync::mpsc`: its receiver runs its callback on
-            // whichever main context it's attached to (here) rather than needing this thread
-            // to poll it, which is what lets a plain `gtk::main()` below pick up sends from
-            // any other thread safely despite GTK objects themselves not being thread-safe.
-            #[allow(deprecated)] // superseded by `spawn_future_local`, but this stays a plain
-            // synchronous GTK3 loop rather than pulling in an async runtime just for one channel.
-            let (tx, rx) = glib::MainContext::channel(glib::Priority::DEFAULT);
-            rx.attach(None, move |visible| {
-                let _ = tray_icon.set_visible(visible);
-                glib::ControlFlow::Continue
-            });
-            let _ = ready_tx.send(Some(tx));
-            // Kept alive by staying in scope for `gtk::main()`'s whole run — which is the
-            // process's whole remaining lifetime, since nothing here ever calls
-            // `gtk_main_quit`.
-            gtk::main();
-        });
-        Tray {
-            visibility: ready_rx.recv().ok().flatten(),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let icon = icon().and_then(|icon| {
-            // Windows opens the context menu on left-click by default; left as-is, the menu
-            // would open on the first click of a double-click, which now means "show". Right
-            // click still opens the menu, the Windows convention, and a single left click does
-            // nothing — see `click_action`.
-            #[cfg(target_os = "windows")]
-            let builder = TrayIconBuilder::new()
-                .with_menu(Box::new(menu()))
-                .with_icon(icon)
-                .with_tooltip("Refryt")
-                .with_menu_on_left_click(false);
-            #[cfg(not(target_os = "windows"))]
-            let builder = TrayIconBuilder::new()
-                .with_menu(Box::new(menu()))
-                .with_icon(icon)
-                .with_tooltip("Refryt");
-            builder
-                .build()
-                .inspect_err(|e| tracing::warn!(%e, "could not create the tray icon"))
-                .ok()
-        });
-        Tray { icon }
-    }
+    let icon = icon().and_then(|icon| {
+        let builder = TrayIconBuilder::new()
+            .with_menu(Box::new(menu()))
+            .with_icon(icon)
+            .with_tooltip("Refryt");
+        // Windows opens the context menu on left-click by default; left as-is, the menu would
+        // open on the first click of a double-click, which now means "show". Right click still
+        // opens the menu, the Windows convention, and a single left click does nothing — see
+        // `click_action`.
+        #[cfg(target_os = "windows")]
+        let builder = builder.with_menu_on_left_click(false);
+        // The title is what a StatusNotifierItem host names the icon by; without it Plasma shows
+        // the process name, lowercase. Not on macOS, where a title is text beside the icon.
+        #[cfg(target_os = "linux")]
+        let builder = builder.with_title("Refryt");
+        builder
+            .build()
+            .inspect_err(|e| tracing::warn!(%e, "could not create the tray icon"))
+            .ok()
+    });
+    Tray { icon }
 }
 
 /// Drain one tray action, if any arrived since the last call.

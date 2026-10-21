@@ -43,9 +43,11 @@ libmpv2-sys = "=4.0.1"
 # one target's `cfg`.
 raw-window-handle = "0.6"
 # The system tray icon (`tray.rs`). Genuinely cross-platform — its own internal `cfg`s pick
-# libappindicator on Linux, the Shell_NotifyIcon API on Windows, NSStatusItem on macOS — so this
-# sits here unconditionally; only building the GTK loop it needs on Linux is target-gated below.
-tray-icon = "0.25.0"
+# a StatusNotifierItem over D-Bus on Linux, the Shell_NotifyIcon API on Windows, NSStatusItem on
+# macOS — so this sits here unconditionally. On Linux it is the `ksni` backend rather than the
+# default libappindicator one: libappindicator never reports a click on the icon (a left click
+# did nothing) and shows no tooltip, and it needs a GTK loop of its own to run at all.
+tray-icon = { version = "0.25.0", default-features = false, features = ["ksni"] }
 # OS media controls: MPRIS on Linux (via zbus), SMTC on Windows, Now Playing on macOS. This is
 # what makes desktop/lock-screen/headset media keys work.
 playwire = "1.0"
@@ -76,12 +78,10 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Pinned to the exact version `gtk` itself already pulls in, so this is an edge onto a crate
-# already compiled rather than a second copy — `MainContext::channel` is `tray.rs`'s way to
-# toggle the tray icon's visibility from another thread without rebuilding it (GTK objects
-# can't cross threads, so the icon lives on `gtk`'s own thread and this is how it's told).
+# already compiled rather than a second copy — the sign-in window (`webview_login.rs`) uses it
+# for GTK's signal handlers.
 glib = "0.18.5"
-# Winit doesn't run GTK's own event loop, and `tray-icon`'s Linux backend (libappindicator) needs
-# one — see `tray.rs`'s own doc comment for why that means a dedicated thread.
+# The sign-in window's own GTK window and loop (`webview_login.rs`).
 gtk = "0.18.2"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
