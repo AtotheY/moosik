@@ -147,7 +147,7 @@ jobs:
             dist/refryt-*-windows-*-setup.exe
             dist/refryt-*-windows-*.msi
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   # The AppImage bundles every library short of glibc, so it has to be built on a system at least
   # as new as the ones it will run on: bundled from Ubuntu 24.04, its older glib is found first and
@@ -175,7 +175,7 @@ jobs:
           name: appimage
           path: dist/refryt-*-x86_64.AppImage
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   flatpak:
     needs: check
@@ -221,7 +221,7 @@ jobs:
           name: flatpak
           path: dist/refryt-*-x86_64.flatpak
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   macos:
     needs: check
@@ -250,7 +250,7 @@ jobs:
           name: macos
           path: dist/refryt-*-macos-arm64.dmg
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
 
   # The same checks as a local release, over everything the jobs above built.
   verify:
