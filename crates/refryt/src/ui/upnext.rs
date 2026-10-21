@@ -131,7 +131,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // pauses/resumes it (see `play_index`) — nothing new to show, so the scroll position
         // is left alone rather than jumping to the top under you.
         let already_here = app.q.current() == Some(i);
-        app.play_index(i);
+        app.play_from_queue(i);
         if !already_here {
             app.queue_scroll_reset = true;
         }

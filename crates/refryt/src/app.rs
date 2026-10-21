@@ -5858,6 +5858,24 @@ impl App {
         self.play_index_restore(index);
     }
 
+    /// A click on a song in Up next. With "Keep the songs you jump over" on, the song is brought
+    /// up next first (`PlayQueue::bring_up_next`), so the songs between it and the playing one
+    /// still play, after it; off, it is a plain jump to that place in the queue.
+    pub(crate) fn play_from_queue(&mut self, index: usize) {
+        if self.settings.queue_click_keeps_order && self.q.current() != Some(index) {
+            // Clicked to play, so it is the listener's choice now: a radio song moved in among
+            // their own must not end Repeat All's loop early (see `PlayQueue::tail_start`).
+            if let (Some(radio), Some(track)) = (&mut self.radio, self.q.get(index)) {
+                radio.chosen.insert(track.video_id.clone());
+            }
+            if let Some(to) = self.q.bring_up_next(index) {
+                self.play_index(to);
+                return;
+            }
+        }
+        self.play_index(index);
+    }
+
     /// `play_index` without touching the history — for `Previous` itself and a fresh queue.
     fn play_index_restore(&mut self, index: usize) {
         let Some(track) = self.q.get(index).cloned() else {

@@ -378,6 +378,59 @@ impl PlayQueue {
         }
     }
 
+    /// Move the track at `index` to play straight after the playing one, everything else keeping
+    /// its order, and return where it now is: what "play from the queue without skipping" plays.
+    /// The songs between the playing track and the chosen one stay ahead, after it, instead of
+    /// being passed over. In the list without shuffle, in the order under shuffle (the list then
+    /// says nothing about what plays next). `None` with nothing playing, for the playing track
+    /// itself, or for an index out of range.
+    pub(crate) fn bring_up_next(&mut self, index: usize) -> Option<usize> {
+        let current = self.current?;
+        if index == current || index >= self.tracks.len() {
+            return None;
+        }
+        if let Some(o) = &mut self.shuffle {
+            let from = o.order.iter().position(|&i| i == index)?;
+            let at = o.pos.map_or(0, |p| p + 1);
+            if from >= at {
+                let entry = o.order.remove(from);
+                o.order.insert(at, entry);
+            } else {
+                // Already played this round: it comes out from before the playing track, which
+                // moves back one place.
+                let entry = o.order.remove(from);
+                o.pos = o.pos.map(|p| p - 1);
+                o.order.insert(at - 1, entry);
+            }
+            return Some(index);
+        }
+        // Where it goes, counted after it has been taken out: straight after the playing track,
+        // which itself moves back one place when the track came from before it.
+        let to = if index > current {
+            current + 1
+        } else {
+            current
+        };
+        if to == index {
+            return Some(index);
+        }
+        let track = self.tracks.remove(index);
+        self.tracks.insert(to, track);
+        self.history.forget_within_queue();
+        self.reindex(|i| {
+            Some(if i == index {
+                to
+            } else if index > current && (to..index).contains(&i) {
+                i + 1
+            } else if index < current && (index + 1..=to).contains(&i) {
+                i - 1
+            } else {
+                i
+            })
+        });
+        Some(to)
+    }
+
     /// Remember the track being left, for Previous.
     pub(crate) fn remember_current(&mut self) {
         if let Some(current) = self.current {
@@ -687,6 +740,71 @@ mod tests {
             played.push(q.tracks[next].video_id.clone());
         }
         played
+    }
+
+    /// The listener jumps to a song further down: it plays next, and the songs they jumped over
+    /// stay ahead of it rather than being passed over.
+    #[test]
+    fn bringing_a_song_up_next_keeps_the_ones_in_between() {
+        let mut q = queue(&["a", "b", "c", "d", "e"], 0);
+        let to = q.bring_up_next(3).unwrap();
+        assert_eq!(to, 1);
+        assert_eq!(q.current(), Some(0), "the playing track stays put");
+        let up = q.upcoming(RepeatMode::Off, None);
+        assert_eq!(ids(&q, &up), ["d", "b", "c", "e"]);
+    }
+
+    #[test]
+    fn bringing_up_next_keeps_the_resume_point_on_its_track() {
+        let mut q = queue(&["a", "b", "c", "d"], 1);
+        q.set_resume(Some((2, 30.0)));
+        q.bring_up_next(3);
+        assert_eq!(q.current(), Some(1));
+        assert_eq!(
+            q.resume().map(|(i, _)| q.tracks[i].video_id.clone()),
+            Some("c".into())
+        );
+    }
+
+    #[test]
+    fn bringing_up_the_next_song_or_the_playing_one_changes_nothing() {
+        let mut q = queue(&["a", "b", "c"], 0);
+        assert_eq!(q.bring_up_next(1), Some(1));
+        assert_eq!(q.bring_up_next(0), None);
+        assert_eq!(q.bring_up_next(9), None);
+        assert_eq!(ids(&q, &[0, 1, 2]), ["a", "b", "c"]);
+        let mut idle = PlayQueue::new(1);
+        idle.restore_session(tracks(&["a", "b"]), None, None, false, None);
+        assert_eq!(idle.bring_up_next(1), None);
+    }
+
+    /// From before the playing track (not something Up next shows, but the queue allows it): the
+    /// playing track moves back a place and the song lands right after it.
+    #[test]
+    fn bringing_up_a_song_from_behind_lands_after_the_playing_one() {
+        let mut q = queue(&["a", "b", "c", "d"], 2);
+        let to = q.bring_up_next(0).unwrap();
+        assert_eq!(q.tracks[q.current().unwrap()].video_id, "c");
+        assert_eq!(q.tracks[to].video_id, "a");
+        assert_eq!(ids(&q, &[0, 1, 2, 3]), ["b", "c", "a", "d"]);
+    }
+
+    /// Under shuffle the order moves, not the list: the song plays next and the rest of the
+    /// round keeps its order.
+    #[test]
+    fn bringing_up_next_under_shuffle_moves_the_order() {
+        let mut q = queue(&["a", "b", "c", "d", "e", "f"], 0);
+        q.set_shuffle(true, None);
+        let before = q.upcoming(RepeatMode::Off, None);
+        let pick = before[3];
+        let list: Vec<String> = q.tracks().iter().map(|t| t.video_id.clone()).collect();
+        assert_eq!(q.bring_up_next(pick), Some(pick));
+        let after = q.upcoming(RepeatMode::Off, None);
+        let mut expected = vec![pick];
+        expected.extend(before.iter().copied().filter(|&i| i != pick));
+        assert_eq!(after, expected);
+        let list_after: Vec<String> = q.tracks().iter().map(|t| t.video_id.clone()).collect();
+        assert_eq!(list, list_after, "the list itself is left alone");
     }
 
     #[test]

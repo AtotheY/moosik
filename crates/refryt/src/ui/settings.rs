@@ -460,6 +460,7 @@ fn playback(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut quality = app.settings.quality;
     let mut autoplay = app.settings.autoplay;
+    let mut keep_order = app.settings.queue_click_keeps_order;
     let mut normalise = app.settings.normalise_volume;
     let mut scrobble = app.settings.scrobble;
 
@@ -496,6 +497,15 @@ fn playback(app: &mut App, ui: &mut egui::Ui) {
             g,
             ui,
             &p,
+            "setting-queue-keep-order",
+            "Keep the songs you jump over",
+            "Playing a song further down Up next plays it now and keeps the songs before it.",
+            &mut keep_order,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
             "setting-scrobble",
             "Save listening history",
             "Adds what you play to your YouTube history.",
@@ -507,6 +517,7 @@ fn playback(app: &mut App, ui: &mut egui::Ui) {
     app.update_settings(&ctx, |s| {
         s.quality = quality;
         s.autoplay = autoplay;
+        s.queue_click_keeps_order = keep_order;
         s.normalise_volume = normalise;
         s.scrobble = scrobble;
     });

@@ -269,6 +269,10 @@ pub struct Settings {
     /// Keep playing related songs when a hand-picked queue nears its end. YouTube's own radio,
     /// fetched for the queue's last track. On by default, as on the site.
     pub autoplay: bool,
+    /// Clicking a song further down Up next plays it straight away and keeps the songs before it
+    /// still to come, after it, instead of passing over them. Off by default: the click jumps to
+    /// that place in the queue.
+    pub queue_click_keeps_order: bool,
     /// Whether the fullscreen player shows the lyrics beside the cover. On by default; the
     /// Lyrics button in that view changes it, and a song with no lyrics never does.
     pub fullscreen_lyrics: bool,
@@ -342,6 +346,7 @@ impl Default for Settings {
             adaptive_art_color: true,
             quality: Quality::default(),
             autoplay: true,
+            queue_click_keeps_order: false,
             fullscreen_lyrics: true,
             home_order: crate::model::default_order_keys(),
             home_strict_order: false,
@@ -576,6 +581,20 @@ mod tests {
         };
         let back: Settings = serde_json::from_slice(&serde_json::to_vec(&on).unwrap()).unwrap();
         assert!(back.home_strict_order);
+    }
+
+    /// Keeping the songs you jump over is off for anyone whose file predates the setting, and a
+    /// choice to turn it on survives a save.
+    #[test]
+    fn queue_click_keeps_order_is_off_until_chosen() {
+        let old: Settings = serde_json::from_str(r#"{"opacity":0.5}"#).unwrap();
+        assert!(!old.queue_click_keeps_order);
+        let on = Settings {
+            queue_click_keeps_order: true,
+            ..Settings::default()
+        };
+        let back: Settings = serde_json::from_slice(&serde_json::to_vec(&on).unwrap()).unwrap();
+        assert!(back.queue_click_keeps_order);
     }
 
     /// Card outlines are on for anyone whose file predates the setting, and a choice to turn them
