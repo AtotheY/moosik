@@ -22,6 +22,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 const LATEST: &str = "https://api.github.com/repos/gridoe/refryt/releases/latest";
+/// Where the project's releases live. A download or page URL outside it is never followed, even
+/// if the API's answer names one.
+const RELEASES: &str = "https://github.com/gridoe/refryt/releases/";
 const USER_AGENT: &str = concat!("refryt/", env!("CARGO_PKG_VERSION"));
 
 /// How this copy was installed, which decides whether it can update itself.
@@ -217,7 +220,12 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
     if !newer(&version, current) {
         return None;
     }
-    let find = |name: &str| release.assets.iter().find(|a| a.name == name);
+    let find = |name: &str| {
+        release
+            .assets
+            .iter()
+            .find(|a| a.name == name && a.browser_download_url.starts_with(RELEASES))
+    };
     let download = install.asset_name(&version).and_then(|name| {
         let asset = find(&name)?;
         let sums = find(&format!("refryt-{version}-SHA256SUMS.txt"))?;
@@ -230,7 +238,11 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
     });
     Some(Release {
         version,
-        page: release.html_url,
+        page: if release.html_url.starts_with(RELEASES) {
+            release.html_url
+        } else {
+            format!("{RELEASES}latest")
+        },
         download,
     })
 }
@@ -505,7 +517,7 @@ mod tests {
                 .iter()
                 .map(|name| GhAsset {
                     name: (*name).to_owned(),
-                    browser_download_url: format!("https://example.invalid/{name}"),
+                    browser_download_url: format!("{RELEASES}download/{tag}/{name}"),
                     size: 1,
                 })
                 .collect(),
@@ -567,6 +579,21 @@ mod tests {
         )
         .unwrap();
         assert!(!msi.installable(), "the MSI must not pick the setup.exe");
+    }
+
+    #[test]
+    fn files_outside_the_projects_releases_are_not_downloaded() {
+        if std::env::consts::ARCH != "x86_64" {
+            return;
+        }
+        let setup = "refryt-0.1.13-windows-x86_64-setup.exe";
+        let sums = "refryt-0.1.13-SHA256SUMS.txt";
+        let mut foreign = release("v0.1.13", &[setup, sums]);
+        foreign.assets[0].browser_download_url = format!("https://example.invalid/{setup}");
+        foreign.html_url = "https://example.invalid/release".to_owned();
+        let r = pick(foreign, "0.1.12", Install::WindowsSetup).unwrap();
+        assert!(!r.installable());
+        assert_eq!(r.page, "https://github.com/gridoe/refryt/releases/latest");
     }
 
     #[test]

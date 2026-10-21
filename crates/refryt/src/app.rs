@@ -1814,6 +1814,9 @@ fn same_queue(a: &[Track], b: &[Track]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.video_id == y.video_id)
 }
 
+/// How long "Later" on the update window keeps the launch check quiet about that release.
+const UPDATE_LATER_SECS: i64 = 24 * 60 * 60;
+
 /// Unix seconds, for the Discord presence's timestamps. Zero on a clock that predates 1970, which
 /// only ever costs a progress bar.
 fn unix_now() -> i64 {
@@ -1824,6 +1827,12 @@ fn unix_now() -> i64 {
 }
 
 impl App {
+    /// "Later" on the update window: no window for this release at launch for a day.
+    pub fn update_later(&mut self, ctx: &egui::Context, version: &str) {
+        let entry = Some((version.to_owned(), unix_now()));
+        self.update_settings(ctx, |s| s.update_later = entry);
+    }
+
     pub fn new(cc: &eframe::CreationContext<'_>, options: Options) -> anyhow::Result<Self> {
         let Options {
             decorated,
@@ -4635,7 +4644,13 @@ impl App {
                     match release {
                         Some(release) => {
                             let skipped = self.settings.skipped_update.as_deref()
-                                == Some(release.version.as_str());
+                                == Some(release.version.as_str())
+                                || self.settings.update_later.as_ref().is_some_and(
+                                    |(version, at)| {
+                                        *version == release.version
+                                            && (0..UPDATE_LATER_SECS).contains(&(unix_now() - at))
+                                    },
+                                );
                             tracing::info!(version = %release.version, "update available");
                             self.update.open |= manual || !skipped;
                             self.update.available = Some(*release);

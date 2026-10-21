@@ -321,6 +321,9 @@ pub struct Settings {
     /// A release the user chose to skip: the launch check does not offer it again, though About
     /// still shows it and a manual check still offers it.
     pub skipped_update: Option<String>,
+    /// A release the user answered "Later" to, and when (unix seconds): the launch check keeps
+    /// quiet about it for a day.
+    pub update_later: Option<(String, i64)>,
 }
 
 impl Default for Settings {
@@ -356,6 +359,7 @@ impl Default for Settings {
             panel_width: None,
             check_for_updates: true,
             skipped_update: None,
+            update_later: None,
         }
     }
 }

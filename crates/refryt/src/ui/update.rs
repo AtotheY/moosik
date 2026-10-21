@@ -170,6 +170,10 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         app.update_settings(&ctx, |s| s.skipped_update = Some(release.version.clone()));
     }
+    if later {
+        let ctx = ui.ctx().clone();
+        app.update_later(&ctx, &release.version);
+    }
     if later || skip {
         app.update.open = false;
         app.update.error = None;
