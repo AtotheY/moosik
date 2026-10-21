@@ -259,8 +259,19 @@ impl TrafficLights {
         let _ = (left, center_y, visible);
     }
 
-    /// How wide the three buttons are together, in points, for laying out around them.
-    pub const WIDTH: f32 = 14.0 + 2.0 * 20.0;
+    /// How wide the three buttons are together, in points, for laying out around them: measured
+    /// from the buttons themselves, since their size and spacing change between macOS releases
+    /// (about 54pt before macOS 26, about 60pt from it). [`Self::WIDTH`] when there are none.
+    pub fn width(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        if let Some(width) = self.view.as_deref().and_then(macos::traffic_lights_width) {
+            return width as f32;
+        }
+        Self::WIDTH
+    }
+
+    /// The three buttons' width before macOS 26, for a window that has not got them.
+    const WIDTH: f32 = 14.0 + 2.0 * 20.0;
 }
 
 #[cfg(target_os = "macos")]
@@ -281,6 +292,18 @@ mod macos {
 
     pub fn double_click_zooms() -> bool {
         double_click_action().as_deref() != Some("None")
+    }
+
+    /// From the close button's left edge to the zoom button's right edge.
+    pub fn traffic_lights_width(content: &NSView) -> Option<f64> {
+        let window = content.window()?;
+        let close = window
+            .standardWindowButton(NSWindowButton::CloseButton)?
+            .frame();
+        let zoom = window
+            .standardWindowButton(NSWindowButton::ZoomButton)?
+            .frame();
+        Some(zoom.origin.x + zoom.size.width - close.origin.x)
     }
 
     pub fn place_traffic_lights(content: &NSView, left: f64, center_y: f64, visible: bool) {

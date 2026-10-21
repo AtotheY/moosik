@@ -2517,7 +2517,7 @@ impl App {
         }
         let left = if self.sidebar_rail {
             theme::GUTTER
-                + ((theme::SIDEBAR_RAIL - theme::GUTTER - chrome::TrafficLights::WIDTH) / 2.0)
+                + ((theme::SIDEBAR_RAIL - theme::GUTTER - self.traffic_lights.width()) / 2.0)
                     .max(0.0)
         } else {
             theme::GUTTER + 12.0
