@@ -649,7 +649,9 @@ pub(crate) mod tests {
         assert!(video_stream_from(&parsed, &id()).is_err());
     }
 
+    #[cfg(unix)]
     const BOT_CHECK: &str = "ERROR: [youtube] x: Sign in to confirm you are not a bot.";
+    #[cfg(unix)]
     pub(crate) const PREMIUM_ONLY: &str =
         "ERROR: [youtube] x: This video is only available to Music Premium members";
 
