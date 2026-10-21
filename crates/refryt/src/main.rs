@@ -197,7 +197,13 @@ fn main() -> eframe::Result {
     if args.iter().any(|a| a == "--maximized") {
         viewport = viewport.with_maximized(true);
     }
-    if let Some(icon) = window_icon() {
+    if in_app_bundle() {
+        // macOS: the bundle has its own icon, built for the Dock's light, dark, clear and tinted
+        // looks (`scripts/build-macos.sh`). An icon set at runtime replaces it with the flat logo
+        // for as long as the app runs, so a bundle sets none. An empty one is how eframe is told
+        // that; leaving it out gets egui's own.
+        viewport = viewport.with_icon(egui::IconData::default());
+    } else if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
 
@@ -310,4 +316,19 @@ fn main() -> eframe::Result {
     // An update chosen in the app runs now that nothing holds its files.
     refryt::update::finish();
     result
+}
+
+/// Whether this is the binary inside a macOS app bundle (`Refryt.app/Contents/MacOS/refryt`),
+/// rather than one run straight from `target/`. Never on other platforms.
+fn in_app_bundle() -> bool {
+    cfg!(target_os = "macos")
+        && std::env::current_exe().is_ok_and(|exe| {
+            exe.parent()
+                .is_some_and(|dir| dir.ends_with("Contents/MacOS"))
+                && exe
+                    .ancestors()
+                    .nth(3)
+                    .and_then(|bundle| bundle.extension())
+                    .is_some_and(|ext| ext == "app")
+        })
 }
