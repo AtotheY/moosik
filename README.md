@@ -171,7 +171,7 @@ Signed out, the app still searches and plays. It has no library.
 - The session is a cookie stored with owner-only permissions, since it works like a password.
 - Downloads go to `~/Music/refryt`.
 
-The app has no telemetry. It connects to YouTube, to [LRCLIB](https://lrclib.net) for synced lyrics, and to Discord's local client when Rich Presence is turned on. After a crash it writes a report to the config folder and offers it on the next launch, to copy or to open as a prefilled GitHub issue. Nothing is sent automatically.
+The app has no telemetry. It connects to YouTube, to [LRCLIB](https://lrclib.net) for synced lyrics, to GitHub to check for a newer release (a setting turns that off), and to Discord's local client when Rich Presence is turned on. After a crash it writes a report to the config folder and offers it on the next launch, to copy or to open as a prefilled GitHub issue. Nothing is sent automatically.
 
 ## Status
 
