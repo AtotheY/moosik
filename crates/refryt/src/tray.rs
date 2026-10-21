@@ -126,12 +126,15 @@ pub(crate) fn install_menu_handler(ctx: &egui::Context) {
         let ctx = ctx.clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let id = event.id.0.as_str();
-            if let Some(action) = menu_action(id) {
-                inject(&ctx, action);
-                return;
+            match menu_action(id) {
+                Some(action) => inject(&ctx, action),
+                #[cfg(target_os = "macos")]
+                None => {
+                    crate::menu_bar::dispatch(id, &ctx);
+                }
+                #[cfg(not(target_os = "macos"))]
+                None => {}
             }
-            #[cfg(target_os = "macos")]
-            crate::menu_bar::dispatch(id, &ctx);
         }));
     });
 }
