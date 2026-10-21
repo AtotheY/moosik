@@ -21,6 +21,19 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F2", "Performance overlay"),
 ];
 
+/// macOS: the shortcuts the menu bar's items hold (`menu_bar`), shown after the shared ones.
+#[cfg(target_os = "macos")]
+const MENU_SHORTCUTS: &[(&str, &str)] = &[
+    ("⌘ + ← / →", "Previous / next track"),
+    ("⌘ + ↑ / ↓", "Volume down / up"),
+    ("⌘ + 1 / 2 / 3 / 4", "Home, Explore, Library, History"),
+    ("⌘ + F", "Focus search"),
+    ("⌘ + ,", "Settings"),
+    ("⌘ + M  /  ⌘ + W", "Minimize / close window"),
+];
+#[cfg(not(target_os = "macos"))]
+const MENU_SHORTCUTS: &[(&str, &str)] = &[];
+
 pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     if !app.help_open {
         return;
@@ -37,7 +50,8 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     // measures itself and writes the result here, and the next frame's card wraps it exactly.
     // The fallback is only ever seen on the very first frame the modal opens.
     let height_id = egui::Id::new("refryt-help-height");
-    let fallback = 20.0 + 10.0 + SHORTCUTS.len() as f32 * row_h + 6.0 + 30.0 + 32.0;
+    let fallback =
+        20.0 + 10.0 + (SHORTCUTS.len() + MENU_SHORTCUTS.len()) as f32 * row_h + 6.0 + 30.0 + 32.0;
     let height = ui
         .ctx()
         .data(|d| d.get_temp::<f32>(height_id))
@@ -89,7 +103,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
                     .color(p.text),
             );
             body.add_space(10.0);
-            for (keys, what) in SHORTCUTS {
+            for (keys, what) in SHORTCUTS.iter().chain(MENU_SHORTCUTS) {
                 let (rect, _) = body.allocate_exact_size(
                     egui::vec2(body.available_width(), row_h),
                     egui::Sense::hover(),

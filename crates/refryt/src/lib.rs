@@ -37,6 +37,9 @@ pub mod local;
 pub mod local_playlists;
 pub mod media;
 pub mod memory;
+/// macOS: the app's menus in the menu bar; see the module's own doc comment.
+#[cfg(target_os = "macos")]
+pub mod menu_bar;
 pub mod model;
 pub mod pacing;
 pub mod persist;

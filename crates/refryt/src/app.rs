@@ -1331,6 +1331,10 @@ pub struct App {
     /// The tray icon, while "Hide tray on close" is on — dropping it removes the icon. `None`
     /// the rest of the time, so a listener who never changes the setting never gets a tray icon.
     tray: Option<crate::tray::Tray>,
+    /// macOS: the Playback, View, Window and Help menus in the menu bar. `None` elsewhere, and
+    /// if AppKit would not take them.
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<crate::menu_bar::MenuBar>,
     /// We hid the window ourselves (tray-icon close, or the tray menu's own Show/Hide) rather
     /// than the OS reporting it occluded or minimized — the two are different questions, and
     /// this is the one that decides whether the repaint heartbeat below needs to keep running.
@@ -1976,6 +1980,8 @@ impl App {
             tray: settings
                 .hide_tray_on_close
                 .then(|| crate::tray::spawn(&cc.egui_ctx)),
+            #[cfg(target_os = "macos")]
+            menu_bar: crate::menu_bar::MenuBar::install(&cc.egui_ctx),
             hidden: false,
             quitting: false,
             autostart_attention: autostart,
@@ -2256,18 +2262,7 @@ impl App {
         if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::M)) {
             self.toggle_mute();
         }
-        // The window shortcuts every Mac app answers to: Cmd+M minimises, Cmd+W closes (or hides
-        // to the tray, as the red button does). Cmd+Q is the system's own app menu.
-        #[cfg(target_os = "macos")]
-        {
-            let command = |key| ctx.input(|i| i.modifiers.command_only() && i.key_pressed(key));
-            if command(egui::Key::M) {
-                chrome::minimize(ctx);
-            }
-            if command(egui::Key::W) {
-                self.request_close(ctx);
-            }
-        }
+        // ⌘M and ⌘W are the Window menu's on macOS (`menu_bar`), as in every Mac app.
         // The fullscreen view: F opens and closes it, Escape closes the queue drawer and then
         // the view.
         if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::F)) {
@@ -2548,6 +2543,77 @@ impl App {
         self.hidden = false;
         set_window_hidden(ctx, false);
         request_foreground(ctx);
+    }
+
+    /// macOS: act on what was chosen from the menu bar, and keep its items in line with the
+    /// app. In `logic`, so a choice is acted on while the window is hidden to the tray too.
+    #[cfg(target_os = "macos")]
+    fn poll_menu_bar(&mut self, ctx: &egui::Context) {
+        use crate::menu_bar::{Command, VOLUME_STEP};
+        while let Some(command) = crate::menu_bar::poll() {
+            if command.shows_window() && self.hidden {
+                self.show_window(ctx);
+            }
+            match command {
+                Command::PlayPause => self.toggle_playback(),
+                Command::Next => self.skip(1),
+                Command::Previous => self.skip(-1),
+                Command::VolumeUp | Command::VolumeDown => {
+                    let now = if self.muted { 0.0 } else { self.last_volume };
+                    let step = if command == Command::VolumeUp {
+                        VOLUME_STEP
+                    } else {
+                        -VOLUME_STEP
+                    };
+                    self.set_user_volume(now + step);
+                }
+                Command::Mute => self.toggle_mute(),
+                Command::Shuffle => self.toggle_shuffle(),
+                Command::Repeat => self.cycle_repeat(),
+                Command::Home => self.navigate(Route::Home),
+                Command::Explore => self.navigate(Route::Explore),
+                Command::Library => self.navigate(Route::Library),
+                Command::History => {
+                    if self.signed_in() {
+                        self.navigate(Route::History);
+                    }
+                }
+                Command::Search => {
+                    ctx.memory_mut(|m| m.request_focus(crate::ui::topbar::search_id()));
+                }
+                Command::Queue => self.upnext_open = !self.upnext_open,
+                Command::Lyrics => self.toggle_lyrics(),
+                Command::FullscreenPlayer => {
+                    if self.fs.open {
+                        self.fs_exit(ctx);
+                    } else {
+                        self.fs_enter(ctx);
+                    }
+                }
+                Command::Settings => self.navigate(Route::Settings),
+                Command::Shortcuts => self.help_open = true,
+                Command::Website => crate::open_url(crate::menu_bar::WEBSITE),
+            }
+        }
+        let state = crate::menu_bar::State {
+            has_track: self.now.track.is_some(),
+            playing: self.playback_started && !self.now.paused,
+            muted: self.muted,
+            shuffle: self.q.is_shuffled(),
+            repeat: match self.repeat {
+                RepeatMode::Off => "Off",
+                RepeatMode::All => "All",
+                RepeatMode::One => "One",
+            },
+            queue_open: self.upnext_open,
+            lyrics_open: self.lyrics_open,
+            fullscreen_player: self.fs.open,
+            signed_in: self.signed_in(),
+            typing: ctx.memory(|m| m.focused().is_some()),
+        };
+        if let Some(menu_bar) = self.menu_bar.as_mut() {
+            menu_bar.update(state);
+        }
     }
 
     /// Drain the actions the tray's event handlers queued, and veto a genuine OS close request
@@ -7571,6 +7637,8 @@ impl eframe::App for App {
         self.handle_events(ctx);
         self.probe_while_offline(ctx);
         self.poll_tray(ctx);
+        #[cfg(target_os = "macos")]
+        self.poll_menu_bar(ctx);
         self.poll_media(ctx);
         // A second plain launch asked the running instance to show itself (see `instance`).
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

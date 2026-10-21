@@ -108,18 +108,32 @@ fn bring_window_forward() {
 /// first-set-only, so a second call would silently keep the first closure — and with it the
 /// first `egui::Context` — anyway.
 fn install_handlers(ctx: &egui::Context) {
-    let menu_ctx = ctx.clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if let Some(action) = menu_action(event.id.0.as_str()) {
-            inject(&menu_ctx, action);
-        }
-    }));
+    install_menu_handler(ctx);
     let icon_ctx = ctx.clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
         if let Some(action) = icon_action(&event) {
             inject(&icon_ctx, action);
         }
     }));
+}
+
+/// Install muda's process-wide menu event handler, once. Shared by the tray's menu and, on
+/// macOS, the menu bar (`menu_bar`): muda keeps only the first handler ever set, so whichever of
+/// the two comes first has to route for both.
+pub(crate) fn install_menu_handler(ctx: &egui::Context) {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let ctx = ctx.clone();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            let id = event.id.0.as_str();
+            if let Some(action) = menu_action(id) {
+                inject(&ctx, action);
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            crate::menu_bar::dispatch(id, &ctx);
+        }));
+    });
 }
 
 /// What a menu id means, if it is one of ours.
