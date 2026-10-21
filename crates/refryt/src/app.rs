@@ -2257,8 +2257,7 @@ impl App {
         {
             let command = |key| ctx.input(|i| i.modifiers.command_only() && i.key_pressed(key));
             if command(egui::Key::M) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                crate::pacing::minimize_requested();
+                chrome::minimize(ctx);
             }
             if command(egui::Key::W) {
                 self.request_close(ctx);

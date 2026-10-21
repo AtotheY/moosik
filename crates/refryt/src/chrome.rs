@@ -176,8 +176,7 @@ pub fn drag_surface(ui: &Ui, rect: Rect, decorated: bool, id_salt: &str) {
         // click a window's title bar to"); a title bar of our own should do the same.
         #[cfg(target_os = "macos")]
         if macos::double_click_minimizes() {
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-            crate::pacing::minimize_requested();
+            minimize(&ctx);
             return;
         } else if !macos::double_click_zooms() {
             return;
@@ -203,10 +202,24 @@ pub fn window_buttons(ui: &mut Ui, palette: &Palette) -> bool {
         ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
     if window_button(ui, palette, Icon::Minus, false).clicked() {
-        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-        crate::pacing::minimize_requested();
+        minimize(&ctx);
     }
     close_clicked
+}
+
+/// Minimise the window, as the system's minimise button does.
+///
+/// Not with `ViewportCommand::Minimized` on macOS: egui then records the window as minimised and
+/// never reads the real state back there (egui-winit skips it at runtime, egui#3494), so once the
+/// window came back eframe still took it for minimised and ran no UI, and the window sat frozen.
+/// AppKit's own `miniaturize`, which is what the yellow button sends, leaves that record alone.
+pub fn minimize(ctx: &egui::Context) {
+    crate::pacing::minimize_requested();
+    #[cfg(target_os = "macos")]
+    if macos::miniaturize() {
+        return;
+    }
+    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
 }
 
 /// The system's window buttons on macOS — close, minimise, zoom — moved from the stock 28pt
@@ -292,6 +305,20 @@ mod macos {
 
     pub fn double_click_zooms() -> bool {
         double_click_action().as_deref() != Some("None")
+    }
+
+    /// Miniaturize the app's window, if it has one. Only on the main thread, which is where the UI
+    /// runs.
+    pub fn miniaturize() -> bool {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return false;
+        };
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
+            return false;
+        };
+        window.miniaturize(None);
+        true
     }
 
     /// From the close button's left edge to the zoom button's right edge.
