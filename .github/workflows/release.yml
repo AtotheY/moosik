@@ -2,7 +2,8 @@ name: Release
 
 # Pushing a v* tag builds every artifact, checks them with scripts/release.sh, and publishes the
 # GitHub release with its checksums. Running it by hand (Actions > Release > Run workflow) does
-# everything except the publishing, so a change to the scripts or this file can be tried first.
+# everything except the publishing, so a change to the scripts or this file can be tried first,
+# and a branch that is not released yet gets installers to test (release.sh verify --test-build).
 #
 # The scripts are the ones used on a developer machine; this file only installs what they need.
 #
@@ -67,7 +68,7 @@ jobs:
       - name: Download the crates (the lock check reads them offline)
         run: cargo fetch --locked
       - name: Repository checks
-        run: scripts/release.sh verify "${{ steps.version.outputs.version }}" --repo-only
+        run: scripts/release.sh verify "${{ steps.version.outputs.version }}" --repo-only ${{ github.ref_type != 'tag' && '--test-build' || '' }}
 
   windows:
     needs: check
@@ -267,7 +268,7 @@ jobs:
           merge-multiple: true
       - run: cargo fetch --locked
       - name: Verify the release
-        run: scripts/release.sh verify "${{ needs.check.outputs.version }}" --strict
+        run: scripts/release.sh verify "${{ needs.check.outputs.version }}" --strict ${{ github.ref_type != 'tag' && '--test-build' || '' }}
 
   # Only a tag publishes. The release stays a draft until every file and the checksums are on it,
   # so nobody, the in-app updater included, sees one that is half there.

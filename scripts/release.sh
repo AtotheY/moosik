@@ -9,13 +9,14 @@
 #       Refuses a dirty tree, a tree carrying the private local patch, a version that
 #       is not newer than the current one, or one whose tag already exists.
 #
-#   scripts/release.sh verify <version> [--repo-only] [--strict]
+#   scripts/release.sh verify <version> [--repo-only] [--strict] [--test-build]
 #       Checks that the repo and everything in dist/ agree on <version>: the version in Cargo.toml,
 #       the metainfo, a consistent Cargo.lock, a clean tree, a tag (if there is one) on HEAD, the
 #       release notes, and that each artifact exists, is newer than HEAD's commit (so it was built
 #       from it) and has the right contents. The macOS image is built on a Mac, so its absence is
 #       a warning; --strict makes it a failure (CI builds it). --repo-only stops after the repo
-#       checks, before any artifact is looked for.
+#       checks, before any artifact is looked for. --test-build skips the tag and the release
+#       notes, for a build made to be tried rather than released (the workflow run by hand).
 #
 #   scripts/release.sh publish <version> [--notes FILE] [--without-macos] [--yes]
 #       Verifies, then tags v<version>, pushes main and the tag, and creates the GitHub release
@@ -208,15 +209,16 @@ PY
 
 cmd_verify() {
     local v="${1:-}"; shift || true
-    local repo_only=0 strict=0
+    local repo_only=0 strict=0 test_build=0
     for a in "$@"; do
         case "$a" in
             --repo-only) repo_only=1 ;;
             --strict) strict=1 ;;
+            --test-build) test_build=1 ;;
             *) die "unknown option $a" ;;
         esac
     done
-    valid_version "$v" || die "usage: release.sh verify <major.minor.patch> [--repo-only] [--strict]"
+    valid_version "$v" || die "usage: release.sh verify <major.minor.patch> [--repo-only] [--strict] [--test-build]"
     local errors=0 warnings=0
     bad() { echo "  FAIL  $*"; errors=$((errors + 1)); }
     ok() { echo "  ok    $*"; }
@@ -239,7 +241,9 @@ cmd_verify() {
     fi
     local head_time
     head_time="$(git log -1 --format=%ct)"
-    if git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
+    if [ "$test_build" = 1 ]; then
+        ok "test build: tag and release notes not checked"
+    elif git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
         [ "$(git rev-parse "v$v^{commit}")" = "$(git rev-parse HEAD)" ] \
             && ok "tag v$v is HEAD" || bad "tag v$v is not HEAD"
     else
@@ -249,7 +253,7 @@ cmd_verify() {
     # The notes are read by the release workflow and published as they are, so a missing file or
     # the template's marker still in it stops the release here, not after twenty minutes of builds.
     # Releases before the notes folder existed have none; TEMPLATE.md says it is in use.
-    if [ -f release-notes/TEMPLATE.md ]; then
+    if [ "$test_build" = 0 ] && [ -f release-notes/TEMPLATE.md ]; then
         if [ ! -s "release-notes/$v.md" ]; then
             bad "release-notes/$v.md is missing"
         elif grep -q "TODO: write" "release-notes/$v.md"; then
