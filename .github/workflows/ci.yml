@@ -1,0 +1,73 @@
+name: CI
+
+# What `just check` runs, on all three platforms, for every push to main and every pull request.
+# One crate carries the code for Linux, Windows and macOS behind `cfg(target_os)`, so a change that
+# is fine where it was written can still break another platform; each job here compiles one.
+#
+# Windows is checked from Linux with the mingw-w64 cross toolchain release.yml builds with.
+# Checking does not link, so it needs neither libmpv nor a Windows machine, and it does not run
+# the tests; the release build is where Windows is linked and run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config libmpv-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libsoup-3.0-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev \
+            libwayland-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p refryt-resolve --features native-resolver --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  windows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 pkg-config
+          rustup target add x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install mpv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
