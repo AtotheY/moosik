@@ -26,3 +26,6 @@
 /packaging/flatpak/repo/
 /packaging/flatpak/shared-modules/
 /packaging/flatpak/yt-dlp
+
+# Finder's folder settings, written wherever a Mac opens the checkout.
+.DS_Store
