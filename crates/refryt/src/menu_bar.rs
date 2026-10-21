@@ -260,7 +260,7 @@ impl MenuBar {
         let history = item(Command::History, "History", cmd(Code::Digit4));
         let queue = check(Command::Queue, "Show Queue", None);
         let lyrics = check(Command::Lyrics, "Show Lyrics", None);
-        let fullscreen_player = item(Command::FullscreenPlayer, "Full-Screen Player", None);
+        let fullscreen_player = item(Command::FullscreenPlayer, "Now Playing", None);
         let view = Submenu::with_items(
             "View",
             true,
@@ -369,10 +369,11 @@ impl MenuBar {
             self.lyrics.set_checked(state.lyrics_open);
         }
         if changed(|s| s.fullscreen_player) {
+            // Not "full screen": that is the window's own, Enter Full Screen just below.
             self.fullscreen_player.set_text(if state.fullscreen_player {
-                "Exit Full-Screen Player"
+                "Close Now Playing"
             } else {
-                "Full-Screen Player"
+                "Now Playing"
             });
         }
         self.shown = Some(state);
