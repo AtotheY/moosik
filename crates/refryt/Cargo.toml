@@ -83,6 +83,9 @@ libc = "0.2"
 glib = "0.18.5"
 # The sign-in window's own GTK window and loop (`webview_login.rs`).
 gtk = "0.18.2"
+# KWin's scripting interface on the session bus (`kwin.rs`), the one way a minimised window gets
+# back on Plasma's Wayland. Already in the graph for MPRIS and the tray, so no new copy.
+zbus = "5.19"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }

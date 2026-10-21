@@ -1253,12 +1253,19 @@ pub(crate) fn is_wayland() -> bool {
 /// the session started, no other active window — and by making the taskbar entry demand
 /// attention when it cannot. On every other platform `Focus` works, and an attention request
 /// would only flash the taskbar on top of a successful focus.
+///
+/// On Plasma's Wayland the window is also restored through KWin itself (`kwin`): a minimised
+/// window, which is what "hide to tray" leaves there, otherwise never comes back.
 pub(crate) fn request_foreground(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     if is_wayland() {
         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
             egui::UserAttentionType::Critical,
         ));
+        #[cfg(target_os = "linux")]
+        if crate::kwin::is_plasma() {
+            crate::kwin::set_hidden(false);
+        }
     }
 }
 
@@ -1280,6 +1287,18 @@ pub(crate) fn request_foreground(ctx: &egui::Context) {
 /// `tray` module docs) instead of relying on the next frame.
 fn hide_command(hide: bool) -> egui::ViewportCommand {
     hide_command_for(is_wayland(), hide)
+}
+
+/// Hide the window to the tray, or show it again: [`hide_command`], and on Plasma's Wayland the
+/// rest of the hide through KWin (`kwin`), which takes the window off the taskbar, the pager and
+/// Alt+Tab, as on Windows. The way back is [`request_foreground`], which every show is followed
+/// by and which restores it there.
+fn set_window_hidden(ctx: &egui::Context, hide: bool) {
+    ctx.send_viewport_cmd(hide_command(hide));
+    #[cfg(target_os = "linux")]
+    if hide && is_wayland() && crate::kwin::is_plasma() {
+        crate::kwin::set_hidden(true);
+    }
 }
 
 /// [`hide_command`], parameterised on the platform check instead of reading it — so the two
@@ -2452,7 +2471,7 @@ impl App {
     pub(crate) fn request_close(&mut self, ctx: &egui::Context) {
         if self.settings.hide_tray_on_close {
             self.hidden = true;
-            ctx.send_viewport_cmd(hide_command(true));
+            set_window_hidden(ctx, true);
         } else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -2464,7 +2483,7 @@ impl App {
     /// gap (`request_foreground`).
     fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
-        ctx.send_viewport_cmd(hide_command(false));
+        set_window_hidden(ctx, false);
         request_foreground(ctx);
     }
 
@@ -2479,7 +2498,7 @@ impl App {
             match action {
                 crate::tray::TrayAction::ToggleVisible => {
                     self.hidden = !self.hidden;
-                    ctx.send_viewport_cmd(hide_command(self.hidden));
+                    set_window_hidden(ctx, self.hidden);
                     if !self.hidden {
                         request_foreground(ctx);
                     }
@@ -2503,7 +2522,7 @@ impl App {
             && ctx.input(|i| i.viewport().close_requested())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(hide_command(true));
+            set_window_hidden(ctx, true);
             self.hidden = true;
         }
         if self.hidden {

@@ -29,6 +29,9 @@ pub mod innertube;
 /// a second player; see the module's own doc comment.
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod instance;
+/// Plasma on Wayland: restoring the app's own minimised window through KWin.
+#[cfg(target_os = "linux")]
+pub mod kwin;
 pub mod liked;
 pub mod local;
 pub mod local_playlists;
