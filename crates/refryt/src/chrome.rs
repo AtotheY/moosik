@@ -260,6 +260,17 @@ impl TrafficLights {
         }
     }
 
+    /// Whether the window is in the system's own fullscreen, read from AppKit. egui's
+    /// `viewport().fullscreen` can miss the first green-button fullscreen after launch, and then
+    /// the shell kept the buttons' corner free while the system had hidden them.
+    pub fn window_fullscreen(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(view) = &self.view {
+            return macos::is_fullscreen(view);
+        }
+        false
+    }
+
     /// Put the buttons with the close button's left edge at `left` and all three centred on
     /// `center_y`, both in points from the window's top-left; or hide them, for a fullscreen
     /// window that has nowhere to put them.
@@ -319,6 +330,12 @@ mod macos {
         };
         window.miniaturize(None);
         true
+    }
+
+    pub fn is_fullscreen(content: &NSView) -> bool {
+        content
+            .window()
+            .is_some_and(|w| w.styleMask().contains(NSWindowStyleMask::FullScreen))
     }
 
     /// From the close button's left edge to the zoom button's right edge.

@@ -2515,6 +2515,7 @@ impl App {
     /// [`Self::lights_over_rail`]). Hidden while the window is fullscreen or the fullscreen player
     /// is up, which have no corner for them. A no-op elsewhere and with `--decorated`.
     fn place_traffic_lights(&mut self, fullscreen: bool) {
+        let fullscreen = fullscreen || self.traffic_lights.window_fullscreen();
         self.traffic_lights_shown = chrome::NATIVE_WINDOW_BUTTONS && !self.decorated && !fullscreen;
         if self.decorated {
             return;
