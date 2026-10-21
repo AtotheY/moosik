@@ -36,7 +36,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     }
 
     app.sidebar_rail = rail;
-    if app.traffic_lights_shown {
+    if app.traffic_lights_shown && !app.lights_over_rail() {
         // macOS: the traffic lights sit in the card's top-left corner, centred on the top bar
         // (`App::place_traffic_lights`). The strip they sit in drags the window like a title
         // bar, and the nav starts below it, level with the top of the page card. Fullscreen

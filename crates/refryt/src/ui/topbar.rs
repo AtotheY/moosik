@@ -82,6 +82,11 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
 
+    // macOS with the sidebar folded: the traffic lights sit above the rail and reach into this
+    // bar, so back and forward start clear of them.
+    if app.lights_over_rail() {
+        bar.add_space((app.traffic_lights_right() + 14.0 - rect.left()).max(0.0));
+    }
     let can_back = app.can_go_back();
     let can_forward = app.can_go_forward();
     let back = history_button(&mut bar, &p, Icon::ChevronLeft, can_back);

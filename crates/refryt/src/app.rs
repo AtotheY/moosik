@@ -356,6 +356,11 @@ const DEFAULT_WINDOW_SIZE: (f32, f32) = (1100.0, 720.0);
 /// ignore the first asks, and one that never complies must not be asked for ever.
 const WINDOW_FIT_TRIES: u8 = 12;
 
+/// macOS: where the traffic lights' close button starts, in points from the window's left. Inset
+/// from the wide sidebar card's edge, and kept there when the sidebar folds, as Music and Finder
+/// keep theirs: a rail is too narrow to hold all three with room around them.
+const TRAFFIC_LIGHTS_LEFT: f32 = theme::GUTTER + 12.0;
+
 const HOME_STALE: Duration = Duration::from_secs(30 * 60);
 
 /// Whether the channel page for `loading` is a person's: marked as one when it was opened, or
@@ -2505,24 +2510,33 @@ impl App {
         }
     }
 
-    /// macOS: keep the system's window buttons in the sidebar card's top-left corner, centred on
-    /// the top bar — inset from the card's edge when the sidebar is wide, centred over the icon
-    /// rail when it is folded. Hidden while the window is fullscreen or the fullscreen player is
-    /// up, which have no corner for them. A no-op elsewhere and with `--decorated`.
+    /// macOS: keep the system's window buttons in the window's top-left corner, centred on the
+    /// top bar — inside the sidebar card when it is wide, above the rail when it is folded (see
+    /// [`Self::lights_over_rail`]). Hidden while the window is fullscreen or the fullscreen player
+    /// is up, which have no corner for them. A no-op elsewhere and with `--decorated`.
     fn place_traffic_lights(&mut self, fullscreen: bool) {
         self.traffic_lights_shown = chrome::NATIVE_WINDOW_BUTTONS && !self.decorated && !fullscreen;
         if self.decorated {
             return;
         }
-        let left = if self.sidebar_rail {
-            theme::GUTTER
-                + ((theme::SIDEBAR_RAIL - theme::GUTTER - self.traffic_lights.width()) / 2.0)
-                    .max(0.0)
-        } else {
-            theme::GUTTER + 12.0
-        };
-        self.traffic_lights
-            .place(left, theme::TITLEBAR_HEIGHT / 2.0, !fullscreen);
+        self.traffic_lights.place(
+            TRAFFIC_LIGHTS_LEFT,
+            theme::TITLEBAR_HEIGHT / 2.0,
+            !fullscreen,
+        );
+    }
+
+    /// macOS, sidebar folded to the rail: the traffic lights keep their place from the wide
+    /// sidebar, which is wider than the rail, so they sit on the window above it instead of in
+    /// the card, and the rail starts below them, level with the page card.
+    pub(crate) fn lights_over_rail(&self) -> bool {
+        self.traffic_lights_shown && self.sidebar_rail
+    }
+
+    /// The right edge of the traffic lights in points from the window's left, while they are on
+    /// screen.
+    pub(crate) fn traffic_lights_right(&self) -> f32 {
+        TRAFFIC_LIGHTS_LEFT + self.traffic_lights.width()
     }
 
     /// Bring the window back from hidden or minimized, best-effort. Shared by the tray's Show,
@@ -7747,6 +7761,15 @@ impl eframe::App for App {
             );
             let widgets = ui.visuals().widgets.clone();
             quiet_panel_edges(ui);
+            // The corner above the rail, where the traffic lights sit when the sidebar is folded,
+            // belongs to no panel; it drags the window like the rest of the title bar.
+            if self.lights_over_rail() {
+                let corner = egui::Rect::from_min_max(
+                    egui::Pos2::ZERO,
+                    egui::pos2(theme::SIDEBAR_RAIL, theme::TITLEBAR_HEIGHT),
+                );
+                chrome::drag_surface(ui, corner, self.decorated, "rail-corner");
+            }
             egui::Panel::left("sidebar")
                 .default_size(sidebar_pref.min(sidebar_max))
                 .size_range(theme::SIDEBAR_RAIL..=sidebar_max)
@@ -7756,7 +7779,11 @@ impl eframe::App for App {
                     card(p.card_fill(), theme::CARD_INSET).outer_margin(egui::Margin {
                         left: g,
                         right: 0,
-                        top: g,
+                        top: if self.lights_over_rail() {
+                            theme::TITLEBAR_HEIGHT as i8
+                        } else {
+                            g
+                        },
                         bottom: 0,
                     }),
                 )
