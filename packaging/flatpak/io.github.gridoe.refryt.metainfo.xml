@@ -2,15 +2,57 @@
 <component type="desktop-application">
   <id>io.github.gridoe.refryt</id>
   <name>Refryt</name>
-  <summary>A fast, native YouTube Music client</summary>
+  <summary>Lightweight YouTube Music client</summary>
+  <developer id="io.github.gridoe">
+    <name>gridoe</name>
+  </developer>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <url type="homepage">https://github.com/gridoe/refryt</url>
   <url type="bugtracker">https://github.com/gridoe/refryt/issues</url>
+  <url type="vcs-browser">https://github.com/gridoe/refryt</url>
   <description>
-    <p>Refryt is a YouTube Music client that is a native program rather than a web page. It plays through mpv, shows synced lyrics, and downloads songs for Premium accounts.</p>
+    <p>Refryt is a native desktop client for YouTube Music, written in Rust. There is no browser engine behind it: songs play through mpv, and the app talks to YouTube through the same internal API the website uses. Memory use is typically between 100 and 300 MB, depending on the session.</p>
+    <ul>
+      <li>Home, Explore, search and your library</li>
+      <li>Synced lyrics, an editable queue and music videos</li>
+      <li>23 themes, with optional window transparency and background blur</li>
+      <li>Media keys and the desktop's media controls</li>
+      <li>Downloads for Music Premium accounts</li>
+    </ul>
+    <p>Refryt is an unofficial client, not affiliated with or endorsed by YouTube or Google.</p>
   </description>
   <launchable type="desktop-id">io.github.gridoe.refryt.desktop</launchable>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Home, in the default dark theme</caption>
+      <image>https://raw.githubusercontent.com/gridoe/refryt/main/assets/screenshots/home-classic.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An album page, its header tinted from the cover</caption>
+      <image>https://raw.githubusercontent.com/gridoe/refryt/main/assets/screenshots/album.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The fullscreen player with synced lyrics</caption>
+      <image>https://raw.githubusercontent.com/gridoe/refryt/main/assets/screenshots/fullscreen-lyrics.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Search results and the queue, in another theme</caption>
+      <image>https://raw.githubusercontent.com/gridoe/refryt/main/assets/screenshots/spotify-theme.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Settings</caption>
+      <image>https://raw.githubusercontent.com/gridoe/refryt/main/assets/screenshots/settings.png</image>
+    </screenshot>
+  </screenshots>
+  <branding>
+    <color type="primary" scheme_preference="light">#c5cff0</color>
+    <color type="primary" scheme_preference="dark">#2b2f3a</color>
+  </branding>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.1.13" date="2026-10-21"/>
