@@ -1,11 +1,13 @@
 //! The system tray icon: Show/Hide and Quit, shown only while "Hide tray on close" is on.
 //!
-//! The icon is built directly on the calling thread on every platform — see the crate's own
-//! `examples/egui.rs`, which this follows. On Linux that is `tray-icon`'s `ksni` backend: a
-//! StatusNotifierItem spoken over D-Bus from a worker thread the crate runs itself. The default
-//! libappindicator backend was used before, and it needed a GTK loop on a thread of its own,
-//! never reported a click on the icon (Plasma's left click got "No handler for Activate", so
-//! the left-click toggle below never ran), and showed no tooltip.
+//! On Windows and macOS the icon is `tray-icon`'s, built directly on the calling thread — see the
+//! crate's own `examples/egui.rs`, which this follows. On Linux it is a StatusNotifierItem from
+//! `ksni`, spoken over D-Bus from a worker thread ksni runs itself. `tray-icon`'s ksni backend did
+//! the same, but cannot register without a well-known bus name (`StatusNotifierItem-<pid>-<n>`),
+//! and inside a Flatpak only an unnamed item is allowed: Flathub does not grant the name, and
+//! without it the sandbox's bus proxy refused the tray outright. Before that, `tray-icon`'s
+//! libappindicator backend needed a GTK loop on a thread of its own, never reported a click on
+//! the icon (Plasma's left click got "No handler for Activate"), and showed no tooltip.
 //!
 //! [`spawn`] is called at most once per process, the first time "Hide tray on close" is turned
 //! on — not once per toggle. An earlier version that called `spawn` again on every toggle left a
@@ -19,10 +21,10 @@
 //! ordering the window back on screen through AppKit first (`bring_window_forward`), without
 //! waiting for a frame; the next frame then reads the queued action as usual.
 //!
-//! `TrayIconEvent`/`MenuEvent` arrive on whichever thread the crate's backend runs on — the D-Bus
-//! worker on Linux, the icon's own message pump on Windows — never the render thread, and the
-//! crate's own channels do not wake winit. So [`spawn`] installs the crate's process-wide event
-//! handlers instead of leaving the events to be polled: each handler queues a [`TrayAction`]
+//! Clicks arrive on whichever thread the backend runs on — ksni's D-Bus worker on Linux, the
+//! icon's own message pump on Windows — never the render thread, and the crates' own channels do
+//! not wake winit. So [`spawn`] installs process-wide event handlers (on Linux, ksni's callbacks)
+//! instead of leaving the events to be polled: each handler queues a [`TrayAction`]
 //! and calls `egui::Context::request_repaint`. The repaint is the half that matters: an idle
 //! window schedules no frames of its own, so without it a tray click sat in the queue until
 //! something unrelated happened to paint — which is what made Quit take as long as it took for
@@ -32,10 +34,14 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+#[cfg(not(target_os = "linux"))]
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(not(target_os = "linux"))]
+use tray_icon::{MouseButton, TrayIconBuilder, TrayIconEvent};
 
+#[cfg(not(target_os = "linux"))]
 const SHOW_HIDE_ID: &str = "ytm-tray-show-hide";
+#[cfg(not(target_os = "linux"))]
 const QUIT_ID: &str = "ytm-tray-quit";
 
 /// What choosing a tray menu item — or clicking the icon itself — means for the app.
@@ -107,6 +113,7 @@ fn bring_window_forward() {
 /// Called from [`spawn`], which runs at most once per process: the crate's handlers are
 /// first-set-only, so a second call would silently keep the first closure — and with it the
 /// first `egui::Context` — anyway.
+#[cfg(not(target_os = "linux"))]
 fn install_handlers(ctx: &egui::Context) {
     install_menu_handler(ctx);
     let icon_ctx = ctx.clone();
@@ -120,6 +127,7 @@ fn install_handlers(ctx: &egui::Context) {
 /// Install muda's process-wide menu event handler, once. Shared by the tray's menu and, on
 /// macOS, the menu bar (`menu_bar`): muda keeps only the first handler ever set, so whichever of
 /// the two comes first has to route for both.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn install_menu_handler(ctx: &egui::Context) {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {
@@ -140,6 +148,7 @@ pub(crate) fn install_menu_handler(ctx: &egui::Context) {
 }
 
 /// What a menu id means, if it is one of ours.
+#[cfg(not(target_os = "linux"))]
 fn menu_action(id: &str) -> Option<TrayAction> {
     match id {
         SHOW_HIDE_ID => Some(TrayAction::ToggleVisible),
@@ -150,55 +159,37 @@ fn menu_action(id: &str) -> Option<TrayAction> {
 
 /// What a click on the icon itself means, if anything.
 ///
-/// A left release toggles the window on Linux, where a status-notifier host may offer no other
-/// interaction at all. On Windows it means nothing: a left click there is the first half of a
-/// double-click — the crate emits `Click(Up)`, then `DoubleClick`, then a second `Click(Up)` —
-/// so a toggle on the first release would fight the double-click's own show (hide, show, hide).
-///
-/// `DoubleClick` shows the window on every platform that reports one. `Click` also fires on
-/// press and for a right-click; only the release of the left button is considered — a
-/// status-notifier host already turns a right-click into the context menu on its own, and
-/// reacting to it here as well would toggle the window at the same time.
+/// Only a left double-click: it shows the window. A single left click means nothing on Windows,
+/// where it is the first half of a double-click — the crate emits `Click(Up)`, then
+/// `DoubleClick`, then a second `Click(Up)` — so a toggle on the first release would fight the
+/// double-click's own show (hide, show, hide). macOS opens the menu on a click by itself.
+#[cfg(not(target_os = "linux"))]
 fn icon_action(event: &TrayIconEvent) -> Option<TrayAction> {
     match event {
         TrayIconEvent::DoubleClick {
             button: MouseButton::Left,
             ..
         } => Some(TrayAction::Show),
-        TrayIconEvent::Click {
-            button,
-            button_state,
-            ..
-        } => click_action(*button, *button_state),
         _ => None,
-    }
-}
-
-/// [`icon_action`]'s click rule on plain values, so each platform's answer is a unit test
-/// rather than something only checkable by clicking a tray icon.
-fn click_action(button: MouseButton, state: MouseButtonState) -> Option<TrayAction> {
-    if button != MouseButton::Left || state != MouseButtonState::Up {
-        return None;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Some(TrayAction::ToggleVisible)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 
 /// The icon, decoded once per call from the same PNG [`crate::window_icon`] uses for the
 /// titlebar/taskbar — one source of truth for what Refryt's icon looks like.
-fn icon() -> Option<tray_icon::Icon> {
+fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let bytes = include_bytes!("../../../assets/icons/app/refryt-256.png");
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (width, height) = img.dimensions();
-    tray_icon::Icon::from_rgba(img.into_raw(), width, height).ok()
+    Some((img.into_raw(), width, height))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn icon() -> Option<tray_icon::Icon> {
+    let (rgba, width, height) = icon_rgba()?;
+    tray_icon::Icon::from_rgba(rgba, width, height).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
 fn menu() -> Menu {
     let show_hide = MenuItem::with_id(SHOW_HIDE_ID, "Show/Hide", true, None);
     let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
@@ -209,15 +200,24 @@ fn menu() -> Menu {
 /// this is for after construction — see the module doc comment for why toggling visibility, not
 /// rebuilding the icon, is what a setting toggle should do.
 pub struct Tray {
+    #[cfg(not(target_os = "linux"))]
     icon: Option<tray_icon::TrayIcon>,
+    #[cfg(target_os = "linux")]
+    icon: Option<ksni::blocking::Handle<StatusItem>>,
 }
 
 impl Tray {
     /// Show or hide the icon. A no-op if [`spawn`] never managed to build one — reported already,
     /// at construction time, so this stays quiet.
     pub fn set_visible(&self, visible: bool) {
+        #[cfg(not(target_os = "linux"))]
         if let Some(icon) = &self.icon {
             let _ = icon.set_visible(visible);
+        }
+        // A passive item is one the host hides, as `tray-icon`'s own ksni backend did it.
+        #[cfg(target_os = "linux")]
+        if let Some(icon) = &self.icon {
+            icon.update(|item| item.status = status(visible));
         }
     }
 }
@@ -225,6 +225,7 @@ impl Tray {
 /// Build the tray icon. Call once, the first time "Hide tray on close" is turned on — not on
 /// every toggle after that, which is exactly the mistake this module's doc comment describes;
 /// use [`Tray::set_visible`] for every toggle from then on.
+#[cfg(not(target_os = "linux"))]
 pub fn spawn(ctx: &egui::Context) -> Tray {
     // Installed even if the icon itself never gets built: the handlers are what wake the UI,
     // and they are harmless with no icon to click.
@@ -237,19 +238,143 @@ pub fn spawn(ctx: &egui::Context) -> Tray {
         // Windows opens the context menu on left-click by default; left as-is, the menu would
         // open on the first click of a double-click, which now means "show". Right click still
         // opens the menu, the Windows convention, and a single left click does nothing — see
-        // `click_action`.
+        // `icon_action`.
         #[cfg(target_os = "windows")]
         let builder = builder.with_menu_on_left_click(false);
-        // The title is what a StatusNotifierItem host names the icon by; without it Plasma shows
-        // the process name, lowercase. Not on macOS, where a title is text beside the icon.
-        #[cfg(target_os = "linux")]
-        let builder = builder.with_title("Refryt");
         builder
             .build()
             .inspect_err(|e| tracing::warn!(%e, "could not create the tray icon"))
             .ok()
     });
     Tray { icon }
+}
+
+/// Build the tray icon: see the other platforms' [`spawn`]. Inside a Flatpak the item registers
+/// under the connection's unique name only, the one way the sandbox lets it onto the bus.
+#[cfg(target_os = "linux")]
+pub fn spawn(ctx: &egui::Context) -> Tray {
+    use ksni::blocking::TrayMethods;
+    let item = StatusItem {
+        ctx: ctx.clone(),
+        status: status(true),
+        icon: icon_rgba()
+            .map(|(rgba, width, height)| ksni::Icon {
+                width: width as i32,
+                height: height as i32,
+                data: argb(rgba),
+            })
+            .into_iter()
+            .collect(),
+    };
+    let icon = item
+        .disable_dbus_name(crate::flatpak::sandboxed())
+        .spawn()
+        .inspect_err(|e| tracing::warn!(%e, "could not create the tray icon"))
+        .ok();
+    Tray { icon }
+}
+
+/// The Linux tray item: what ksni asks of it, and the actions its clicks queue.
+#[cfg(target_os = "linux")]
+struct StatusItem {
+    ctx: egui::Context,
+    status: ksni::Status,
+    icon: Vec<ksni::Icon>,
+}
+
+#[cfg(target_os = "linux")]
+fn status(visible: bool) -> ksni::Status {
+    if visible {
+        ksni::Status::Active
+    } else {
+        ksni::Status::Passive
+    }
+}
+
+/// RGBA, as the PNG decodes, to the ARGB a StatusNotifierItem pixmap is.
+#[cfg(target_os = "linux")]
+fn argb(mut rgba: Vec<u8>) -> Vec<u8> {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.rotate_right(1);
+    }
+    rgba
+}
+
+#[cfg(target_os = "linux")]
+impl ksni::Tray for StatusItem {
+    fn id(&self) -> String {
+        crate::flatpak::app_id()
+    }
+
+    /// What the host names the icon by; without it Plasma shows the process name, lowercase.
+    fn title(&self) -> String {
+        "Refryt".to_owned()
+    }
+
+    fn status(&self) -> ksni::Status {
+        self.status
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.icon.clone()
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: "Refryt".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A left click toggles the window: a status-notifier host may offer no other interaction.
+    fn activate(&mut self, _x: i32, _y: i32) {
+        keep_token();
+        inject(&self.ctx, TrayAction::ToggleVisible);
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::StandardItem;
+        let item = |label: &str, action: TrayAction| {
+            StandardItem {
+                label: label.to_owned(),
+                activate: Box::new(move |item: &mut Self| {
+                    keep_token();
+                    inject(&item.ctx, action);
+                }),
+                ..Default::default()
+            }
+            .into()
+        };
+        vec![
+            item("Show/Hide", TrayAction::ToggleVisible),
+            item("Quit", TrayAction::Quit),
+        ]
+    }
+}
+
+/// The activation token the tray host sent with the latest click, for `activation` to bring the
+/// window back with on Wayland. Read once by the frame that acts on the click.
+#[cfg(target_os = "linux")]
+static TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+/// Keep the token of the click being handled. Called inside ksni's callback, the only place
+/// [`ksni::current_xdg_activation_token`] answers. KDE may send the token a moment after the
+/// click itself, so a missing one is asked for once more after a millisecond, as ksni advises.
+#[cfg(target_os = "linux")]
+fn keep_token() {
+    let token = ksni::current_xdg_activation_token().or_else(|| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        ksni::current_xdg_activation_token()
+    });
+    if let Ok(mut kept) = TOKEN.lock() {
+        *kept = token;
+    }
+}
+
+/// The token of the latest tray click, if one came with it; taken, so it is used at most once.
+#[cfg(target_os = "linux")]
+pub fn take_activation_token() -> Option<String> {
+    TOKEN.lock().ok()?.take()
 }
 
 /// Drain one tray action, if any arrived since the last call.
@@ -261,6 +386,7 @@ pub fn poll() -> Option<TrayAction> {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn menu_ids_map_to_their_actions() {
         assert_eq!(menu_action(SHOW_HIDE_ID), Some(TrayAction::ToggleVisible));
@@ -268,38 +394,7 @@ mod tests {
         assert_eq!(menu_action("some-other-item"), None);
     }
 
-    #[test]
-    fn only_the_left_release_is_a_click() {
-        assert_eq!(click_action(MouseButton::Right, MouseButtonState::Up), None);
-        assert_eq!(
-            click_action(MouseButton::Middle, MouseButtonState::Up),
-            None
-        );
-        assert_eq!(
-            click_action(MouseButton::Left, MouseButtonState::Down),
-            None
-        );
-    }
-
-    /// On Linux the left click is the only interaction some status-notifier hosts offer, so it
-    /// keeps toggling the window.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_left_release_toggles_on_linux() {
-        assert_eq!(
-            click_action(MouseButton::Left, MouseButtonState::Up),
-            Some(TrayAction::ToggleVisible)
-        );
-    }
-
-    /// On Windows a left release is the first half of a double-click, whose own action is the
-    /// show — see `icon_action`.
     #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn a_left_release_means_nothing_where_double_click_shows() {
-        assert_eq!(click_action(MouseButton::Left, MouseButtonState::Up), None);
-    }
-
     fn double_click(button: MouseButton) -> TrayIconEvent {
         TrayIconEvent::DoubleClick {
             id: tray_icon::TrayIconId::new("test"),
@@ -311,6 +406,7 @@ mod tests {
 
     /// The gesture this module's Windows rule exists for: a left double-click shows the window,
     /// and a right one — the context menu's own double-click, if a host sends one — does not.
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn a_left_double_click_shows_the_window() {
         assert_eq!(
@@ -319,5 +415,21 @@ mod tests {
         );
         assert_eq!(icon_action(&double_click(MouseButton::Right)), None);
         assert_eq!(icon_action(&double_click(MouseButton::Middle)), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_pixmap_is_argb() {
+        assert_eq!(
+            argb(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+            vec![4, 1, 2, 3, 8, 5, 6, 7]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_icon_decodes() {
+        let (rgba, width, height) = icon_rgba().expect("the bundled icon decodes");
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
     }
 }

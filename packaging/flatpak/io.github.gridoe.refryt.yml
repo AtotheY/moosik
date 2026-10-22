@@ -22,10 +22,9 @@ finish-args:
   - --device=dri
   # Media keys and the desktop's media controls: the name playwire registers.
   - --own-name=org.mpris.MediaPlayer2.refryt
-  # The tray icon. ksni registers it under `org.kde.StatusNotifierItem-<pid>-<n>`, and inside the
-  # sandbox refryt is always pid 2 with one icon; without this name the tray is not created at all.
+  # The tray icon, a StatusNotifierItem. Inside the sandbox it registers under the connection's
+  # unique name, so it needs no name of its own (see `tray.rs`).
   - --talk-name=org.kde.StatusNotifierWatcher
-  - --own-name=org.kde.StatusNotifierItem-2-1
   - --talk-name=org.freedesktop.Notifications
   # Discord Rich Presence connects to Discord's IPC socket.
   - --filesystem=xdg-run/discord-ipc-0

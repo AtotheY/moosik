@@ -42,12 +42,6 @@ libmpv2-sys = "=4.0.1"
 # read the raw window/display handles eframe exposes, so this is unconditional rather than behind any
 # one target's `cfg`.
 raw-window-handle = "0.6"
-# The system tray icon (`tray.rs`). Genuinely cross-platform — its own internal `cfg`s pick
-# a StatusNotifierItem over D-Bus on Linux, the Shell_NotifyIcon API on Windows, NSStatusItem on
-# macOS — so this sits here unconditionally. On Linux it is the `ksni` backend rather than the
-# default libappindicator one: libappindicator never reports a click on the icon (a left click
-# did nothing) and shows no tooltip, and it needs a GTK loop of its own to run at all.
-tray-icon = { version = "0.25.0", default-features = false, features = ["ksni"] }
 # OS media controls: MPRIS on Linux (via zbus), SMTC on Windows, Now Playing on macOS. This is
 # what makes desktop/lock-screen/headset media keys work.
 playwire = "1.0"
@@ -95,6 +89,16 @@ wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 # the module doc. Building needs `webkit2gtk-4.1` and `libsoup-3.0` development packages, which
 # most desktops already carry; the AppImage does not bundle WebKitGTK, so the host's is used.
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+# The tray icon (`tray.rs`): a StatusNotifierItem over D-Bus. Used directly rather than through
+# `tray-icon`, whose ksni backend this is, because only ksni itself can register without a
+# well-known bus name, which a Flatpak needs (Flathub does not grant the name). The features are
+# the ones `tray-icon` turned on, so no new crates.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+
+# The system tray icon (`tray.rs`) on Windows (Shell_NotifyIcon) and macOS (NSStatusItem), and on
+# macOS the menu bar (`menu_bar.rs`) through the `muda` it brings.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.25.0", default-features = false }
 
 
 

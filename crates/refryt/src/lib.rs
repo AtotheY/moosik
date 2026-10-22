@@ -5,6 +5,9 @@
 //! through our own parser (see [`innertube`]), and a canary that tested `ytmapi-rs` directly would
 //! be watching the fallback rather than the path anyone actually takes.
 
+/// Wayland: bringing the window back with the tray's activation token.
+#[cfg(target_os = "linux")]
+pub mod activation;
 pub mod api;
 pub mod app;
 pub mod auth;

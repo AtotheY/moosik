@@ -1760,6 +1760,10 @@ pub struct App {
     /// non-Linux build — and the Settings row for it disables itself off that rather than
     /// offering a switch that does nothing.
     pub(crate) blur: crate::blur::Blur,
+    /// Wayland: activates the window with a tray click's token, the way a hidden window comes
+    /// back where KWin's scripting cannot be reached (the Flatpak) or on other compositors.
+    #[cfg(target_os = "linux")]
+    activation: crate::activation::Activation,
     /// macOS: the system's window buttons, kept in the shell's top-left corner. A no-op
     /// elsewhere.
     traffic_lights: crate::chrome::TrafficLights,
@@ -1938,6 +1942,8 @@ impl App {
         let palette = settings.palette(&cc.egui_ctx, &custom_themes);
         theme::apply(&cc.egui_ctx, &palette);
         let blur = crate::blur::Blur::new(cc);
+        #[cfg(target_os = "linux")]
+        let activation = crate::activation::Activation::new(cc);
         let traffic_lights = crate::chrome::TrafficLights::new(cc);
         // Until the sidebar is first drawn (the splash comes first), from its saved width.
         let sidebar_rail = settings.sidebar_width.is_some_and(theme::sidebar_is_rail);
@@ -2163,6 +2169,8 @@ impl App {
             screenshot: screenshot.map(|(path, when)| (path, when, false)),
             content_rect: egui::Rect::NOTHING,
             blur,
+            #[cfg(target_os = "linux")]
+            activation,
             traffic_lights,
             sidebar_rail,
             traffic_lights_shown: false,
@@ -2624,12 +2632,19 @@ impl App {
     /// at the next unrelated repaint.
     fn poll_tray(&mut self, ctx: &egui::Context) {
         while let Some(action) = crate::tray::poll() {
+            // The click's activation token, if the tray host sent one; used only to show.
+            #[cfg(target_os = "linux")]
+            let token = crate::tray::take_activation_token();
             match action {
                 crate::tray::TrayAction::ToggleVisible => {
                     self.hidden = !self.hidden;
                     set_window_hidden(ctx, self.hidden);
                     if !self.hidden {
                         request_foreground(ctx);
+                        #[cfg(target_os = "linux")]
+                        if let Some(token) = &token {
+                            self.activation.activate(token);
+                        }
                     }
                 }
                 crate::tray::TrayAction::Show => {
