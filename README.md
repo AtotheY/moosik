@@ -58,28 +58,43 @@ Packages are on the [releases page](https://github.com/gridoe/refryt/releases). 
 
 ### macOS
 
-1. Download `refryt-<version>-macos-arm64.dmg`. It is built for Apple Silicon only.
+The app is built for Apple Silicon only. libmpv and yt-dlp are bundled in it. It is signed ad hoc and not notarised, so macOS refuses the first launch: run `xattr -cr /Applications/Refryt.app` once, or allow the app in System Settings under Privacy & Security.
+
+#### Disk image
+
+1. Download `refryt-<version>-macos-arm64.dmg`.
 2. Open the image and drag Refryt to Applications.
-3. The app is signed ad hoc and not notarised, so macOS refuses the first launch. Run `xattr -cr /Applications/Refryt.app` once, or allow the app in System Settings under Privacy & Security.
 
-libmpv and yt-dlp are bundled in the app.
+#### Homebrew
 
-### Linux, AppImage
+The project's [Homebrew](https://brew.sh) tap installs the same image:
+
+```sh
+brew install --cask gridoe/tap/refryt
+```
+
+`brew upgrade --cask refryt` updates it.
+
+### Linux
+
+#### AppImage
 
 1. Download `refryt-<version>-x86_64.AppImage`.
 2. Make it executable with `chmod +x` and run it.
 
 From a source checkout, `./scripts/appimage-install.sh install` copies the AppImage to `~/.local/bin` and adds a launcher entry and icons, and `./scripts/appimage-install.sh uninstall` removes them. Uninstalling leaves `~/.config/refryt` and the downloads in place.
 
-### Linux, Flatpak
+#### Flatpak
 
-1. Download `refryt-<version>-x86_64.flatpak`. It is not on Flathub, so it is installed from the file.
+Refryt is coming to Flathub soon. Until then, the Flatpak is installed from the file:
+
+1. Download `refryt-<version>-x86_64.flatpak`.
 2. Run `flatpak install --user refryt-<version>-x86_64.flatpak`. Flatpak offers to fetch the GNOME 51 runtime the first time.
 3. Start it with `flatpak run io.github.gridoe.refryt`.
 
 mpv and yt-dlp are included. Inside the sandbox the browser import and the Launch on startup setting are hidden, because neither can work there.
 
-### Linux, Arch Linux (AUR)
+#### Arch Linux (AUR)
 
 An unofficial [AUR package](https://aur.archlinux.org/packages/refryt-bin), `refryt-bin`, repacks the AppImage above with a launcher entry and icons:
 
@@ -90,10 +105,32 @@ It depends on the system `webkit2gtk-4.1` (for the in-app sign-in window) and `y
 
 ### Windows
 
-1. Download `refryt-<version>-windows-x86_64-setup.exe` and run it. It installs to Program Files, adds a Start menu entry and registers an uninstaller. The installer is unsigned, so SmartScreen warns on the first run.
-2. Alternatively, download `refryt-<version>-windows-x86_64.zip`, extract the whole folder and run `refryt.exe`. The executable needs the DLLs next to it.
-3. For managed or silent installs, `refryt-<version>-windows-x86_64.msi` installs the same files with no setup screens, for example with `msiexec /i refryt-<version>-windows-x86_64.msi /qn`. It uses the same folder as the setup, so install one or the other.
-4. For Windows on ARM, use `refryt-<version>-windows-arm64.msi` or `refryt-<version>-windows-arm64.zip`. This is a native ARM64 build and has not been tested on ARM hardware. The x64 build also runs there through Windows' emulation.
+#### Installer
+
+Download `refryt-<version>-windows-x86_64-setup.exe` and run it. It installs to Program Files, adds a Start menu entry and registers an uninstaller. The installer is unsigned, so SmartScreen warns on the first run.
+
+#### MSI
+
+For managed or silent installs, `refryt-<version>-windows-x86_64.msi` installs the same files with no setup screens, for example with `msiexec /i refryt-<version>-windows-x86_64.msi /qn`. It uses the same folder as the setup, so install one or the other.
+
+#### Scoop
+
+The project's [Scoop](https://scoop.sh) bucket installs the zip:
+
+```powershell
+scoop bucket add gridoe https://github.com/gridoe/scoop-bucket
+scoop install gridoe/refryt
+```
+
+`scoop update refryt` updates it.
+
+#### Zip
+
+Download `refryt-<version>-windows-x86_64.zip`, extract the whole folder and run `refryt.exe`. The executable needs the DLLs next to it.
+
+#### Windows on ARM
+
+Use `refryt-<version>-windows-arm64.msi` or `refryt-<version>-windows-arm64.zip`; Scoop picks the ARM64 zip by itself. This is a native ARM64 build and has not been tested on ARM hardware. The x64 build also runs there through Windows' emulation.
 
 To build any of these from source, see [Build from source](#build-from-source).
 
@@ -102,7 +139,7 @@ To build any of these from source, see [Build from source](#build-from-source).
 When refryt starts, it asks GitHub for the latest release. If that release is newer, refryt offers it. Nothing is installed until you click, and you can turn the check off, or run it yourself, in Settings, About.
 
 - The Windows setup and MSI, and the AppImage, update themselves. **Update and restart** downloads the new file and checks it against the release's `SHA256SUMS`. On Windows, refryt then closes, runs the installer and starts again. Windows may ask for permission. The AppImage replaces itself and restarts.
-- The Flatpak, the macOS image, the Windows zip and the AUR package only show that a new version is out, with a link to the release. Update those the way you installed them.
+- The Flatpak, the macOS image, the Windows zip, Homebrew, Scoop and the AUR package only show that a new version is out, with a link to the release. Update those the way you installed them.
 
 ## Disclaimer
 
