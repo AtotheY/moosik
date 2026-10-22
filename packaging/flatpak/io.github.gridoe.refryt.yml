@@ -14,10 +14,9 @@ finish-args:
   - --share=network
   - --share=ipc
   - --socket=wayland
-  # Not `fallback-x11`: the sign-in window is WebKitGTK, which wry can only build into an X11
-  # window, so refryt points that child at XWayland. `fallback-x11` would leave a Wayland session
-  # with no X11 socket in the sandbox and the window could not open.
-  - --socket=x11
+  # X11 only where there is no Wayland. The sign-in window is an ordinary GTK window (WebKitGTK
+  # through wry's `build_gtk`), which runs on Wayland as it is.
+  - --socket=fallback-x11
   - --socket=pulseaudio
   - --device=dri
   # Media keys and the desktop's media controls: the name playwire registers.
@@ -48,7 +47,6 @@ cleanup:
   - /share/man
 
 modules:
-  - shared-modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
   # mpv's yt-dlp hook is a Lua script, and the `ytdl` option exists only with Lua built in.
   - shared-modules/lua5.1/lua-5.1.5.json
 
@@ -118,17 +116,6 @@ modules:
   # yt-dlp: the resolver for songs YouTube's own endpoint will not hand over, the video view and
   # downloads. The build script fetches the newest release into this directory first, as the
   # AppImage build does. refryt looks for it beside its own executable.
-  # The tray's menu library (muda) links libxdo, which the runtime lacks. Only the library.
-  - name: xdotool
-    buildsystem: simple
-    build-commands:
-      - make PREFIX=/app libxdo.so
-      - make PREFIX=/app installlib installheader installpc
-    sources:
-      - type: archive
-        url: https://github.com/jordansissel/xdotool/archive/refs/tags/v4.20260303.1.tar.gz
-        sha256: c1f971a384da588eb99ca0755fc4300316d49c1e612537e3f1de52215e104fa3
-
   - name: yt-dlp
     buildsystem: simple
     build-commands:
