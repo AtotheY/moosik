@@ -74,7 +74,7 @@ From a source checkout, `./scripts/appimage-install.sh install` copies the AppIm
 ### Linux, Flatpak
 
 1. Download `refryt-<version>-x86_64.flatpak`. It is not on Flathub, so it is installed from the file.
-2. Run `flatpak install --user refryt-<version>-x86_64.flatpak`. Flatpak offers to fetch the GNOME 49 runtime the first time.
+2. Run `flatpak install --user refryt-<version>-x86_64.flatpak`. Flatpak offers to fetch the GNOME 51 runtime the first time.
 3. Start it with `flatpak run io.github.gridoe.refryt`.
 
 mpv and yt-dlp are included. Inside the sandbox the browser import and the Launch on startup setting are hidden, because neither can work there.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the Flatpak bundle: dist/refryt-<version>-x86_64.flatpak.
 #
-# Needs flatpak and flatpak-builder (org.flatpak.Builder from Flathub works), the GNOME 49
-# Platform and Sdk, and org.freedesktop.Sdk.Extension.rust-stable//25.08. Needs the network.
+# Needs flatpak and flatpak-builder (org.flatpak.Builder from Flathub works), the GNOME 51
+# Platform and Sdk, and org.freedesktop.Sdk.Extension.rust-stable//26.08. Needs the network.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +20,7 @@ else
     builder=(flatpak run --command=flatpak-builder org.flatpak.Builder)
 fi
 
-# Kept out of git: flathub's shared recipes (the tray library), and the newest yt-dlp, fetched
+# Kept out of git: flathub's shared recipes (Lua), and the newest yt-dlp, fetched
 # fresh like the AppImage's — an old pinned copy would defeat the point of having it.
 #
 # The recipes are pinned, unlike yt-dlp: they are other people's build instructions, and a build
@@ -36,7 +36,7 @@ if [ "$(git -C "$dir/shared-modules" rev-parse HEAD 2> /dev/null)" != "$shared_m
 fi
 echo "fetching yt-dlp"
 curl -fsSL -o "$dir/yt-dlp" \
-    https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+    https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
 
 mkdir -p dist
 "${builder[@]}" --force-clean --user --disable-rofiles-fuse \

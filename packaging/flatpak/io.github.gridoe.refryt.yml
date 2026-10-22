@@ -4,7 +4,7 @@
 # release, not for Flathub, which would want vendored sources.
 app-id: io.github.gridoe.refryt
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -99,7 +99,6 @@ modules:
       - -Ddrm=disabled
       - -Dvaapi=disabled
       - -Dvdpau=disabled
-      - -Dsdl2=disabled
       - -Dcaca=disabled
       - -Djack=disabled
       - -Dvapoursynth=disabled
@@ -110,12 +109,14 @@ modules:
       - -Dalsa=enabled
     sources:
       - type: archive
-        url: https://github.com/mpv-player/mpv/archive/refs/tags/v0.40.0.tar.gz
-        sha256: 10a0f4654f62140a6dd4d380dcf0bbdbdcf6e697556863dc499c296182f081a3
+        url: https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz
+        sha256: ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
 
   # yt-dlp: the resolver for songs YouTube's own endpoint will not hand over, the video view and
   # downloads. The build script fetches the newest release into this directory first, as the
-  # AppImage build does. refryt looks for it beside its own executable.
+  # AppImage build does: the Python zipapp, which runs on the runtime's own Python (Flathub's copy
+  # pins it instead; see scripts/flathub-manifest.py). refryt looks for it beside its own
+  # executable.
   - name: yt-dlp
     buildsystem: simple
     build-commands:
