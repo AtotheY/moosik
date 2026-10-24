@@ -41,9 +41,10 @@ pub const PAGE_TITLE_PT: f32 = 26.0;
 /// A section heading inside a page — "Listen again", "Top songs", "Albums". A clear step above
 /// a row title; at the row title's own size the sections dissolved into their contents.
 pub const SECTION_PT: f32 = 20.0;
-/// Where a track row's number/art block starts, from the row's own left edge. Zero so the list
-/// lines up with the page header's cover, which starts at the content origin.
-pub const ROW_LEFT_INSET: f32 = 0.0;
+/// Where a track row's number/art block starts, from the row's own left edge: the content's room
+/// inside the row's hover and selection fill, which spans the whole row. At zero the number (or
+/// the cover, on rows without one) touched the fill's edge. The card's own side inset.
+pub const ROW_LEFT_INSET: f32 = 8.0;
 /// The width of a numbered list's rank column before the art. Zero on unnumbered rows.
 pub const ROW_NUMBER_W: f32 = 26.0;
 /// The gap between a number and the cover beside it — the padding that keeps the two from

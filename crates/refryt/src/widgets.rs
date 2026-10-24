@@ -5972,13 +5972,13 @@ mod tests {
                 fired = hit.activate;
                 let rect = hit.response.rect;
                 number.set(egui::pos2(
-                    rect.left() + crate::theme::ROW_NUMBER_W / 2.0,
+                    rect.left() + crate::theme::ROW_LEFT_INSET + crate::theme::ROW_NUMBER_W / 2.0,
                     rect.center().y,
                 ));
                 // Just past the number's column: inside the slot the cover used to occupy,
                 // and outside the control that replaced it.
                 past.set(egui::pos2(
-                    rect.left() + crate::theme::ROW_NUMBER_W + 6.0,
+                    rect.left() + crate::theme::ROW_LEFT_INSET + crate::theme::ROW_NUMBER_W + 6.0,
                     rect.center().y,
                 ));
             })
@@ -6109,7 +6109,9 @@ mod tests {
                             if let egui::Shape::Text(text) = &entry.shape {
                                 let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
                                 if rect.right()
-                                    <= hit.response.rect.left() + crate::theme::ROW_NUMBER_W
+                                    <= hit.response.rect.left()
+                                        + crate::theme::ROW_LEFT_INSET
+                                        + crate::theme::ROW_NUMBER_W
                                 {
                                     found += 1;
                                 }
