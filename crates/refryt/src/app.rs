@@ -129,6 +129,16 @@ fn volume_after(last: f64, set: f64) -> (f64, bool) {
     }
 }
 
+/// How far one press of the volume keys moves the volume, out of 100: the macOS menu's
+/// Volume Up and Down, and Ctrl+↑/↓ elsewhere.
+pub(crate) const VOLUME_STEP: f64 = 10.0;
+
+/// The volume a volume key asks for: a step from what is heard, which is silence while muted.
+/// Unclamped; [`App::set_user_volume`] clamps. Pure for the test.
+fn nudged_volume(muted: bool, last: f64, step: f64) -> f64 {
+    (if muted { 0.0 } else { last }) + step
+}
+
 /// Which mix row is the seed, when the mix should be adopted under the song already playing
 /// rather than started from the top: the seed must be the loaded track, playback must have
 /// actually started, and the mix must carry the seed itself. Pure so the rule is testable.
@@ -2261,11 +2271,22 @@ impl App {
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.toggle_playback();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+        if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::ArrowUp)) {
             self.skip(-1);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+        if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::ArrowDown)) {
             self.skip(1);
+        }
+        // Ctrl+↑/↓, Spotify's volume keys. macOS has them as ⌘↑/↓ in its menu bar
+        // (`poll_menu_bar`), which already acts on the press.
+        #[cfg(not(target_os = "macos"))]
+        {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::ArrowUp)) {
+                self.nudge_volume(VOLUME_STEP);
+            }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::ArrowDown)) {
+                self.nudge_volume(-VOLUME_STEP);
+            }
         }
         if ctx.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::M)) {
             self.toggle_mute();
@@ -2557,7 +2578,7 @@ impl App {
     /// app. In `logic`, so a choice is acted on while the window is hidden to the tray too.
     #[cfg(target_os = "macos")]
     fn poll_menu_bar(&mut self, ctx: &egui::Context) {
-        use crate::menu_bar::{Command, VOLUME_STEP};
+        use crate::menu_bar::Command;
         while let Some(command) = crate::menu_bar::poll() {
             if command.shows_window() && self.hidden {
                 self.show_window(ctx);
@@ -2566,15 +2587,8 @@ impl App {
                 Command::PlayPause => self.toggle_playback(),
                 Command::Next => self.skip(1),
                 Command::Previous => self.skip(-1),
-                Command::VolumeUp | Command::VolumeDown => {
-                    let now = if self.muted { 0.0 } else { self.last_volume };
-                    let step = if command == Command::VolumeUp {
-                        VOLUME_STEP
-                    } else {
-                        -VOLUME_STEP
-                    };
-                    self.set_user_volume(now + step);
-                }
+                Command::VolumeUp => self.nudge_volume(VOLUME_STEP),
+                Command::VolumeDown => self.nudge_volume(-VOLUME_STEP),
                 Command::Mute => self.toggle_mute(),
                 Command::Shuffle => self.toggle_shuffle(),
                 Command::Repeat => self.cycle_repeat(),
@@ -6113,6 +6127,12 @@ impl App {
         }
     }
 
+    /// One step of the volume keys: up or down from what is heard, so a step up while muted
+    /// starts from silence rather than jumping past the remembered volume.
+    pub(crate) fn nudge_volume(&mut self, step: f64) {
+        self.set_user_volume(nudged_volume(self.muted, self.last_volume, step));
+    }
+
     /// Mute at the current volume, or restore whatever it was — the same "remember, then put
     /// back" the volume slider uses ([`Self::set_user_volume`] never overwrites `last_volume`
     /// with silence).
@@ -8990,6 +9010,21 @@ mod tests {
         let (last, muted) = volume_after(40.0, 0.0);
         assert!(muted);
         assert_eq!(volume_after(last, last), (40.0, false), "the icon's unmute");
+    }
+
+    /// A volume key steps from what is heard: up from silence while muted, and its result goes
+    /// through the same remember-or-mute rule as the slider.
+    #[test]
+    fn volume_keys_step_from_what_is_heard() {
+        assert_eq!(nudged_volume(false, 40.0, VOLUME_STEP), 50.0);
+        assert_eq!(nudged_volume(false, 40.0, -VOLUME_STEP), 30.0);
+        assert_eq!(nudged_volume(true, 40.0, VOLUME_STEP), 10.0);
+        let (last, muted) = volume_after(10.0, nudged_volume(false, 10.0, -VOLUME_STEP));
+        assert_eq!(
+            (last, muted),
+            (10.0, true),
+            "stepping down to silence mutes"
+        );
     }
 
     fn radio(state: River, seed: &str, chosen: &[&str]) -> Radio {

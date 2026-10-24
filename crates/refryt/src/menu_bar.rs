@@ -24,9 +24,6 @@ use tray_icon::menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMe
 /// Where Help sends a reader who wants to know more.
 pub const WEBSITE: &str = "https://github.com/gridoe/refryt";
 
-/// How far one Volume Up or Volume Down moves the volume, out of 100.
-pub const VOLUME_STEP: f64 = 10.0;
-
 /// What choosing one of the app's menu items asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
