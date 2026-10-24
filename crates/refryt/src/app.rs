@@ -1479,6 +1479,8 @@ pub struct App {
     /// browser" list. Cached the same way as `logo` above (lazily, on first Settings visit) since
     /// this cannot change without a restart or a new browser profile being created mid-session.
     pub(crate) detected_browsers: Option<Vec<crate::browser_cookies::Browser>>,
+    /// A browser import is under way: the Import buttons read "Importing…" until it lands.
+    pub(crate) browser_importing: bool,
 
     /// What the Settings page shows about authentication.
     pub(crate) auth: crate::auth::AuthState,
@@ -2049,6 +2051,7 @@ impl App {
             pending_page_action: None,
             logo: None,
             detected_browsers: None,
+            browser_importing: false,
             auth,
             startup_splash: checking,
             sign_in_error: None,
@@ -4656,6 +4659,12 @@ impl App {
         self.navigate(Route::Settings);
     }
 
+    /// Import from `arg`, a browser found by `browser_cookies::detected`.
+    pub(crate) fn import_from(&mut self, arg: String) {
+        self.browser_importing = true;
+        self.backend.sign_in_from_browser(arg);
+    }
+
     /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
     /// failure, or YouTube's "Did you mean" spelling.
     pub(crate) fn search_again(&mut self, query: String) {
@@ -5413,6 +5422,7 @@ impl App {
                 Event::AccountsLoaded { .. } => {}
 
                 Event::SignInFailed { error } => {
+                    self.browser_importing = false;
                     self.sign_in_error = Some(error);
                     // The reason is shown on the Account tab, so that is where Settings opens.
                     self.settings_tab = ui::settings::SettingsTab::Account;
@@ -5442,6 +5452,7 @@ impl App {
                     // (which is why a liked song restored at launch, or played from a card,
                     // could show unrated in the bar all session).
                     self.auth = state;
+                    self.browser_importing = false;
                     match &self.auth {
                         // A fresh session invalidates any previously fetched library.
                         crate::auth::AuthState::SignedIn { .. } => {

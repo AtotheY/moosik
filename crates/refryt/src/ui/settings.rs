@@ -797,7 +797,6 @@ fn window_sign_in(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
 
 /// The path that works: read the cookies out of a browser that is already signed in.
 fn browser_import(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
-    let p = app.palette;
     let title = if cfg!(any(
         target_os = "linux",
         target_os = "windows",
@@ -809,42 +808,80 @@ fn browser_import(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
     };
     let browsers = app
         .detected_browsers
-        .get_or_insert_with(browser_cookies::detected);
+        .get_or_insert_with(browser_cookies::detected)
+        .clone();
     if browsers.is_empty() {
         g.row(
             ui,
             title,
             if cfg!(target_os = "windows") {
-                "No Firefox profile found. Sign in to music.youtube.com there, or use the window above."
+                "No Firefox-based browser found. Sign in to music.youtube.com there, or use the window above."
             } else {
-                "No signed-in browser found. Sign in to music.youtube.com in Firefox, Chrome, Chromium, Brave, Vivaldi or Edge."
+                "No browser found. Sign in to music.youtube.com in your browser first."
             },
             |_| {},
         );
         return;
     }
+    // No "close the browser first" hint any more: on Windows only Firefox-based browsers are ever
+    // offered here, and they neither lock their store nor seal it, so there is nothing to close
+    // for. The Chromium browsers that needed that advice are not shown there at all — see
+    // `browser_cookies::readable_on`.
+    let detail = if browsers.iter().any(|b| b.label == "Safari") {
+        "Uses the session from a browser you're signed in to. Safari needs Full Disk Access for refryt in System Settings."
+    } else {
+        "Uses the session from a browser you're signed in to."
+    };
+    g.row(ui, title, detail, |ui| import_controls(app, ui, &browsers));
+}
 
-    // No "close the browser first" hint any more: on Windows only Firefox is ever offered here,
-    // and Firefox neither locks its store nor seals it, so there is nothing to close for. The
-    // Chromium browsers that needed that advice are not shown there at all — see
-    // `browser_cookies::readable_on_this_os`.
+/// The browser import's button, on Home and in Settings. With one browser found it imports from
+/// it; with several it opens a menu of them, the one used most recently first.
+pub(crate) fn import_controls(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    browsers: &[browser_cookies::Browser],
+) {
+    let p = app.palette;
+    let busy = app.browser_importing;
+    let label = if busy {
+        "Importing…"
+    } else {
+        "Import from browser"
+    };
+    let button = ui
+        .add_enabled_ui(!busy, |ui| widgets::outline_button(ui, &p, label))
+        .inner;
     let mut chosen = None;
-    g.wide_row(
-        ui,
-        title,
-        "Uses the session from a browser you're already signed into.",
-        |ui| {
-            for b in browsers.iter() {
-                if widgets::outline_button(ui, &p, b.label).clicked() {
-                    chosen = Some(b.key);
+    if let [only] = browsers {
+        if button.clicked() {
+            chosen = Some(only.arg.clone());
+        }
+    } else {
+        egui::Popup::new(
+            ui.id().with("import-choose-browser"),
+            ui.ctx().clone(),
+            &button,
+            ui.layer_id(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .frame(widgets::menu_frame(ui, &p))
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .width(widgets::MENU_WIDTH)
+        .gap(4.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .open_memory(button.clicked().then_some(egui::SetOpenCommand::Toggle))
+        .show(|mui| {
+            for b in browsers {
+                if widgets::menu_item_plain(mui, &p, b.label, None).clicked() {
+                    chosen = Some(b.arg.clone());
+                    mui.close();
                 }
             }
-        },
-    );
-    if let Some(key) = chosen {
-        // Same reason as the sign-in window button: `Checking` belongs to the startup session
-        // check, not to an interactive attempt.
-        app.backend.sign_in_from_browser(key.to_owned());
+        });
+    }
+    if let Some(arg) = chosen {
+        app.import_from(arg);
     }
 }
 

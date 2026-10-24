@@ -15,42 +15,55 @@
 //! plain SQLite. `yt-dlp` already implements all of that, and this project already requires
 //! `yt-dlp` for stream resolution — so importing costs one subprocess and no new dependency.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-/// A browser `yt-dlp` can read cookies from.
+/// How a browser keeps its cookies, which decides where its cookie file sits and whether it can
+/// be read at all on this OS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Browser {
-    /// What `--cookies-from-browser` calls it.
-    pub key: &'static str,
-    /// What the Settings page calls it.
-    pub label: &'static str,
+enum Engine {
+    /// Firefox and its forks (Gecko): plain SQLite, `cookies.sqlite` in each profile.
+    Firefox,
+    /// Chrome and everything built on Chromium: SQLite with values sealed by a key from the OS
+    /// keyring, `Cookies` in each profile.
+    Chromium,
+    /// Safari, on macOS: one `Cookies.binarycookies` in its container.
+    Safari,
 }
 
-/// The browsers we look for, with the profile directory that proves one is installed.
-///
-/// Ordered by how likely a signed-in music session is to be there rather than alphabetically:
-/// a dedicated browser first, then the mainstream ones.
-const KNOWN: &[(Browser, &[&str])] = &[
-    (
-        Browser {
-            key: "brave",
-            label: "Brave",
-        },
-        &[
-            ".config/BraveSoftware/Brave-Browser",
-            "Library/Application Support/BraveSoftware/Brave-Browser",
-            "AppData/Local/BraveSoftware/Brave-Browser/User Data",
-        ],
-    ),
-    (
-        Browser {
-            key: "firefox",
-            label: "Firefox",
-        },
-        &[
+/// A browser found on this machine that `yt-dlp` can read cookies from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Browser {
+    /// What the app calls it.
+    pub label: &'static str,
+    /// What `--cookies-from-browser` is given: yt-dlp's name for the browser, and for a profile
+    /// folder of its own, that folder (`firefox:/home/me/.zen`) — the forks and the Flatpak and
+    /// Snap installs live where yt-dlp would not look.
+    pub arg: String,
+    /// When its cookie file last changed: the browser used most recently comes first in the
+    /// menu.
+    pub used: Option<SystemTime>,
+}
+
+/// One browser install yt-dlp can read: its label, yt-dlp's name for it, its engine, and the
+/// profile folders that prove it is installed, relative to the home folder, for every OS at
+/// once (a path that is not there is simply not found).
+struct Known {
+    label: &'static str,
+    name: &'static str,
+    engine: Engine,
+    roots: &'static [&'static str],
+}
+
+const KNOWN: &[Known] = &[
+    Known {
+        label: "Firefox",
+        name: "firefox",
+        engine: Engine::Firefox,
+        roots: &[
             ".mozilla/firefox",
             // Some distros (Arch/CachyOS among them) patch Firefox to follow the XDG base
             // directory spec instead of the historical `~/.mozilla` path.
@@ -60,90 +73,253 @@ const KNOWN: &[(Browser, &[&str])] = &[
             "Library/Application Support/Firefox",
             "AppData/Roaming/Mozilla/Firefox",
         ],
-    ),
-    (
-        Browser {
-            key: "chrome",
-            label: "Chrome",
-        },
-        &[
+    },
+    Known {
+        label: "Zen",
+        name: "firefox",
+        engine: Engine::Firefox,
+        roots: &[
+            ".zen",
+            ".var/app/app.zen_browser.zen/.zen",
+            "Library/Application Support/zen",
+            "AppData/Roaming/zen",
+        ],
+    },
+    Known {
+        label: "LibreWolf",
+        name: "firefox",
+        engine: Engine::Firefox,
+        roots: &[
+            ".librewolf",
+            ".var/app/io.gitlab.librewolf-community/.librewolf",
+            "Library/Application Support/librewolf",
+            "AppData/Roaming/librewolf",
+        ],
+    },
+    Known {
+        label: "Floorp",
+        name: "firefox",
+        engine: Engine::Firefox,
+        roots: &[
+            ".floorp",
+            ".var/app/one.ablaze.floorp/.floorp",
+            "Library/Application Support/Floorp",
+            "AppData/Roaming/Floorp",
+        ],
+    },
+    Known {
+        label: "Waterfox",
+        name: "firefox",
+        engine: Engine::Firefox,
+        roots: &[
+            ".waterfox",
+            ".var/app/net.waterfox.waterfox/.waterfox",
+            "Library/Application Support/Waterfox",
+            "AppData/Roaming/Waterfox",
+        ],
+    },
+    Known {
+        label: "Chrome",
+        name: "chrome",
+        engine: Engine::Chromium,
+        roots: &[
             ".config/google-chrome",
+            ".var/app/com.google.Chrome/config/google-chrome",
             "Library/Application Support/Google/Chrome",
             "AppData/Local/Google/Chrome/User Data",
         ],
-    ),
-    (
-        Browser {
-            key: "chromium",
-            label: "Chromium",
-        },
-        &[
+    },
+    Known {
+        label: "Chromium",
+        name: "chromium",
+        engine: Engine::Chromium,
+        roots: &[
             ".config/chromium",
+            ".var/app/org.chromium.Chromium/config/chromium",
+            "snap/chromium/common/chromium",
             "Library/Application Support/Chromium",
             "AppData/Local/Chromium/User Data",
         ],
-    ),
-    (
-        Browser {
-            key: "vivaldi",
-            label: "Vivaldi",
-        },
-        &[
+    },
+    Known {
+        label: "Brave",
+        name: "brave",
+        engine: Engine::Chromium,
+        roots: &[
+            ".config/BraveSoftware/Brave-Browser",
+            ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+            "snap/brave/current/.config/BraveSoftware/Brave-Browser",
+            "Library/Application Support/BraveSoftware/Brave-Browser",
+            "AppData/Local/BraveSoftware/Brave-Browser/User Data",
+        ],
+    },
+    Known {
+        label: "Vivaldi",
+        name: "vivaldi",
+        engine: Engine::Chromium,
+        roots: &[
             ".config/vivaldi",
+            ".var/app/com.vivaldi.Vivaldi/config/vivaldi",
             "Library/Application Support/Vivaldi",
             "AppData/Local/Vivaldi/User Data",
         ],
-    ),
-    (
-        Browser {
-            key: "edge",
-            label: "Edge",
-        },
-        &[
+    },
+    Known {
+        label: "Edge",
+        name: "edge",
+        engine: Engine::Chromium,
+        roots: &[
             ".config/microsoft-edge",
+            ".var/app/com.microsoft.Edge/config/microsoft-edge",
             "Library/Application Support/Microsoft Edge",
             "AppData/Local/Microsoft/Edge/User Data",
         ],
-    ),
+    },
+    Known {
+        label: "Opera",
+        name: "opera",
+        engine: Engine::Chromium,
+        roots: &[
+            ".config/opera",
+            ".var/app/com.opera.Opera/config/opera",
+            "snap/opera/current/.config/opera",
+            "Library/Application Support/com.operasoftware.Opera",
+            "AppData/Roaming/Opera Software/Opera Stable",
+        ],
+    },
+    Known {
+        label: "Whale",
+        name: "whale",
+        engine: Engine::Chromium,
+        roots: &[
+            ".config/naver-whale",
+            "Library/Application Support/Naver/Whale",
+            "AppData/Local/Naver/Naver Whale/User Data",
+        ],
+    },
+    Known {
+        label: "Safari",
+        name: "safari",
+        engine: Engine::Safari,
+        roots: &["Library/Containers/com.apple.Safari"],
+    },
 ];
 
 fn home() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_owned())
 }
 
-/// Whether `yt-dlp` can read this browser's cookies on this OS at all.
+/// Whether `yt-dlp` can read this engine's cookies on this OS at all.
 ///
 /// On Windows every Chromium browser seals its cookie key to its own process (App-Bound
 /// Encryption, Chromium 127+), so the import fails with "Failed to decrypt with DPAPI" no matter
 /// what the user does — `yt-dlp` #10927. `webview_login` is the path that works there, and
 /// offering these browsers anyway would only produce the failure that window exists to avoid.
-/// Firefox has no such scheme, and is offered everywhere.
+/// Firefox-based browsers have no such scheme, and are offered everywhere. Safari is macOS only.
 ///
 /// On macOS Chromium browsers keep their cookie key in the login Keychain. The first import makes
 /// macOS ask for permission to read it, so a password prompt there is expected, not a fault.
-fn readable_on_this_os(key: &str) -> bool {
-    if cfg!(target_os = "windows") {
-        !matches!(key, "brave" | "chrome" | "chromium" | "vivaldi" | "edge")
-    } else {
-        let _ = key;
-        true
+fn readable_on(engine: Engine, windows: bool, macos: bool) -> bool {
+    match engine {
+        Engine::Firefox => true,
+        Engine::Chromium => !windows,
+        Engine::Safari => macos,
     }
 }
 
-/// The browsers that have a profile directory on this machine and a store `yt-dlp` can read.
-///
-/// Presence of a profile is not proof that `yt-dlp` can read it — a locked keyring or a sandboxed
-/// profile will still fail — so the import surfaces its error rather than this pretending to know.
-pub fn detected() -> Vec<Browser> {
-    let Some(home) = home() else {
-        return Vec::new();
+/// When `root`'s cookie store last changed: the newest of its profiles' cookie files. Checked by
+/// name in the few places each engine keeps it, so nothing is opened — no database, no keyring.
+/// `None` when there is no cookie file at all: a profile folder left behind by an uninstall.
+fn cookies_used(root: &Path, engine: Engine) -> Option<SystemTime> {
+    let mtime = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let profiles = |dir: PathBuf| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect::<Vec<_>>()
     };
+    match engine {
+        Engine::Firefox => profiles(root.to_owned())
+            .into_iter()
+            // Firefox on Windows and macOS keeps its profiles one level down, in `Profiles`.
+            .chain(profiles(root.join("Profiles")))
+            .filter_map(|p| mtime(p.join("cookies.sqlite")))
+            .max(),
+        Engine::Chromium => profiles(root.to_owned())
+            .into_iter()
+            .flat_map(|p| [p.join("Network").join("Cookies"), p.join("Cookies")])
+            // Opera keeps its one profile in the root itself.
+            .chain([root.join("Network").join("Cookies"), root.join("Cookies")])
+            .filter_map(mtime)
+            .max(),
+        // Without Full Disk Access the container cannot be read, which says nothing about
+        // whether Safari is signed in: found, with no time to sort it by.
+        Engine::Safari => mtime(root.join("Data/Library/Cookies/Cookies.binarycookies"))
+            .or(Some(SystemTime::UNIX_EPOCH)),
+    }
+}
+
+/// The browsers on this machine with a cookie store `yt-dlp` can read, the most recently used
+/// first. A browser installed more than one way (natively and as a Flatpak) is listed once, by
+/// the install used last.
+///
+/// Presence of a cookie file is not proof that `yt-dlp` can read it — a locked keyring or a
+/// sandboxed profile will still fail — so the import surfaces its error rather than this
+/// pretending to know.
+pub fn detected() -> Vec<Browser> {
+    match home() {
+        Some(home) => detected_in(&home, cfg!(windows), cfg!(target_os = "macos")),
+        None => Vec::new(),
+    }
+}
+
+fn detected_in(home: &Path, windows: bool, macos: bool) -> Vec<Browser> {
+    let mut found: Vec<Browser> = Vec::new();
+    for known in KNOWN
+        .iter()
+        .filter(|k| readable_on(k.engine, windows, macos))
+    {
+        for root in known.roots {
+            let root = home.join(root);
+            if !root.is_dir() {
+                continue;
+            }
+            let Some(used) = cookies_used(&root, known.engine) else {
+                continue;
+            };
+            let arg = match known.engine {
+                Engine::Safari => known.name.to_owned(),
+                _ => format!("{}:{}", known.name, root.display()),
+            };
+            let browser = Browser {
+                label: known.label,
+                arg,
+                used: Some(used),
+            };
+            match found.iter_mut().find(|b| b.label == known.label) {
+                Some(same) if same.used < browser.used => *same = browser,
+                Some(_) => {}
+                None => found.push(browser),
+            }
+        }
+    }
+    // Newest first; stable, so equal times keep `KNOWN`'s order.
+    found.sort_by_key(|b| std::cmp::Reverse(b.used));
+    found
+}
+
+/// The name to show for an import source: a session stored before the profile folder was part
+/// of it holds yt-dlp's bare name ("firefox"); a newer one holds `name:folder`.
+pub fn label_for(arg: &str) -> String {
+    let (name, folder) = arg.split_once(':').unwrap_or((arg, ""));
     KNOWN
         .iter()
-        .filter(|(b, _)| readable_on_this_os(b.key))
-        .filter(|(_, paths)| paths.iter().any(|p| home.join(p).is_dir()))
-        .map(|(b, _)| *b)
-        .collect()
+        .filter(|k| k.name == name)
+        .find(|k| folder.is_empty() || k.roots.iter().any(|r| folder.ends_with(r)))
+        .map_or_else(|| name.to_owned(), |k| k.label.to_owned())
 }
 
 /// Import the YouTube cookies from `browser` and return them as a `Cookie` header value.
@@ -152,6 +328,8 @@ pub fn detected() -> Vec<Browser> {
 /// the jar and then exits 2 because it has nothing to download, so this makes no network request
 /// and opens no browser. The exit status is therefore not a failure signal — the file is.
 pub async fn import(browser: &str) -> Result<String> {
+    // The name, never the argument: that can be a whole profile path.
+    let label = label_for(browser);
     let path = temp_jar()?;
     // Best effort cleanup even on the error paths below.
     let _guard = Cleanup(path.clone());
@@ -180,13 +358,13 @@ pub async fn import(browser: &str) -> Result<String> {
                 .find(|l| l.contains("ERROR") || l.contains("could not"))
                 .unwrap_or_else(|| why.trim())
                 .trim();
-            bail!("yt-dlp could not read {browser}'s cookies: {why}");
+            bail!("yt-dlp could not read {label}'s cookies: {why}");
         }
     };
 
     let cookie = cookie_header(&jar);
     if cookie.is_empty() {
-        bail!("no youtube.com cookies in {browser}; sign in to YouTube Music there first");
+        bail!("no youtube.com cookies in {label}; sign in to YouTube Music there first");
     }
     Ok(cookie)
 }
@@ -291,6 +469,120 @@ music.youtube.com\tFALSE\t/\tTRUE\t1799999999\twide\t1
         assert_eq!(header.matches("; ").count(), 3, "{header}");
         assert!(!header.ends_with(';'));
         assert!(header.split("; ").all(|p| p.contains('=')));
+    }
+
+    /// A fake home with cookie files at the given paths, each touched `age` seconds before now.
+    fn home_with(name: &str, files: &[(&str, u64)]) -> PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "refryt-browsers-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        for (file, age) in files {
+            let path = home.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&path).unwrap();
+            f.set_modified(SystemTime::now() - std::time::Duration::from_secs(*age))
+                .unwrap();
+        }
+        home
+    }
+
+    fn labels(found: &[Browser]) -> Vec<&'static str> {
+        found.iter().map(|b| b.label).collect()
+    }
+
+    /// The browser used last comes first, whatever its place in `KNOWN`; a profile folder with
+    /// no cookie file is not a browser anyone signs in with.
+    #[test]
+    fn the_browser_used_last_comes_first() {
+        let home = home_with(
+            "order",
+            &[
+                (".mozilla/firefox/a.default/cookies.sqlite", 500),
+                (".zen/x.Default (release)/cookies.sqlite", 10),
+                (".config/google-chrome/Default/Network/Cookies", 100),
+                (".config/vivaldi/Default/Preferences", 1),
+            ],
+        );
+        let found = detected_in(&home, false, false);
+        assert_eq!(labels(&found), ["Zen", "Chrome", "Firefox"]);
+        assert_eq!(
+            found[0].arg,
+            format!("firefox:{}", home.join(".zen").display())
+        );
+        assert_eq!(
+            found[1].arg,
+            format!("chrome:{}", home.join(".config/google-chrome").display())
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Installed twice — natively and as a Flatpak — is one row, pointing at the one used last.
+    #[test]
+    fn two_installs_of_one_browser_are_listed_once() {
+        let home = home_with(
+            "twice",
+            &[
+                (".config/google-chrome/Default/Cookies", 300),
+                (
+                    ".var/app/com.google.Chrome/config/google-chrome/Default/Network/Cookies",
+                    5,
+                ),
+            ],
+        );
+        let found = detected_in(&home, false, false);
+        assert_eq!(labels(&found), ["Chrome"]);
+        assert!(
+            found[0].arg.contains(".var/app/com.google.Chrome"),
+            "{}",
+            found[0].arg
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Windows: only the Firefox-based browsers, since every Chromium there seals its store.
+    /// Safari only on macOS.
+    #[test]
+    fn each_os_offers_only_what_it_can_read() {
+        let home = home_with(
+            "os",
+            &[
+                (
+                    "AppData/Roaming/Mozilla/Firefox/Profiles/a/cookies.sqlite",
+                    50,
+                ),
+                (
+                    "AppData/Local/Google/Chrome/User Data/Default/Network/Cookies",
+                    5,
+                ),
+                (
+                    "Library/Containers/com.apple.Safari/Data/Library/Cookies/x",
+                    5,
+                ),
+            ],
+        );
+        assert_eq!(labels(&detected_in(&home, true, false)), ["Firefox"]);
+        assert_eq!(
+            labels(&detected_in(&home, false, false)),
+            ["Chrome", "Firefox"]
+        );
+        assert!(labels(&detected_in(&home, false, true)).contains(&"Safari"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Errors and the account rows name the browser, never the path the import was given.
+    #[test]
+    fn a_source_is_named_by_its_browser() {
+        assert_eq!(label_for("firefox"), "Firefox");
+        assert_eq!(label_for("firefox:/home/me/.zen"), "Zen");
+        assert_eq!(label_for("firefox:/home/me/.mozilla/firefox"), "Firefox");
+        assert_eq!(
+            label_for("chrome:/home/me/.var/app/com.google.Chrome/config/google-chrome"),
+            "Chrome"
+        );
+        assert_eq!(label_for("brave"), "Brave");
+        assert_eq!(label_for("netscape"), "netscape");
     }
 
     #[test]

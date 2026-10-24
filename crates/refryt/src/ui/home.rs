@@ -249,23 +249,57 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Said once, quietly: the anonymous feed is two shelves, and a session is what unlocks the rest.
+/// Beside Sign in, the import from a browser already signed in — the way in that needs no new
+/// sign-in at all, which otherwise only Settings' Account tab offered.
 fn sign_in_note(app: &mut App, ui: &mut egui::Ui) {
     if matches!(app.auth, AuthState::SignedIn { .. }) {
         return;
     }
+    // The same rule as Settings' import row: the sandbox cannot read a browser's profile, and
+    // with no browser found there is nothing to offer.
+    let browsers = if crate::flatpak::sandboxed() {
+        Vec::new()
+    } else {
+        app.detected_browsers
+            .get_or_insert_with(crate::browser_cookies::detected)
+            .clone()
+    };
+    let note = if browsers.is_empty() {
+        "You're browsing signed out. Signing in adds your own feed: \
+         Listen again, Mixed for you and Quick picks."
+    } else {
+        "You're browsing signed out. Signing in, or importing the session from a browser \
+         you're signed in to, adds your own feed: Listen again, Mixed for you and Quick picks."
+    };
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new(
-                "You're browsing signed out. Signing in adds your own feed: \
-                 Listen again, Mixed for you and Quick picks.",
-            )
-            .font(theme::regular(12.0))
-            .color(app.palette.dim),
+            egui::RichText::new(note)
+                .font(theme::regular(12.0))
+                .color(app.palette.dim),
         );
     });
     ui.add_space(6.0);
-    if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
+    let p = app.palette;
+    let mut sign_in = false;
+    ui.horizontal(|ui| {
+        sign_in = widgets::pill_button(ui, &p, "Sign in").clicked();
+        if browsers.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        crate::ui::settings::import_controls(app, ui, &browsers);
+    });
+    if sign_in {
         app.sign_in();
+    }
+    // A failed attempt is reported where it was started, as the account menu does.
+    if let Some(error) = &app.sign_in_error {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(error)
+                .font(theme::regular(12.0))
+                .color(p.danger),
+        );
     }
     ui.add_space(4.0);
 }
