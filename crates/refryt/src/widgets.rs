@@ -2365,11 +2365,15 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // painted, nothing reserved beyond the old minimum. Where the corner is shared the slot
     // is the thumbs' — the pair spans 62pt, so the text must clear it whether or not a thumb
     // is showing this frame.
-    let duration_w = match duration {
-        Some(d) => text_width(ui, &fmt_duration(d), &theme::regular(12.0)) + 12.0,
-        None => badge.map_or(0.0, |b| text_width(ui, b, &badge_font()) + 12.0),
+    // A row with neither a duration nor a badge — Home's song shelves, whose songs come without
+    // a length — keeps no empty slot for one: the 44pt it held, plus the thumbs' zone beside it,
+    // left a single wide column with a gap at its right end and the title cut short before it.
+    let duration_w = match (duration, badge) {
+        (Some(d), _) => (text_width(ui, &fmt_duration(d), &theme::regular(12.0)) + 12.0).max(44.0),
+        (None, Some(b)) => (text_width(ui, b, &badge_font()) + 12.0).max(44.0),
+        (None, None) => 0.0,
     }
-    .max(if share_corner { 76.0 } else { 44.0 });
+    .max(if share_corner { 76.0 } else { 0.0 });
     // Reserved whether or not the thumbs are drawn, so a row does not re-truncate its title as
     // the pointer crosses it — but only where they get a zone of their own. The queue turns
     // rating off, and giving that panel back its 68pt is the difference between "Jigsaw Fallin…"
