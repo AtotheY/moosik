@@ -1910,6 +1910,10 @@ impl App {
             autostart,
         } = options;
         theme::install(&cc.egui_ctx);
+        // No Ctrl/⌘ with +, - or 0 zoom: the layout is built at fixed point sizes — cards, the
+        // sidebar, row widths — and egui's keyboard zoom pushed them out of their cards. The
+        // system's display scaling still applies, through `pixels_per_point`.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         // Let the single-instance listener thread wake this UI (`instance`'s own doc comment).
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::instance::attach(&cc.egui_ctx);
