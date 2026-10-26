@@ -2719,10 +2719,15 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
                     palette.glass_state(palette.surface_hover, if open { 1.0 } else { lit }),
                 );
             }
-            Icon::EllipsisVertical.image(palette.secondary, 18.0).paint_at(
-                ui,
-                Rect::from_center_size(more_rect.center() + press_offset(more), vec2(18.0, 18.0)),
-            );
+            Icon::EllipsisVertical
+                .image(palette.secondary, 18.0)
+                .paint_at(
+                    ui,
+                    Rect::from_center_size(
+                        more_rect.center() + press_offset(more),
+                        vec2(18.0, 18.0),
+                    ),
+                );
         }
         more.clone()
             .on_hover_text("More options")
