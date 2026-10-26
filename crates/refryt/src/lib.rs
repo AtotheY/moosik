@@ -10,6 +10,7 @@
 pub mod activation;
 pub mod api;
 pub mod app;
+pub mod app_icon;
 pub mod auth;
 /// "Start on boot" — an XDG autostart entry on Linux, a LaunchAgent on macOS, the per-user `Run`
 /// key on Windows; see the
@@ -230,13 +231,13 @@ pub fn open_url(url: &str) {
 /// The app's own artwork: the window/taskbar/launcher icon, and (as an egui texture instead of
 /// an OS-level `IconData`) the branding shown in Settings. One embed, two decodes, so a change to
 /// the master PNG only has one place to update.
-const LOGO_PNG: &[u8] = include_bytes!("../../../assets/icons/app/refryt-256.png");
-
 /// The window / taskbar / launcher icon, decoded from the same preprocessed artwork that
 /// `just install` places into hicolor. `None` when the bytes cannot be decoded — the app still
 /// runs, just without an icon.
 pub fn window_icon() -> Option<Arc<egui::IconData>> {
-    let img = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
+    let img = image::load_from_memory(app_icon::AppIcon::current().png())
+        .ok()?
+        .to_rgba8();
     let (width, height) = img.dimensions();
     Some(Arc::new(egui::IconData {
         rgba: img.into_raw(),
@@ -249,7 +250,9 @@ pub fn window_icon() -> Option<Arc<egui::IconData>> {
 /// rather than the OS chrome `window_icon` is for. Loaded once and cached by the caller — a
 /// fresh `egui::Context::load_texture` call is cheap to repeat, but there is no reason to.
 pub fn logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory(LOGO_PNG).ok()?.to_rgba8();
+    let img = image::load_from_memory(app_icon::AppIcon::current().png())
+        .ok()?
+        .to_rgba8();
     let (width, height) = img.dimensions();
     let image =
         egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], img.as_raw());

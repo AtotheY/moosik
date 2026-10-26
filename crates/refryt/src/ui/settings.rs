@@ -265,6 +265,7 @@ fn toggle_row(
 
 fn appearance(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
+    app_icon_picker(app, ui);
 
     let mut theme_choice = app.settings.theme;
     // The mode on screen decides which themes are offered: a theme file says whether it is
@@ -941,6 +942,68 @@ fn premium_badge(ui: &mut egui::Ui, palette: &crate::theme::Palette) {
     );
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, palette.accent);
+}
+
+/// Native icon choice; textures are decoded once and retained in egui's context cache.
+fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
+    use crate::app_icon::AppIcon;
+    let mut chosen = app.settings.app_icon;
+    ui.label(egui::RichText::new("App icon").size(18.0).strong());
+    ui.label("A different finish. The same Moosik.");
+    ui.add_space(12.0);
+    let columns = ((ui.available_width() / 118.0).floor() as usize).clamp(2, 5);
+    for row in AppIcon::ALL.chunks(columns) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for &icon in row {
+                ui.push_id(icon.label(), |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(108.0);
+                        let selected = chosen == icon;
+                        if let Some(texture) = icon.texture(ui.ctx()) {
+                            let image = egui::Image::new((texture.id(), egui::vec2(86.0, 86.0)));
+                            let response = ui.add(
+                                egui::Button::new(image)
+                                    .selected(selected)
+                                    .min_size(egui::vec2(108.0, 100.0))
+                                    .corner_radius(12),
+                            );
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::RadioButton,
+                                    true,
+                                    selected,
+                                    format!("{} app icon", icon.label()),
+                                )
+                            });
+                            if response
+                                .on_hover_text(format!("Use {}", icon.label()))
+                                .clicked()
+                            {
+                                chosen = icon;
+                            }
+                        }
+                        ui.label(egui::RichText::new(icon.label()).size(12.0));
+                        ui.label(
+                            egui::RichText::new(if selected {
+                                "Selected"
+                            } else if icon == AppIcon::Ceramic {
+                                "Default"
+                            } else {
+                                " "
+                            })
+                            .size(11.0)
+                            .color(app.palette.accent),
+                        );
+                    });
+                });
+            }
+        });
+        ui.add_space(10.0);
+    }
+    ui.add_space(8.0);
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| s.app_icon = chosen);
 }
 
 #[cfg(test)]

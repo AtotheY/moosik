@@ -156,13 +156,13 @@ objc2 = "0.6"
 dispatch2 = "0.3"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWindow", "NSView",
-    "NSScreen", "NSButton", "NSControl",
+    "NSScreen", "NSButton", "NSControl", "NSImage",
 ] }
 # `window_fullscreen.rs` saves and restores the window frame (an `NSRect`); `webview_login.rs`
 # asks `NSProcessInfo` whether this macOS has named WebKit data stores (14 and later); `chrome.rs`
 # reads the system's title-bar double-click preference.
 objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std", "NSGeometry", "NSProcessInfo", "NSString", "NSUserDefaults",
+    "std", "NSGeometry", "NSProcessInfo", "NSString", "NSUserDefaults", "NSData",
 ] }
 
 # Embeds refryt.ico as the .exe's own icon resource (build.rs) — unconditional, not under a

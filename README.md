@@ -1,7 +1,10 @@
-> **Moosik — personal music app, 0.1.14+ark.2**
+> **Moosik — personal music app, 0.1.14+ark.4**
 > App name: Moosik. Existing bundle identity, Keychain identifiers, and data locations are
 > retained so your account, preferences, Dock link, and library survive the rename.
-> The original icon remains until an icon concept is selected.
+> Default icon: Ceramic Eclipse in terracotta. Settings → Appearance offers ten saved
+> finishes that update the running Dock icon, app UI, and tray immediately. Finder and the
+> not-running launcher use the Ceramic bundle default. Ten material/color options and their
+> generation prompts are in `assets/branding/moosik/eclipse/`.
 > Based on upstream v0.1.14 (commit `12e899c4b941728680c42ba1a3841d92769cd5f2`).
 > The upstream remote is retained for deliberate source updates. This fork does not offer
 > upstream binary updates, which would remove the security changes below.
@@ -26,7 +29,7 @@
 > Keep the GPL license and upstream attribution when distributing changes.
 
 <p align="center">
-  <img src="assets/icons/app/refryt-256.png" width="96" alt="refryt icon">
+  <img src="assets/icons/app/moosik-256.png" width="96" alt="Moosik icon">
 </p>
 
 <h1 align="center">Moosik</h1>

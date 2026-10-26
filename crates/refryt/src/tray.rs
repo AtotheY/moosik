@@ -177,7 +177,7 @@ fn icon_action(event: &TrayIconEvent) -> Option<TrayAction> {
 /// The icon, decoded once per call from the same PNG [`crate::window_icon`] uses for the
 /// titlebar/taskbar — one source of truth for what Moosik's icon looks like.
 fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
-    let bytes = include_bytes!("../../../assets/icons/app/refryt-256.png");
+    let bytes = crate::app_icon::AppIcon::current().png();
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (width, height) = img.dimensions();
     Some((img.into_raw(), width, height))
@@ -221,6 +221,29 @@ pub struct Tray {
 }
 
 impl Tray {
+    pub fn refresh_icon(&self) {
+        #[cfg(not(target_os = "linux"))]
+        if let Some(tray) = &self.icon
+            && let Some((rgba, width, height)) = icon_rgba()
+            && let Ok(icon) = tray_icon::Icon::from_rgba(rgba, width, height)
+        {
+            let _ = tray.set_icon(Some(icon));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.icon {
+            tray.update(|item| {
+                item.icon = icon_rgba()
+                    .map(|(rgba, width, height)| ksni::Icon {
+                        width: width as i32,
+                        height: height as i32,
+                        data: argb(rgba),
+                    })
+                    .into_iter()
+                    .collect();
+            });
+        }
+    }
+
     /// Show or hide the icon. A no-op if [`spawn`] never managed to build one — reported already,
     /// at construction time, so this stays quiet.
     pub fn set_visible(&self, visible: bool) {

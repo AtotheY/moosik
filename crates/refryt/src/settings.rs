@@ -236,6 +236,7 @@ impl Quality {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub app_icon: crate::app_icon::AppIcon,
     pub theme: Theme,
     /// The colour theme painted in dark mode: a file name from the themes folder (see
     /// [`crate::theme::custom`]) whose `color-scheme` is dark.
@@ -333,6 +334,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            app_icon: crate::app_icon::AppIcon::default(),
             theme: Theme::default(),
             dark_theme: "Classic Dark".to_owned(),
             light_theme: "Classic Light".to_owned(),

@@ -1918,6 +1918,9 @@ impl App {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::instance::attach(&cc.egui_ctx);
         let mut settings = crate::settings::load();
+        if let Err(e) = settings.app_icon.apply(&cc.egui_ctx) {
+            tracing::warn!(error = %e, "could not apply saved app icon");
+        }
         // The themes folder is written on the very first run, then read — before anything that
         // names a theme, so an old settings file and `--scheme` both resolve against it.
         theme::custom::seed();
@@ -2430,6 +2433,17 @@ impl App {
         change(&mut self.settings);
         if self.settings == before {
             return;
+        }
+        if self.settings.app_icon != before.app_icon {
+            if let Err(e) = self.settings.app_icon.apply(ctx) {
+                self.settings.app_icon = before.app_icon;
+                self.toast(&format!("Could not change app icon: {e}"));
+            } else {
+                self.logo = None;
+                if let Some(tray) = &self.tray {
+                    tray.refresh_icon();
+                }
+            }
         }
         // Any of what makes a palette: the mode, the theme chosen for either mode, or how much
         // of the desktop shows through it.
