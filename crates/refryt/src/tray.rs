@@ -175,7 +175,7 @@ fn icon_action(event: &TrayIconEvent) -> Option<TrayAction> {
 }
 
 /// The icon, decoded once per call from the same PNG [`crate::window_icon`] uses for the
-/// titlebar/taskbar — one source of truth for what Refryt's icon looks like.
+/// titlebar/taskbar — one source of truth for what Moosik's icon looks like.
 fn icon_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let bytes = include_bytes!("../../../assets/icons/app/refryt-256.png");
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
@@ -248,7 +248,7 @@ pub fn spawn(ctx: &egui::Context) -> Tray {
         let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu()))
             .with_icon(icon)
-            .with_tooltip("Refryt");
+            .with_tooltip("Moosik");
         // Windows opens the context menu on left-click by default; left as-is, the menu would
         // open on the first click of a double-click, which now means "show". Right click still
         // opens the menu, the Windows convention, and a single left click does nothing — see
@@ -322,7 +322,7 @@ impl ksni::Tray for StatusItem {
 
     /// What the host names the icon by; without it Plasma shows the process name, lowercase.
     fn title(&self) -> String {
-        "Refryt".to_owned()
+        "Moosik".to_owned()
     }
 
     fn status(&self) -> ksni::Status {
@@ -335,7 +335,7 @@ impl ksni::Tray for StatusItem {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: "Refryt".to_owned(),
+            title: "Moosik".to_owned(),
             ..Default::default()
         }
     }

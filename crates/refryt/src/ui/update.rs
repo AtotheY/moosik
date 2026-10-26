@@ -85,7 +85,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
             body.label(
-                egui::RichText::new(format!("refryt {} is available", release.version))
+                egui::RichText::new(format!("Moosik {} is available", release.version))
                     .font(theme::semibold(15.0))
                     .color(p.text),
             );

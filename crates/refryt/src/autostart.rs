@@ -75,7 +75,7 @@ mod linux {
         format!(
             "[Desktop Entry]\n\
              Type=Application\n\
-             Name=Refryt\n\
+             Name=Moosik\n\
              Comment=A fast, native YouTube Music client\n\
              {}\n\
              Icon=refryt\n\
@@ -264,7 +264,7 @@ mod linux {
                 entry_exec("Exec=\"/tmp/100%%/refryt\" --autostart"),
                 Some("/tmp/100%/refryt".to_owned())
             );
-            assert_eq!(entry_exec("Name=Refryt\n"), None);
+            assert_eq!(entry_exec("Name=Moosik\n"), None);
         }
     }
 }
@@ -406,7 +406,7 @@ mod macos {
     }
 
     /// The binary to launch on login: this executable, which inside an app bundle is
-    /// `Refryt.app/Contents/MacOS/refryt`.
+    /// `Moosik.app/Contents/MacOS/refryt`.
     fn exec_path() -> Option<String> {
         std::env::current_exe()
             .ok()

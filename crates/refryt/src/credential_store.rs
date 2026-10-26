@@ -58,18 +58,18 @@ impl Store for Keychain {
         match security_framework::passwords::get_generic_password(SERVICE, ACCOUNT) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.code() == -25300 => Ok(None), // errSecItemNotFound only
-            Err(e) => Err(e).context("could not unlock the Refryt session in macOS Keychain"),
+            Err(e) => Err(e).context("could not unlock the Moosik session in macOS Keychain"),
         }
     }
     fn write(&self, bytes: &[u8]) -> Result<()> {
         security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, bytes)
-            .context("could not save the Refryt session in macOS Keychain")
+            .context("could not save the Moosik session in macOS Keychain")
     }
     fn delete(&self) -> Result<()> {
         match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == -25300 => Ok(()),
-            Err(e) => Err(e).context("could not remove the Refryt session from macOS Keychain"),
+            Err(e) => Err(e).context("could not remove the Moosik session from macOS Keychain"),
         }
     }
 }

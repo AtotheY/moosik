@@ -75,9 +75,9 @@ impl Presence {
         let mut activity = Activity::new()
             .activity_type(ActivityType::Listening)
             // Overrides the Discord application's own name, so the card reads "Listening to
-            // YouTube Music via Refryt" instead of "Listening to refryt". The app is still the
+            // YouTube Music via Moosik" instead of "Listening to refryt". The app is still the
             // one doing the listening; `refryt` is just not much of a name to broadcast.
-            .name("YouTube Music via Refryt")
+            .name("YouTube Music via Moosik")
             // And the member list's one-liner is the artist, while the card itself still leads
             // with the song's title.
             .status_display_type(StatusDisplayType::State);
@@ -315,7 +315,7 @@ mod tests {
     fn a_playing_track_becomes_the_expected_activity() {
         let json = serde_json::to_value(presence().activity()).unwrap();
         assert_eq!(json["type"], 2, "Listening");
-        assert_eq!(json["name"], "YouTube Music via Refryt");
+        assert_eq!(json["name"], "YouTube Music via Moosik");
         assert_eq!(json["details"], "Never Gonna Give You Up");
         assert_eq!(json["state"], "Rick Astley");
         assert_eq!(

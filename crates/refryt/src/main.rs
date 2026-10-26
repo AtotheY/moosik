@@ -174,7 +174,7 @@ fn main() -> eframe::Result {
     }
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("Refryt")
+        .with_title("Moosik")
         .with_app_id(refryt::flatpak::app_id())
         .with_inner_size([1100.0, 720.0])
         .with_min_inner_size([refryt::theme::WINDOW_MIN_W, refryt::theme::WINDOW_MIN_H]);
@@ -318,7 +318,7 @@ fn main() -> eframe::Result {
     result
 }
 
-/// Whether this is the binary inside a macOS app bundle (`Refryt.app/Contents/MacOS/refryt`),
+/// Whether this is the binary inside a macOS app bundle (`Moosik.app/Contents/MacOS/refryt`),
 /// rather than one run straight from `target/`. Never on other platforms.
 fn in_app_bundle() -> bool {
     cfg!(target_os = "macos")

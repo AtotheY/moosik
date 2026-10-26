@@ -373,7 +373,7 @@ mod windows {
     /// Without that, winit still records the window as hidden and the app still thinks it is in
     /// the tray, so the next titlebar X sends a hide winit sees as no change, and nothing happens.
     fn show_existing() {
-        let title = wide("Refryt");
+        let title = wide("Moosik");
         let hwnd = unsafe { FindWindowW(ptr::null(), title.as_ptr()) };
         if hwnd != 0 {
             unsafe {

@@ -4849,7 +4849,7 @@ impl App {
                             self.update.available = None;
                             self.update.up_to_date = true;
                             if manual {
-                                self.toast("refryt is up to date");
+                                self.toast("Moosik is up to date");
                             }
                         }
                     }

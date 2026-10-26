@@ -1,4 +1,4 @@
-//! The "refryt closed unexpectedly" report: one centered, dimmed modal shown once on the launch
+//! The "Moosik closed unexpectedly" report: one centered, dimmed modal shown once on the launch
 //! after a crash, offering the details and a prefilled issue. Nothing is uploaded.
 
 use crate::app::App;
@@ -56,7 +56,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
                     .layout(egui::Layout::top_down(egui::Align::LEFT)),
             );
             body.label(
-                egui::RichText::new("refryt closed unexpectedly")
+                egui::RichText::new("Moosik closed unexpectedly")
                     .font(theme::semibold(15.0))
                     .color(p.text),
             );
@@ -124,7 +124,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
 
 fn details_text(c: &crate::crash::Crash) -> String {
     format!(
-        "refryt {} crashed\nmessage: {}\nlocation: {}\ntime: {}\n\n{}",
+        "Moosik {} crashed\nmessage: {}\nlocation: {}\ntime: {}\n\n{}",
         c.version,
         c.message,
         c.location,

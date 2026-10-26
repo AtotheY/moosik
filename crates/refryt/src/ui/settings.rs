@@ -90,7 +90,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         g.row(
             ui,
             "Keyboard shortcuts",
-            "Every key refryt answers to.",
+            "Every key Moosik answers to.",
             |ui| open_help = widgets::outline_button(ui, &p, "Show").clicked(),
         );
     });
@@ -103,7 +103,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     let (mut check_now, mut show) = (false, false);
     let (title, detail) = match &app.update.available {
         Some(release) => (
-            format!("refryt {} is available", release.version),
+            format!("Moosik {} is available", release.version),
             format!("You have {}.", crate::update::current_version()),
         ),
         None if app.update.checking => (
@@ -111,7 +111,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             "Asking GitHub for the latest release.".to_owned(),
         ),
         None if app.update.up_to_date => (
-            "refryt is up to date".to_owned(),
+            "Moosik is up to date".to_owned(),
             format!("{} is the latest release.", env!("CARGO_PKG_VERSION")),
         ),
         None => (
@@ -126,7 +126,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             &p,
             "setting-check-updates",
             "Check for updates",
-            "Looks for a new release on GitHub when refryt starts.",
+            "Looks for a new release on GitHub when Moosik starts.",
             &mut check,
         );
         g.row(ui, &title, &detail, |ui| {
@@ -161,7 +161,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
                 ui.vertical(|ui| {
                     ui.add_space(2.0);
                     ui.label(
-                        RichText::new("refryt")
+                        RichText::new("Moosik")
                             .font(theme::semibold(14.0))
                             .color(p.text),
                     );
@@ -666,7 +666,7 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
                 &p,
                 "setting-start-on-boot",
                 "Launch on startup",
-                "Opens refryt when you log in.",
+                "Opens Moosik when you log in.",
                 &mut start_on_boot,
             );
         }
@@ -815,7 +815,7 @@ fn browser_import(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
             ui,
             title,
             if cfg!(target_os = "windows") {
-                "No browser found that refryt can read: Firefox-based ones and Helium work, Chrome and Edge don't. Sign in to music.youtube.com there, or use the window above."
+                "No browser found that Moosik can read: Firefox-based ones and Helium work, Chrome and Edge don't. Sign in to music.youtube.com there, or use the window above."
             } else {
                 "No browser found. Sign in to music.youtube.com in your browser first."
             },

@@ -198,16 +198,16 @@ impl MenuBar {
         let separator = PredefinedMenuItem::separator;
 
         let about = PredefinedMenuItem::about(
-            Some("About Refryt"),
+            Some("About Moosik"),
             Some(AboutMetadata {
-                name: Some("Refryt".into()),
+                name: Some("Moosik".into()),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
                 ..Default::default()
             }),
         );
         let settings = item(Command::Settings, "Settings…", cmd(Code::Comma));
         let app_menu = Submenu::with_items(
-            "Refryt",
+            "Moosik",
             true,
             &[
                 &about,
@@ -216,11 +216,11 @@ impl MenuBar {
                 &separator(),
                 &PredefinedMenuItem::services(None),
                 &separator(),
-                &PredefinedMenuItem::hide(Some("Hide Refryt")),
+                &PredefinedMenuItem::hide(Some("Hide Moosik")),
                 &PredefinedMenuItem::hide_others(None),
                 &PredefinedMenuItem::show_all(None),
                 &separator(),
-                &PredefinedMenuItem::quit(Some("Quit Refryt")),
+                &PredefinedMenuItem::quit(Some("Quit Moosik")),
             ],
         )
         .ok()?;
@@ -297,7 +297,7 @@ impl MenuBar {
             true,
             &[
                 &item(Command::Shortcuts, "Keyboard Shortcuts", None),
-                &item(Command::Website, "Refryt on GitHub", None),
+                &item(Command::Website, "Upstream Refryt on GitHub", None),
             ],
         )
         .ok()?;

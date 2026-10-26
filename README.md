@@ -1,4 +1,7 @@
-> **Ark personal fork — 0.1.14+ark.1**
+> **Moosik — personal music app, 0.1.14+ark.2**
+> App name: Moosik. Existing bundle identity, Keychain identifiers, and data locations are
+> retained so your account, preferences, Dock link, and library survive the rename.
+> The original icon remains until an icon concept is selected.
 > Based on upstream v0.1.14 (commit `12e899c4b941728680c42ba1a3841d92769cd5f2`).
 > The upstream remote is retained for deliberate source updates. This fork does not offer
 > upstream binary updates, which would remove the security changes below.
@@ -26,7 +29,7 @@
   <img src="assets/icons/app/refryt-256.png" width="96" alt="refryt icon">
 </p>
 
-<h1 align="center">refryt</h1>
+<h1 align="center">Moosik</h1>
 
 <p align="center">A native YouTube Music client for Linux, Windows and macOS.</p>
 
