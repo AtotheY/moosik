@@ -21,6 +21,8 @@ pub mod blur;
 pub mod browser_cookies;
 pub mod chrome;
 pub mod crash;
+#[cfg(any(target_os = "macos", test))]
+mod credential_store;
 pub mod discord;
 pub mod downloads;
 pub mod emoji;
@@ -54,6 +56,7 @@ pub mod settings;
 pub mod stats;
 pub mod theme;
 pub mod tray;
+mod trusted_requests;
 pub mod ui;
 pub mod update;
 pub mod video;

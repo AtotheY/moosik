@@ -288,8 +288,18 @@ fn remembers() -> bool {
 /// file is a failed sign-in rather than a bug.
 pub fn capture_here(path: &Path, silent: bool) -> Result<()> {
     let cookie = run_window(silent)?;
-    std::fs::write(path, cookie)
-        .with_context(|| format!("could not write the session to {}", path.display()))
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .context("could not create the private sign-in handoff")?;
+    std::io::Write::write_all(&mut file, cookie.as_bytes())
+        .context("could not write the sign-in handoff")
 }
 
 /// A file or folder next to the stored session, in refryt's config directory.

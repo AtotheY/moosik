@@ -182,6 +182,9 @@ struct GhAsset {
 
 /// The newest release, if it is newer than this build.
 pub async fn check(http: &reqwest::Client) -> Result<Option<Release>> {
+    if env!("CARGO_PKG_VERSION").contains("+ark.") {
+        return Ok(None);
+    }
     let response = http
         .get(LATEST)
         .header(reqwest::header::USER_AGENT, USER_AGENT)

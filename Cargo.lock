@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "refryt"
-version = "0.1.14"
+version = "0.1.14+ark.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4908,6 +4908,7 @@ dependencies = [
  "refryt-resolve",
  "reqwest",
  "rfd",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",
@@ -4930,7 +4931,7 @@ dependencies = [
 
 [[package]]
 name = "refryt-resolve"
-version = "0.1.14"
+version = "0.1.14+ark.1"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -90,8 +90,7 @@ fn default_headers(page_id: Option<&str>) -> reqwest::header::HeaderMap {
 fn http_client_for(page_id: Option<&str>) -> Result<ytmapi_rs::Client> {
     let headers = default_headers(page_id);
 
-    let inner = reqwest::Client::builder()
-        .use_rustls_tls()
+    let inner = crate::trusted_requests::client_builder()
         .gzip(true)
         .cookie_store(true)
         .default_headers(headers)
@@ -132,7 +131,7 @@ pub struct Api {
 
 impl Api {
     pub fn new() -> Result<Self> {
-        let session = auth::load_session().ok().flatten();
+        let session = auth::load_session().context("could not open the saved YouTube session")?;
         let page_id = crate::settings::load().account_page_id;
         let ytdlp_session = std::sync::Arc::new(std::sync::RwLock::new(
             session.as_ref().map(|s| s.cookie.clone()),
@@ -357,9 +356,9 @@ impl Api {
     }
 
     /// Sign out for real: forget the credential and remove it from disk.
-    pub async fn sign_out(&self) {
+    pub async fn sign_out(&self) -> Result<()> {
+        auth::delete_cookie()?;
         self.forget_session().await;
-        let _ = auth::delete_cookie();
         let _ = auth::delete_oauth();
         // The sign-in window keeps Google's own session in its profile, and that is a credential
         // too: left behind, the next Log in would silently re-capture the same account instead
@@ -368,6 +367,7 @@ impl Api {
         // same account straight back in.
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::webview_login::forget();
+        Ok(())
     }
 
     /// Confirm the stored session with YouTube, refreshing it from the browser if it has gone
@@ -1722,7 +1722,8 @@ impl Api {
     /// Fire the playback-start beacon: a GET on the tracking URL is what writes the history
     /// item. Signed in only — anonymous callers never get a URL to fire.
     pub async fn report_playback(&self, playback_url: &str) -> Result<()> {
-        let query = AddHistoryItemQuery::new(SongTrackingUrl::from_raw(playback_url));
+        let trusted = crate::trusted_requests::tracking_url(playback_url)?;
+        let query = AddHistoryItemQuery::new(SongTrackingUrl::from_raw(trusted.as_str()));
         match self.client_ref().await? {
             ClientRef::NoAuth(_) => anyhow::bail!("sign in to scrobble plays"),
             ClientRef::Browser(yt) => yt.query(query).await,

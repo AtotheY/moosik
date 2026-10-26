@@ -29,3 +29,6 @@
 
 # Finder's folder settings, written wherever a Mac opens the checkout.
 .DS_Store
+
+# Local fork build tooling and validation artifacts.
+/.ark-build/

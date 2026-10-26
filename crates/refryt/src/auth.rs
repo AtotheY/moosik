@@ -7,7 +7,8 @@
 //! Sign-in means importing the `Cookie` from a logged-in music.youtube.com session in a local
 //! browser; the parsing here (`extract_cookie` et al.) also accepts a manually pasted header
 //! block, which `install_cookie` reuses either way. The cookie is stored at
-//! `~/.config/refryt/browser.json` with mode 0600 — it is a credential.
+//! macOS Keychain; the old owner-only file is migrated only after verified storage.
+//! Other platforms retain an owner-only file.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,8 +17,8 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub fn cookie_path() -> Result<PathBuf> {
     let dirs =
@@ -58,20 +59,42 @@ struct StoredCookie {
 }
 
 /// A stored session: the cookie and where it came from.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Session {
     pub cookie: String,
     pub source: Option<String>,
 }
 
+// Never include the reusable cookie in diagnostics.
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("cookie", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 pub fn load_session() -> Result<Option<Session>> {
     let path = cookie_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
-    let stored: StoredCookie = serde_json::from_slice(&bytes)
-        .with_context(|| format!("could not parse {}", path.display()))?;
+    #[cfg(target_os = "macos")]
+    let bytes = crate::credential_store::load_migrating(
+        &crate::credential_store::Keychain,
+        &path,
+        |bytes| {
+            serde_json::from_slice::<StoredCookie>(bytes)
+                .map(|_| ())
+                .context("saved session is not valid JSON")
+        },
+    )?;
+    #[cfg(not(target_os = "macos"))]
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).context("could not read the saved session"),
+    };
+    let Some(bytes) = bytes else { return Ok(None) };
+    let stored: StoredCookie =
+        serde_json::from_slice(&bytes).context("could not parse the saved session")?;
     Ok(Some(Session {
         cookie: stored.cookie,
         source: stored.source,
@@ -80,33 +103,45 @@ pub fn load_session() -> Result<Option<Session>> {
 
 pub fn save_session(cookie: &str, source: Option<&str>) -> Result<()> {
     let path = cookie_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
     let stored = StoredCookie {
         cookie: cookie.trim().to_owned(),
         saved_at: SystemTime::now(),
         source: source.map(str::to_owned),
     };
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)
-        .with_context(|| format!("could not open {}", path.display()))?;
-    // 0600: this file is a credential.
-    #[cfg(unix)]
-    let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
-    serde_json::to_writer_pretty(&mut file, &stored).context("could not write the cookie")
+    let bytes = serde_json::to_vec(&stored).context("could not encode the session")?;
+    #[cfg(target_os = "macos")]
+    return crate::credential_store::save_verified(
+        &crate::credential_store::Keychain,
+        &path,
+        &bytes,
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.create(true).write(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&path)
+            .context("could not open the session file")?;
+        #[cfg(unix)]
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        std::io::Write::write_all(&mut file, &bytes).context("could not save the session")
+    }
 }
 
 pub fn delete_cookie() -> Result<()> {
     let path = cookie_path()?;
+    #[cfg(target_os = "macos")]
+    return crate::credential_store::delete(&crate::credential_store::Keychain, &path);
+    #[cfg(not(target_os = "macos"))]
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("could not delete {}", path.display())),
+        Err(e) => Err(e).context("could not delete the session"),
     }
 }
 

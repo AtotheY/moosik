@@ -1,3 +1,27 @@
+> **Ark personal fork — 0.1.14+ark.1**
+> Based on upstream v0.1.14 (commit `12e899c4b941728680c42ba1a3841d92769cd5f2`).
+> The upstream remote is retained for deliberate source updates. This fork does not offer
+> upstream binary updates, which would remove the security changes below.
+>
+> On macOS, the reusable YouTube session is stored in Keychain under service
+> `com.sistilli.refryt`, account `youtube-session-v1`. First launch verifies a round trip
+> before removing the legacy `browser.json`; failures preserve the legacy file and stop
+> startup instead of silently signing out or saving a plaintext fallback. Sign-out reports
+> credential deletion failures. Session debug output is redacted.
+>
+> Playback reporting accepts only HTTPS on port 443 at `youtube.com`, `www.youtube.com`,
+> or `music.youtube.com`, with the exact playback/watchtime paths. Credential clients do
+> not follow redirects. Sign-in handoff files are created owner-only and without replacing
+> existing files. Google sign-in still uses the OS WebKit cookie store for session renewal;
+> Keychain does not make an already compromised Mac safe.
+>
+> Local build: `scripts/ark-cargo.sh test --locked -p refryt --lib credential_store`,
+> `scripts/ark-cargo.sh test --locked -p refryt --lib trusted_requests`, then
+> `scripts/ark-package.sh`. The wrapper uses the project-local Rust toolchain and the
+> existing app's bundled playback libraries. Packaging reuses those libraries, yt-dlp
+> and artwork; it rebuilds the Refryt executable, not every third-party binary.
+> Keep the GPL license and upstream attribution when distributing changes.
+
 <p align="center">
   <img src="assets/icons/app/refryt-256.png" width="96" alt="refryt icon">
 </p>

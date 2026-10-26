@@ -141,6 +141,7 @@ eframe = { workspace = true, features = ["wgpu"] }
 # The in-app sign-in window (`webview_login.rs`) on macOS: WKWebView through wry, with tao's event
 # loop in the child process that exists for the window.
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "=3.7.0"
 wry = "0.57"
 tao = "0.37"
 # `tray.rs` brings the window back through AppKit directly: a hidden or minimized window gets no

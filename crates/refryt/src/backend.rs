@@ -909,6 +909,7 @@ pub struct Backend {
     rt: tokio::runtime::Runtime,
     /// One client, reused for every cover, so connections stay pooled.
     http: reqwest::Client,
+    tracking_http: reqwest::Client,
     api: Arc<Api>,
     resolver: Arc<StreamCache<ChainResolver>>,
     /// Plays the guest resolver's streams to mpv in ranges (see `refryt_resolve::StreamProxy`).
@@ -990,6 +991,7 @@ impl Backend {
                 .use_rustls_tls()
                 .build()
                 .map_err(|e| anyhow::anyhow!("could not build the image client: {e}"))?,
+            tracking_http: crate::trusted_requests::client_builder().build()?,
             api,
             resolver,
             proxy,
@@ -2196,8 +2198,11 @@ impl Backend {
     pub fn sign_out(&self) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            api.sign_out().await;
-            Self::emit(&tx, &ctx, Event::AuthChanged(AuthState::SignedOut));
+            let state = match api.sign_out().await {
+                Ok(()) => AuthState::SignedOut,
+                Err(e) => AuthState::Failed(format!("Could not remove the saved session: {e:#}")),
+            };
+            Self::emit(&tx, &ctx, Event::AuthChanged(state));
         });
     }
 
@@ -2266,7 +2271,7 @@ impl Backend {
         let generation = self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let scrobble = Scrobble {
             api: Arc::clone(&self.api),
-            http: self.http.clone(),
+            http: self.tracking_http.clone(),
             generation: Arc::clone(&self.scrobble_generation),
         };
         Self::emit(
@@ -2415,7 +2420,7 @@ impl Backend {
         let resolver = Arc::clone(&self.video_resolver);
         let scrobble = Scrobble {
             api: Arc::clone(&self.api),
-            http: self.http.clone(),
+            http: self.tracking_http.clone(),
             generation: Arc::clone(&self.scrobble_generation),
         };
         // The video path spends seconds inside yt-dlp before a frame exists; `Resolving` is
@@ -2700,7 +2705,11 @@ struct Tick {
 }
 
 async fn send_watchtime(http: &reqwest::Client, cookie: &str, base: &str, cpn: &str, tick: &Tick) {
-    let url = watchtime_url(base, cpn, tick);
+    let Ok(base) = crate::trusted_requests::tracking_url(base) else {
+        warn!("blocked an untrusted playback reporting URL");
+        return;
+    };
+    let url = watchtime_url(base.as_str(), cpn, tick);
     match http
         .get(&url)
         .header(reqwest::header::COOKIE, cookie.to_owned())
@@ -2708,7 +2717,7 @@ async fn send_watchtime(http: &reqwest::Client, cookie: &str, base: &str, cpn: &
         .await
     {
         Ok(response) => debug!(status = %response.status(), "watchtime ping"),
-        Err(e) => debug!(error = %format!("{e:#}"), "watchtime ping failed"),
+        Err(_) => debug!("watchtime ping failed"),
     }
 }
 
