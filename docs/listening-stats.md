@@ -1,6 +1,8 @@
 # Moosik listening stats
 
-Open **Listening stats** in the sidebar. Recording begins with playback in Moosik
+Open **Listening stats** in the sidebar. Choose a period from the dropdown and use
+the pill navigation to explore. Export and refresh actions are in **•••**; definitions
+and privacy details are behind the **ⓘ** button. Recording begins with playback in Moosik
 0.1.14+ark.5; there is no fabricated backfill from YouTube's history.
 
 ## What you can explore
@@ -10,20 +12,20 @@ Open **Listening stats** in the sidebar. Recording begins with playback in Moosi
   top songs/artists, hourly and weekday patterns, skips, seeks, pauses, buffering,
   app-muted time, average listening per active day, observation gaps, and sources.
 - **Songs:** searchable table with listening time, play/skip/completion counts,
-  average unique coverage, first/last session dates, and sorting by time, plays,
-  skips, completions, recency, title, or personal star rating. Click a title to
+  a song detail view with unique coverage and first/last session dates, and sorting by time, plays,
+  skips, completions, recency, title, or personal star rating. Click a row to
   add comma-separated genres and mood tags and a 0–5 rating (0 = unrated).
 - **Artists / Albums / Genres:** rankings by listening time, with play and song
   counts. Every credited artist and every assigned genre receives full credit;
   these group totals overlap, while the headline total counts each second once.
-- **History:** the latest 1,000 attempts in a selected range, including partial
+- **History:** compact artwork rows for the latest 1,000 attempts in a selected range, including partial
   listens and unsuccessful attempts. All older rows remain in the ledger/export.
-- **My recap:** a live recap for any date range, with top songs/artists, discovery,
+- **My recap:** an artwork-led recap for any date range, with top songs/artists, discovery,
   streaks, and biggest listening day. Export it as an editable Markdown document.
 
 Use Today, 7 days, 30 days, This month, This year, All time, or inclusive custom
 calendar dates. You can filter YouTube, downloaded YouTube tracks, or local files.
-The dashboard refreshes about every ten seconds; Refresh requests an immediate
+The dashboard refreshes about every ten seconds; ••• → Refresh requests an immediate
 snapshot. Genres are user-assigned: missing source metadata stays **Unknown**.
 No artist-name lookups or listening-history uploads to an enrichment service occur.
 

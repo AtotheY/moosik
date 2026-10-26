@@ -315,10 +315,12 @@ fn csv(s: &str) -> String {
 mod tests {
     use super::*;
     fn temp() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "moosik-ledger-{}-{}",
+            "moosik-ledger-{}-{}-{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            chrono::Utc::now().timestamp_nanos_opt().unwrap(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
     fn metadata() -> Metadata {

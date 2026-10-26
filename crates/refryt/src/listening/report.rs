@@ -11,6 +11,12 @@ pub struct Query {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Row {
+    #[serde(default)]
+    pub artwork: Option<String>,
+    #[serde(default)]
+    pub artist_keys: Vec<String>,
+    #[serde(default)]
+    pub album_key: String,
     pub id: String,
     pub name: String,
     pub subtitle: String,
@@ -39,6 +45,10 @@ pub struct Group {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Recent {
+    #[serde(default)]
+    pub track_id: String,
+    #[serde(default)]
+    pub artwork: Option<String>,
     pub at: i64,
     pub title: String,
     pub artist: String,
@@ -294,6 +304,19 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
             .join(", ");
         let row = tracks.entry(meta.id.clone()).or_insert_with(|| Row {
             id: meta.id.clone(),
+            artwork: meta.artwork.clone(),
+            artist_keys: meta
+                .artists
+                .iter()
+                .map(|(name, id)| id.clone().unwrap_or_else(|| name.to_lowercase()))
+                .collect(),
+            album_key: meta.album_id.clone().unwrap_or_else(|| {
+                format!(
+                    "{}:{}",
+                    artist_names,
+                    meta.album.as_deref().unwrap_or("Unknown album")
+                )
+            }),
             name: meta.title.clone(),
             subtitle: artist_names.clone(),
             album: meta.album.clone().unwrap_or_default(),
@@ -365,6 +388,8 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
         );
         if report.recent.len() < 1000 {
             report.recent.push(Recent {
+                track_id: meta.id.clone(),
+                artwork: meta.artwork.clone(),
                 at: started,
                 title: meta.title,
                 artist: artist_names,
