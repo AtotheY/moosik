@@ -32,6 +32,7 @@ pub struct Player {
     /// `state()` reports idle in that case — the same as a fresh eager context did.
     mpv: Option<Arc<Mpv>>,
     volume: f64,
+    seek_serial: std::sync::atomic::AtomicU64,
     /// Set if the last libmpv init attempt failed. Surfaced exactly where an eager failure was —
     /// `App::player_error` and the sidebar's "audio unavailable" note — just at first play
     /// instead of at startup. Not latched: a later play tries again, so a transient failure
@@ -59,6 +60,7 @@ impl Player {
         Self {
             mpv: None,
             volume: 70.0,
+            seek_serial: std::sync::atomic::AtomicU64::new(0),
             init_error: None,
         }
     }
@@ -199,6 +201,34 @@ impl Player {
         (w > 0 && h > 0).then_some((w as usize, h as usize))
     }
 
+    /// Detailed playback state sampled once per second for the private listening ledger.
+    pub fn listening_sample(&self) -> crate::listening::Sample {
+        let state = self.state();
+        let mpv = self.mpv.as_ref();
+        crate::listening::Sample {
+            position: state.position,
+            duration: state.duration,
+            paused: state.paused,
+            idle: state.idle,
+            buffering: mpv
+                .and_then(|m| m.get_property("paused-for-cache").ok())
+                .unwrap_or(false),
+            seeking: mpv
+                .and_then(|m| m.get_property("seeking").ok())
+                .unwrap_or(false),
+            speed: mpv
+                .and_then(|m| m.get_property("speed").ok())
+                .unwrap_or(1.0),
+            volume: mpv
+                .and_then(|m| m.get_property("volume").ok())
+                .unwrap_or(self.volume),
+            muted: mpv
+                .and_then(|m| m.get_property("mute").ok())
+                .unwrap_or(false),
+            seek_serial: self.seek_serial.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
     pub fn set_paused(&self, paused: bool) {
         if let Some(mpv) = &self.mpv {
             let _ = mpv.set_property("pause", paused);
@@ -218,6 +248,8 @@ impl Player {
     }
 
     pub fn seek(&self, seconds: f64) {
+        self.seek_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(mpv) = &self.mpv {
             let _ = mpv.command("seek", &[&format!("{seconds:.3}"), "absolute"]);
         }

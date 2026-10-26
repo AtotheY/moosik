@@ -496,6 +496,7 @@ pub enum Route {
     Moods,
     /// What you played, in dated shelves. Signed in only.
     History,
+    Listening,
     Library,
     Settings,
     Artist(String),
@@ -527,6 +528,7 @@ impl Route {
             "charts" => Some(Route::Charts(None)),
             "moods" => Some(Route::Moods),
             "history" => Some(Route::History),
+            "stats" => Some(Route::Listening),
             "library" => Some(Route::Library),
             "settings" => Some(Route::Settings),
             other => match other.split_once(':') {
@@ -1711,6 +1713,8 @@ pub struct App {
     profile_ids: std::collections::HashSet<String>,
     /// Live counters behind `--stats`; free when off.
     pub(crate) stats: Stats,
+    pub(crate) listening: crate::listening::Ledger,
+    pub(crate) listening_view: crate::ui::listening::View,
     /// Print one line of counters and exit, once this much time has passed. Used by
     /// `scripts/perf.sh` to measure a *loaded* app rather than an empty one.
     stats_after: Option<Duration>,
@@ -1819,6 +1823,12 @@ impl Drop for App {
     fn drop(&mut self) {
         // Brackets the teardown in the log: the exit line in `main` comes after every field has
         // dropped, so a quit that still drags can be pinned on whichever drop stops logging.
+        if self.listening.active()
+            && let Some(player) = &self.player
+        {
+            self.listening.observe(player.listening_sample());
+        }
+        self.listening.finish("app_closed");
         tracing::info!("app: dropping");
         self.video = None;
         tracing::info!("app: video surface freed");
@@ -2185,6 +2195,8 @@ impl App {
             downloaded_tracks: Default::default(),
             download_progress: std::collections::HashMap::new(),
             stats: Stats::new(stats),
+            listening: crate::listening::Ledger::new(),
+            listening_view: crate::ui::listening::View::default(),
             stats_after,
             screenshot: screenshot.map(|(path, when)| (path, when, false)),
             content_rect: egui::Rect::NOTHING,
@@ -3046,6 +3058,15 @@ impl App {
         // loaded, paused or seeked is read here, a frame later.
         let state = self.read_player_state();
         self.player_state = state;
+        self.listening.poll();
+        if self.listening.due()
+            && let Some(player) = &self.player
+        {
+            self.listening.observe(player.listening_sample());
+        }
+        if self.listening.active() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         // Kept in sync here rather than at every `toggle_pause`/`set_paused` call site — mpv is
         // the single source of truth for this, and every row/card's play-vs-pause glyph reads
         // it off `now` rather than reaching for the player directly.
@@ -3060,6 +3081,7 @@ impl App {
             match self.stall.on_idle(Instant::now()) {
                 // Repeat One replays the track that just ended; anything else advances normally.
                 IdleEnd::Ended => {
+                    self.listening.finish("ended");
                     if self.repeat == RepeatMode::One {
                         if let Some(current) = self.q.current() {
                             self.play_index(current);
@@ -3078,6 +3100,7 @@ impl App {
                     );
                 }
                 IdleEnd::GiveUp => {
+                    self.listening.finish("failed");
                     tracing::error!(
                         track = %self.now.track.as_ref().map_or("?", |t| t.title.as_str()),
                         "playback never started after the retries; leaving the queue where it is"
@@ -3096,7 +3119,7 @@ impl App {
             if let Some(start) = self.stall.start_position() {
                 self.q.set_resume(Some((index, start)));
             }
-            self.play_index_restore(index);
+            self.play_index_load(index, true);
         }
 
         // Autoplay: one `next` call returns ~50 tracks. A hand-picked queue seeds its tail as
@@ -3368,6 +3391,7 @@ impl App {
         // video's external audio — is open; a seek after the load moved only the video.
         let start_at = (position > 1.0).then_some(position);
         self.q.set_resume(start_at.map(|p| (index, p)));
+        self.listening.suspend(position, "mode_change");
         self.play_generation = self.start_track(track, handle, volume, start_at);
     }
 
@@ -3526,7 +3550,7 @@ impl App {
             Route::Charts(params) => self.load_charts(params),
             Route::Moods => self.load_moods(),
             Route::History => self.load_history(),
-            Route::Search | Route::Settings => {}
+            Route::Search | Route::Settings | Route::Listening => {}
         }
     }
 
@@ -3911,7 +3935,7 @@ impl App {
                 self.home_shelf_full = None;
                 self.home_shelf_loading = None;
             }
-            Route::Search | Route::Settings => return,
+            Route::Search | Route::Settings | Route::Listening => return,
         }
         self.scroll_to_top = true;
         self.ensure_route_loaded();
@@ -5570,6 +5594,7 @@ impl App {
                         playlist_playing: self.now.playlist_playing.clone(),
                     };
                     self.playback_started = true;
+                    self.listening.ready();
                     // A track with no video cannot keep the video view up.
                     if self.video_open && !wide {
                         self.video_open = false;
@@ -5957,6 +5982,7 @@ impl App {
                         self.toast("Video failed — playing the song instead");
                         self.reload_current();
                     } else if let Some(player) = &self.player {
+                        self.listening.finish("failed");
                         // The song before this one is still loaded and would play on under the
                         // error, with play/pause now aimed at the failed track instead of it.
                         // Not on the video path: `reload_current` reads the position from what
@@ -6065,6 +6091,10 @@ impl App {
 
     /// `play_index` without touching the history — for `Previous` itself and a fresh queue.
     fn play_index_restore(&mut self, index: usize) {
+        self.play_index_load(index, false);
+    }
+
+    fn play_index_load(&mut self, index: usize, retry: bool) {
         let Some(track) = self.q.get(index).cloned() else {
             return;
         };
@@ -6090,6 +6120,38 @@ impl App {
         // it rides the load as a per-file `start`, and is consumed here so a later frame does
         // not seek the newly opened file a second time.
         let start_at = self.q.take_resume_for(index);
+        if retry {
+            self.listening.suspend(start_at.unwrap_or(0.0), "retry");
+        } else {
+            if self.listening.active()
+                && let Some(player) = &self.player
+            {
+                self.listening.observe(player.listening_sample());
+            }
+            let source = if track.local_path.is_some() {
+                "local"
+            } else if self
+                .downloads
+                .entries
+                .get(&track.video_id)
+                .is_some_and(|d| std::path::Path::new(&d.path).is_file())
+            {
+                "downloaded"
+            } else {
+                "youtube"
+            };
+            let context = crate::listening::Context {
+                source: source.into(),
+                route: format!("{:?}", self.current_route()),
+                playlist: self.now.playlist_playing.as_ref().map(|p| p.0.clone()),
+                shuffle: self.q.is_shuffled(),
+                repeat: format!("{:?}", self.repeat),
+                volume,
+                video: self.video_open && track.wide,
+            };
+            self.listening
+                .start(&track, context, start_at.unwrap_or(0.0));
+        }
         self.play_generation = self.start_track(track, handle, volume, start_at);
     }
 
@@ -8087,6 +8149,7 @@ impl eframe::App for App {
                             Route::Moods => ui::moods::page(self, ui),
                             Route::HomeShelf(title) => ui::home::shelf_page(self, ui, &title),
                             Route::History => ui::history::page(self, ui),
+                            Route::Listening => ui::listening::page(self, ui),
                             Route::Home => ui::home::page(self, ui),
                             Route::Library => ui::library::page(self, ui),
                             Route::Settings => ui::settings::page(self, ui),

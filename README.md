@@ -1,4 +1,6 @@
-> **Moosik — personal music app, 0.1.14+ark.4**
+> **Moosik — personal music app, 0.1.14+ark.5**
+> New: private listening ledger, detailed song/artist/album/genre stats, custom recaps,
+> local tags/ratings, and full JSON/CSV/SQLite exports. See [the stats guide](docs/listening-stats.md).
 > App name: Moosik. Existing bundle identity, Keychain identifiers, and data locations are
 > retained so your account, preferences, Dock link, and library survive the rename.
 > Default icon: Ceramic Eclipse in terracotta. Settings → Appearance offers ten saved

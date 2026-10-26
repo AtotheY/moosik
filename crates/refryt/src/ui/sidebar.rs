@@ -56,6 +56,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         // and the nav slot is better spent on the page YouTube puts there.
         (Route::Explore, Icon::Compass, "Explore"),
         (Route::Library, Icon::Library, "Library"),
+        (Route::Listening, Icon::TrendingUp, "Listening stats"),
     ] {
         let selected = app.current_route() == route;
         if widgets::nav_item(ui, &app.palette, icon, label, selected, rail).clicked() {
@@ -63,6 +64,9 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    if app.listening.error.is_some() {
+        ui.colored_label(app.palette.danger, "Stats need attention");
+    }
     playlists(app, ui, rail);
     // The card's rounded corners, over everything the rail drew: nav rows and playlist rows
     // both run to the card's top and bottom edges now.

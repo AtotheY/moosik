@@ -39,6 +39,7 @@ pub mod instance;
 #[cfg(target_os = "linux")]
 pub mod kwin;
 pub mod liked;
+pub mod listening;
 pub mod local;
 pub mod local_playlists;
 pub mod media;

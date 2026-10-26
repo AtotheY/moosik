@@ -13,6 +13,7 @@ pub mod history;
 pub mod home;
 pub mod home_order;
 pub mod library;
+pub mod listening;
 pub mod lyrics;
 pub mod mood;
 pub mod moods;

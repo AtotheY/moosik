@@ -9,6 +9,8 @@ description = "A fast, native YouTube Music client"
 default-run = "refryt"
 
 [dependencies]
+rusqlite = { version = "=0.37.0", features = ["bundled", "backup"] }
+chrono = { version = "=0.4.45", features = ["serde"] }
 anyhow.workspace = true
 bytes = "1"
 directories.workspace = true
