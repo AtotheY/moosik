@@ -30,6 +30,7 @@ icons! {
     Disc3 => "disc-3",
     Download => "download",
     Ellipsis => "ellipsis",
+    EllipsisVertical => "ellipsis-vertical",
     Folder => "folder",
     Heart => "heart",
     HeartFilled => "heart-filled",

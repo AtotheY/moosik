@@ -1,4 +1,4 @@
-> **Moosik — personal music app, 0.1.14+ark.6**
+> **Moosik — personal music app, 0.1.14+ark.7**
 > New: private listening ledger, detailed song/artist/album/genre stats, custom recaps,
 > local tags/ratings, and full JSON/CSV/SQLite exports. See [the stats guide](docs/listening-stats.md).
 > App name: Moosik. Existing bundle identity, Keychain identifiers, and data locations are

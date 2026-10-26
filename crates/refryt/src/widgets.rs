@@ -711,7 +711,7 @@ pub struct TrackRow<'a> {
     pub hide_art: bool,
     /// Distinguishes this row's interactive pieces from its neighbours'.
     pub id_salt: usize,
-    /// Right-click menu. `None` for rows that are not songs.
+    /// Menu shared by right-click and the hover ••• button. `None` for non-song rows.
     pub menu: Option<RowMenu<'a>>,
     /// Your rating. Drives the hover thumbs; `Indifferent` on rows without a menu.
     pub like: crate::model::LikeStatus,
@@ -2340,7 +2340,20 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::click_and_drag(),
     );
-    let right_pad = 20.0;
+    // Reserve the menu slot even at rest: no text, duration or rating moves on hover.
+    let more_w = if menu.is_some() { 36.0 } else { 0.0 };
+    let right_pad = 20.0 + more_w;
+    let more_rect = Rect::from_center_size(
+        egui::pos2(rect.right() - 27.0, rect.center().y),
+        vec2(30.0, 30.0),
+    );
+    let more_response = menu.as_ref().map(|_| {
+        ui.interact(
+            more_rect,
+            ui.id().with(("ytm-row-more", id_salt)),
+            Sense::click(),
+        )
+    });
     // A narrow row — the open queue on a small window — compresses instead of starving:
     // the number column and the art yield first, and what they give back is the title's
     // room. A full-size art and a 30pt number column left 21pt of it on a 215pt card,
@@ -2432,7 +2445,14 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // single click whatever the setting says — and short-circuiting `activate` is what keeps that
     // click from also marking the row as merely selected. A hidden slot has no cover to press
     // (and a zero-width rect would otherwise swallow a click landing exactly on its line).
-    let activate = if (!hide_art
+    let on_more = more_response.as_ref().is_some_and(|r| r.clicked())
+        || (menu.is_some()
+            && response
+                .interact_pointer_pos()
+                .is_some_and(|p| more_rect.contains(p)));
+    let activate = if on_more {
+        false
+    } else if (!hide_art
         && on_cover(
             shape,
             art_rect,
@@ -2682,7 +2702,34 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         .as_ref()
         .filter(|_| show_rating)
         .map(|m| (m.track.video_id.clone(), m.signed_in));
-    let mut action = menu.and_then(|m| row_menu(ui, palette, &response, m));
+    if let (Some(m), Some(more)) = (menu.as_ref(), more_response.as_ref()) {
+        let open = egui::Popup::is_id_open(
+            ui.ctx(),
+            ui.id().with(("ytm-row-menu", m.track.video_id.as_str())),
+        );
+        more.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "More options")
+        });
+        if ui.is_rect_visible(rect) && (over || more.hovered() || more.has_focus() || open) {
+            let lit = lit(ui, more);
+            if lit > 0.001 || open {
+                ui.painter().circle_filled(
+                    more_rect.center(),
+                    15.0,
+                    palette.glass_state(palette.surface_hover, if open { 1.0 } else { lit }),
+                );
+            }
+            Icon::EllipsisVertical.image(palette.secondary, 18.0).paint_at(
+                ui,
+                Rect::from_center_size(more_rect.center() + press_offset(more), vec2(18.0, 18.0)),
+            );
+        }
+        more.clone()
+            .on_hover_text("More options")
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    let mut action =
+        menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m));
     // Rating thumbs are interacted whenever the row is visible — never gated on drawn — for
     // the reason documented on `rate_thumbs`. A click is only reachable where they are
     // visible anyway, since their zone sits inside the row.
@@ -2693,7 +2740,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // Corner-sharing rows have no zone to anchor to — the thumbs take the duration's corner
         // instead, where the duration itself has stepped aside for them.
         let thumb_right = if share_corner {
-            rect.right() - 17.0
+            rect.right() - 17.0 - more_w
         } else {
             rect.right() - right_pad - duration_w
         };
@@ -2782,12 +2829,35 @@ pub(crate) fn row_menu(
     response: &egui::Response,
     menu: RowMenu<'_>,
 ) -> Option<super::ui::RowAction> {
+    row_menu_with_button(ui, palette, response, None, menu)
+}
+
+fn row_menu_with_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    response: &egui::Response,
+    button: Option<&egui::Response>,
+    menu: RowMenu<'_>,
+) -> Option<super::ui::RowAction> {
     use super::ui::RowAction;
     let t = menu.track;
-    let popup = egui::Popup::new(
-        ui.id().with(("ytm-row-menu", t.video_id.as_str())),
+    let id = ui.id().with(("ytm-row-menu", t.video_id.as_str()));
+    let via_button = button.is_some_and(|b| b.clicked());
+    let anchor_id = id.with("button-anchor");
+    if via_button || response.secondary_clicked() {
+        ui.ctx().data_mut(|d| d.insert_temp(anchor_id, via_button));
+    }
+    let button_anchor = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(anchor_id).unwrap_or(false));
+    let mut popup = egui::Popup::new(
+        id,
         ui.ctx().clone(),
-        response,
+        if button_anchor {
+            button.unwrap_or(response)
+        } else {
+            response
+        },
         ui.layer_id(),
     )
     .kind(egui::PopupKind::Menu)
@@ -2798,15 +2868,19 @@ pub(crate) fn row_menu(
     // The default is `CloseOnClick`, which closes on *any* click anywhere — including one
     // landing inside the menu, so a click on the submenu's scrollbar tore the whole thing down.
     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-    .open_memory(if response.secondary_clicked() {
+    .open_memory(if via_button {
+        Some(egui::SetOpenCommand::Toggle)
+    } else if response.secondary_clicked() {
         Some(egui::SetOpenCommand::Bool(true))
     } else if response.clicked() {
         // A primary click both plays and dismisses, as on the site.
         Some(egui::SetOpenCommand::Bool(false))
     } else {
         None
-    })
-    .at_pointer_fixed();
+    });
+    if !button_anchor {
+        popup = popup.at_pointer_fixed();
+    }
     popup
         .show(|mui| {
             let mut choice = None;
@@ -5702,6 +5776,8 @@ mod tests {
         let activate = Cell::new(false);
         let cover = Cell::new(Pos2::ZERO);
         let body = Cell::new(Pos2::ZERO);
+        let dots = Cell::new(Pos2::ZERO);
+        let popup_id = Cell::new(egui::Id::NULL);
         let mut pass = |events: Vec<Event>| {
             t += 1.0 / 60.0;
             let input = egui::RawInput {
@@ -5747,11 +5823,13 @@ mod tests {
                 );
                 fired = hit.activate;
                 let rect = hit.response.rect;
+                dots.set(egui::pos2(rect.right() - 27.0, rect.center().y));
+                popup_id.set(ui.id().with(("ytm-row-menu", "cover-test")));
                 cover.set(egui::pos2(
                     rect.left() + crate::theme::ART_SIZE / 2.0,
                     rect.center().y,
                 ));
-                body.set(egui::pos2(rect.right() - 40.0, rect.center().y));
+                body.set(egui::pos2(rect.right() - 100.0, rect.center().y));
             })
             .drop_without_applying_deltas();
             activate.set(fired);
@@ -5790,6 +5868,37 @@ mod tests {
             is_selected(&ctx, "cover-test"),
             "a single body click did not select the row"
         );
+        // The hover menu is an independent primary-click target: opening it must not play,
+        // and it must render, not merely flip the popup's memory flag.
+        set_double_click_play(&ctx, false);
+        pass(vec![Event::PointerMoved(dots.get())]);
+        pass(vec![click(dots.get(), true)]);
+        pass(vec![click(dots.get(), false)]);
+        assert!(!activate.get(), "opening song options also played the song");
+        pass(vec![]);
+        assert!(egui::Popup::is_id_open(&ctx, popup_id.get()));
+        assert!(
+            ctx.read_response(popup_id.get()).is_some(),
+            "song menu must be visibly rendered"
+        );
+        // Clicking the same button again closes it without activating the row.
+        pass(vec![click(dots.get(), true)]);
+        pass(vec![click(dots.get(), false)]);
+        assert!(!activate.get());
+        assert!(!egui::Popup::is_id_open(&ctx, popup_id.get()));
+        // Right-click still opens that exact menu from the row body.
+        pass(vec![Event::PointerMoved(body.get())]);
+        for pressed in [true, false] {
+            pass(vec![Event::PointerButton {
+                pos: body.get(),
+                button: PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        pass(vec![]);
+        assert!(egui::Popup::is_id_open(&ctx, popup_id.get()));
+        assert!(ctx.read_response(popup_id.get()).is_some());
     }
 
     /// The ink a title's line ends at: its baseline for a name with no descenders, lower for

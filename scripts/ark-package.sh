@@ -17,7 +17,7 @@ ditto "$template" "$stage"
 cp target/release/refryt "$stage/Contents/MacOS/refryt"
 version=$(./scripts/ark-cargo.sh metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="refryt"))')
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$stage/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0.1.1406' "$stage/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0.1.1407' "$stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Moosik" "$stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName Moosik" "$stage/Contents/Info.plist"
 cp "$root/assets/icons/app/moosik.icns" "$stage/Contents/Resources/moosik.icns"
