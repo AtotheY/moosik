@@ -16,6 +16,23 @@ Our ambition is to make everyday listening feel better than Spotify: effortless 
 
 > **Developer preview.** Moosik is running and being tested on Apple Silicon Macs. There are no published Moosik installers yet. Windows and Linux support is inherited from Refryt and needs validation with our changes. Start from source if you're comfortable with development builds.
 
+## A few ways to make it yours
+
+Four views, four themes. Real captures of the Moosik source preview on macOS, with signed-out browsing and synthetic listening stats.
+
+<table>
+  <tr>
+    <td width="50%"><a href="assets/screenshots/moosik/album-spotify.jpg"><img src="assets/screenshots/moosik/album-spotify.jpg" alt="Moosik album view in the black and green Spotify theme"></a><br><strong>Albums, front and center</strong><br>Spotify</td>
+    <td width="50%"><a href="assets/screenshots/moosik/listening-catppuccin-frappe.jpg"><img src="assets/screenshots/moosik/listening-catppuccin-frappe.jpg" alt="Moosik listening overview with synthetic listening time, daily activity, top songs, and top artists"></a><br><strong>Your listening, at a glance</strong><br>Catppuccin Frappé</td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="assets/screenshots/moosik/explore-catppuccin-latte.jpg"><img src="assets/screenshots/moosik/explore-catppuccin-latte.jpg" alt="Moosik Explore page with new releases and moods and genres in the light Catppuccin Latte theme"></a><br><strong>Find your next favorite</strong><br>Catppuccin Latte</td>
+    <td width="50%"><a href="assets/screenshots/moosik/icons-rose-pine.jpg"><img src="assets/screenshots/moosik/icons-rose-pine.jpg" alt="Moosik appearance settings with ten Eclipse icon finishes and Ceramic selected in the Rosé Pine theme"></a><br><strong>A finish for every desktop</strong><br>Rosé Pine · Ceramic selected</td>
+  </tr>
+</table>
+
+Open any screenshot for the full-size view. No personal account, playlists, or listening activity are shown. [About these screenshots](assets/screenshots/moosik/README.md).
+
 ## Built for the way you listen
 
 ### Your listening history, with the details left in
@@ -39,17 +56,6 @@ Refryt already provides the core listening experience, editable YouTube playlist
 ### Make it feel like yours
 
 Choose from the inherited theme collection, artwork-inspired headers, resizable sidebars, and transparency controls. Moosik adds ten Eclipse icon finishes, with Ceramic as the default; the live icon picker is implemented on macOS.
-
-<details>
-<summary>Preview the interface foundation inherited from Refryt</summary>
-
-<p align="center">
-  <img src="assets/screenshots/home-catppuccin-frappe-blur.png" width="960" alt="Refryt's native YouTube Music desktop interface with an artwork-led library, queue and lyrics, inherited by Moosik">
-</p>
-
-This is an upstream Refryt screenshot, retained with credit. It shows the shared interface foundation, not Moosik's new listening-stats screens or a promised release build.
-
-</details>
 
 ## Get started
 

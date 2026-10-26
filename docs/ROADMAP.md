@@ -34,7 +34,7 @@ Improve comparisons and filtering, help listeners rediscover neglected favorites
 - Verify clean builds, installation, login, playback, updates, and removal on each advertised platform.
 - Establish stable macOS signing and a distribution/notarization path.
 - Publish corresponding source, dependency notices, checksums, and clear platform limitations.
-- Capture current Moosik screenshots and a short walkthrough using a demo account or synthetic library.
+- Record a short walkthrough using a demo account or synthetic library. Current Moosik screenshots with synthetic listening history are in the README.
 
 ## Design principles
 
