@@ -1,4 +1,24 @@
-# Building refryt
+# Building Moosik
+
+> **Moosik source preview:** clean source builds are the entry point. The packaging and release sections below are inherited Refryt implementation notes; their filenames and bundle branding have not yet been migrated, and they are not a claim that Moosik installers have been published or validated on every platform.
+
+## Clone and run
+
+```sh
+git clone https://github.com/AtotheY/moosik.git
+cd moosik
+```
+
+On Apple Silicon macOS, install a current Rust toolchain (at least 1.90) and the playback dependencies. For an existing Homebrew installation:
+
+```sh
+brew install mpv yt-dlp
+cargo run --locked --release -p refryt --bin refryt
+```
+
+The repository's `.cargo/config.toml` includes `/opt/homebrew/lib` for Apple Silicon linking. A different Homebrew prefix needs an equivalent linker path. Rust and Cargo must already be on your PATH. The main UI is Moosik; internal crate, binary, and existing data-directory names remain `refryt`.
+
+`ark-cargo.sh` and `ark-package.sh` reuse a maintainer's sibling toolchain and an existing app bundle. They are not portable prerequisites or the recommended starting point for a fresh clone. Use standard Cargo commands for contributions.
 
 ## Prerequisites
 

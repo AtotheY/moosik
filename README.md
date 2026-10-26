@@ -1,276 +1,130 @@
-> **Moosik — personal music app, 0.1.14+ark.7**
-> New: private listening ledger, detailed song/artist/album/genre stats, custom recaps,
-> local tags/ratings, and full JSON/CSV/SQLite exports. See [the stats guide](docs/listening-stats.md).
-> App name: Moosik. Existing bundle identity, Keychain identifiers, and data locations are
-> retained so your account, preferences, Dock link, and library survive the rename.
-> Default icon: Ceramic Eclipse in terracotta. Settings → Appearance offers ten saved
-> finishes that update the running Dock icon, app UI, and tray immediately. Finder and the
-> not-running launcher use the Ceramic bundle default. Ten material/color options and their
-> generation prompts are in `assets/branding/moosik/eclipse/`.
-> Based on upstream v0.1.14 (commit `12e899c4b941728680c42ba1a3841d92769cd5f2`).
-> The upstream remote is retained for deliberate source updates. This fork does not offer
-> upstream binary updates, which would remove the security changes below.
->
-> On macOS, the reusable YouTube session is stored in Keychain under service
-> `com.sistilli.refryt`, account `youtube-session-v1`. First launch verifies a round trip
-> before removing the legacy `browser.json`; failures preserve the legacy file and stop
-> startup instead of silently signing out or saving a plaintext fallback. Sign-out reports
-> credential deletion failures. Session debug output is redacted.
->
-> Playback reporting accepts only HTTPS on port 443 at `youtube.com`, `www.youtube.com`,
-> or `music.youtube.com`, with the exact playback/watchtime paths. Credential clients do
-> not follow redirects. Sign-in handoff files are created owner-only and without replacing
-> existing files. Google sign-in still uses the OS WebKit cookie store for session renewal;
-> Keychain does not make an already compromised Mac safe.
->
-> Local build: `scripts/ark-cargo.sh test --locked -p refryt --lib credential_store`,
-> `scripts/ark-cargo.sh test --locked -p refryt --lib trusted_requests`, then
-> `scripts/ark-package.sh`. The wrapper uses the project-local Rust toolchain and the
-> existing app's bundled playback libraries. Packaging reuses those libraries, yt-dlp
-> and artwork; it rebuilds the Refryt executable, not every third-party binary.
-> Keep the GPL license and upstream attribution when distributing changes.
-
 <p align="center">
-  <img src="assets/icons/app/moosik-256.png" width="96" alt="Moosik icon">
+  <img src="assets/icons/app/moosik-256.png" width="100" alt="Moosik Ceramic Eclipse app icon">
 </p>
 
-<h1 align="center">Moosik</h1>
+# Moosik — a YouTube Music desktop client for serious listeners
 
-<p align="center">A native YouTube Music client for Linux, Windows and macOS.</p>
+**YouTube's music. A listener's app.**
 
-<p align="center">
-  <a href="https://github.com/gridoe/refryt/releases/latest"><img src="https://img.shields.io/github/v/release/gridoe/refryt" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue" alt="Licence: GPL-3.0-or-later"></a>
-  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey" alt="Platforms: Linux, Windows, macOS">
-</p>
+Moosik is an open-source YouTube Music client with a native desktop interface, detailed listening stats, custom recaps, and a growing set of tools for people who care about their music library. Love YouTube Music's selection, but want a different UI? That's what we're building.
 
-<p align="center">
-  <a href="assets/screenshots/home-classic.png"><img src="assets/screenshots/home-classic.png" width="49%" alt="Home in the classic dark theme"></a>
-  <a href="assets/screenshots/home-catppuccin-frappe-blur.png"><img src="assets/screenshots/home-catppuccin-frappe-blur.png" width="49%" alt="Home with the queue and lyrics open, in the Catppuccin Frappe scheme at 100% transparency on Wayland"></a>
-</p>
+Our ambition is to make everyday listening feel better than Spotify: effortless queues, thoughtful library organization, and a listening history you can actually explore. This is an early project, and that ambition guides the roadmap.
+
+**Built on [Refryt](https://github.com/gridoe/refryt), created by [gridoe](https://github.com/gridoe) and contributors.** Moosik is an independent fork; most of its playback engine and original desktop interface come from their work. The original history and GPL license are preserved.
+
+[Get started](#get-started) · [Listening stats](docs/listening-stats.md) · [Roadmap](docs/ROADMAP.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
+
+> **Developer preview.** Moosik is running and being tested on Apple Silicon Macs. There are no published Moosik installers yet. Windows and Linux support is inherited from Refryt and needs validation with our changes. Start from source if you're comfortable with development builds.
+
+## Built for the way you listen
+
+### Your listening history, with the details left in
+
+Explore listening time by **song, artist, album, and your own genre tags**. See repeat favorites, new discoveries, skips, completed listens, streaks, and when you listen most. Pick any date range and make your own recap instead of waiting for the end of the year.
+
+Recording starts with playback in Moosik. It measures observed listening rather than counting paused or buffering time as music. Genres are manually assigned; unavailable metadata stays unknown. [See the definitions and limitations](docs/listening-stats.md).
+
+### Your data, on your computer
+
+The listening ledger lives locally in SQLite. Export song stats as CSV, the ledger as JSON, a database backup, or a recap as Markdown. Add personal star ratings and mood tags without publishing them to your YouTube profile.
+
+These local stats are separate from YouTube's own account history. There is no cross-device history import or stats sync yet.
+
+### A desktop music player that feels like one
+
+Browse Home, albums, artists, search, and your library in a native Rust/egui interface. Use keyboard shortcuts, synced lyrics, the fullscreen player, and the queue. Hover a song for its **⋮** menu without shifting the row.
+
+Refryt already provides the core listening experience, editable YouTube playlists, local-file playlists, themes, and desktop integrations. Moosik builds on that foundation with listener-focused stats and interface improvements.
+
+### Make it feel like yours
+
+Choose from the inherited theme collection, artwork-inspired headers, resizable sidebars, and transparency controls. Moosik adds ten Eclipse icon finishes, with Ceramic as the default; the live icon picker is implemented on macOS.
 
 <details>
-<summary>More screenshots</summary>
+<summary>Preview the interface foundation inherited from Refryt</summary>
 
 <p align="center">
-  <a href="assets/screenshots/macos-home-classic-blur.png"><img src="assets/screenshots/macos-home-classic-blur.png" width="49%" alt="Home on macOS in the classic dark theme at full transparency with background blur"></a>
-  <a href="assets/screenshots/macos-fullscreen-player.png"><img src="assets/screenshots/macos-fullscreen-player.png" width="49%" alt="The fullscreen player on macOS with synced lyrics, transparent with background blur"></a>
+  <img src="assets/screenshots/home-catppuccin-frappe-blur.png" width="960" alt="Refryt's native YouTube Music desktop interface with an artwork-led library, queue and lyrics, inherited by Moosik">
 </p>
 
-<p align="center">
-  <a href="assets/screenshots/album.png"><img src="assets/screenshots/album.png" width="49%" alt="An album page with its header tinted from the cover"></a>
-  <a href="assets/screenshots/artist.png"><img src="assets/screenshots/artist.png" width="49%" alt="An artist page with its banner and top songs, and the queue open"></a>
-</p>
-
-<p align="center">
-  <a href="assets/screenshots/fullscreen-lyrics.png"><img src="assets/screenshots/fullscreen-lyrics.png" width="49%" alt="The fullscreen player with synced lyrics"></a>
-  <a href="assets/screenshots/spotify-theme.png"><img src="assets/screenshots/spotify-theme.png" width="49%" alt="Search results and the queue in the Spotify theme"></a>
-</p>
-
-<p align="center">
-  <a href="assets/screenshots/icon-rail-and-queue.png"><img src="assets/screenshots/icon-rail-and-queue.png" width="49%" alt="Explore with the sidebar folded to the icon rail and the queue open"></a>
-  <a href="assets/screenshots/settings.png"><img src="assets/screenshots/settings.png" width="49%" alt="Settings, Appearance"></a>
-</p>
+This is an upstream Refryt screenshot, retained with credit. It shows the shared interface foundation, not Moosik's new listening-stats screens or a promised release build.
 
 </details>
 
-refryt is a desktop client for YouTube Music written in Rust. There is no browser engine behind it. Playback goes through mpv, and the app talks to YouTube through the same internal API the website uses.
+## Get started
 
-- Home, Explore, search, a library, synced lyrics, an editable queue and music videos.
-- 23 themes, with optional window transparency and background blur.
-- Memory use is typically between 100 and 300 MB, depending on the session.
-- Packages for Linux (AppImage and Flatpak), Windows (installer, MSI and zip, plus an ARM64 build) and macOS (Apple Silicon DMG).
+**Current version: `0.1.14+ark.7` — source preview.**
 
-> [!NOTE]
-> Only the Linux builds have had daily use. The Windows and macOS builds have had much less testing.
+| Platform | Moosik status |
+| --- | --- |
+| macOS, Apple Silicon | Locally built and tested; public installer and signing work are pending |
+| Windows, x64 / ARM64 | Upstream build scripts exist; Moosik builds and hardware testing are pending |
+| Linux | Upstream AppImage / Flatpak tooling exists; Moosik validation is pending |
+| macOS, Intel | Not part of the current release workflow |
+| iOS / Android | No Moosik app available |
 
-## Install
+### Build from source
 
-Packages are on the [releases page](https://github.com/gridoe/refryt/releases). Each release has a `refryt-<version>-SHA256SUMS.txt`, and `sha256sum -c` against it checks the downloads.
-
-### macOS
-
-The app is built for Apple Silicon only. libmpv and yt-dlp are bundled in it. It is signed ad hoc and not notarised, so macOS refuses the first launch: run `xattr -cr /Applications/Refryt.app` once, or allow the app in System Settings under Privacy & Security.
-
-#### Disk image
-
-1. Download `refryt-<version>-macos-arm64.dmg`.
-2. Open the image and drag Refryt to Applications.
-
-#### Homebrew
-
-The project's [Homebrew](https://brew.sh) tap installs the same image:
+Install Rust **1.90 or newer** and the platform dependencies in the [build guide](docs/BUILDING.md). The app uses `libmpv` for playback; `yt-dlp` supplies fallback resolution and other media features.
 
 ```sh
-brew install --cask gridoe/tap/refryt
+git clone https://github.com/AtotheY/moosik.git
+cd moosik
+cargo run --locked --release -p refryt --bin refryt
 ```
 
-`brew upgrade --cask refryt` updates it.
+The internal crate and binary names are still `refryt`. Some bundle identifiers and storage paths also retain their original names to preserve existing installations. The `ark-*` scripts are maintainer-specific helpers, not a clean-install setup for other computers.
 
-### Linux
+Follow [Moosik releases](https://github.com/AtotheY/moosik/releases) for future packages. Refryt's Homebrew, Scoop, AUR, and upstream releases install **Refryt**, not this fork. Automatic upstream binary updates are disabled in Moosik.
 
-#### AppImage
+## What we're building next
 
-1. Download `refryt-<version>-x86_64.AppImage`.
-2. Make it executable with `chmod +x` and run it.
+- **Fluid drag and drop:** reorder the queue, drop songs into playlists, and insert tracks exactly where you want them.
+- **Private music organization:** client-only playlists of streamed YouTube tracks, clearly separated from YouTube account playlists.
+- **Deeper discovery in your own history:** richer comparisons, filters, and ways to revisit music you loved.
+- **Install and go:** branded, verified desktop packages and a dependable update path.
 
-From a source checkout, `./scripts/appimage-install.sh install` copies the AppImage to `~/.local/bin` and adds a launcher entry and icons, and `./scripts/appimage-install.sh uninstall` removes them. Uninstalling leaves `~/.config/refryt` and the downloads in place.
+These are planned improvements, not shipped features. [The roadmap](docs/ROADMAP.md) explains the current boundaries and what would make each step complete.
 
-#### Flatpak
+## Questions
 
-Refryt is coming to Flathub soon. Until then, the Flatpak is installed from the file:
+### Is this a different YouTube Music UI or just the website in a window?
 
-1. Download `refryt-<version>-x86_64.flatpak`.
-2. Run `flatpak install --user refryt-<version>-x86_64.flatpak`. Flatpak offers to fetch the GNOME 51 runtime the first time.
-3. Start it with `flatpak run io.github.gridoe.refryt`.
+The main interface is native Rust/egui, inherited from Refryt. Moosik connects to YouTube Music for browsing and playback; it does not simply wrap the YouTube Music website. An embedded web view is used for Google sign-in.
 
-mpv and yt-dlp are included. Inside the sandbox the browser import and the Launch on startup setting are hidden, because neither can work there.
+### Is Moosik a Spotify alternative?
 
-#### Arch Linux (AUR)
+It is an alternative **desktop interface for YouTube Music**, aimed at listeners who like Spotify's desktop interactions and want deeper personal stats. It uses YouTube's service and catalog, not Spotify's. Spotify import and full Spotify-style drag and drop are not implemented yet.
 
-An unofficial [AUR package](https://aur.archlinux.org/packages/refryt-bin), `refryt-bin`, repacks the AppImage above with a launcher entry and icons:
+### Will playlists appear on my YouTube account?
 
-1. Install it with an AUR helper, for example `yay -S refryt-bin` or `paru -S refryt-bin`.
-2. Start it from the application launcher, or with `refryt`.
+**YouTube playlist edits sync to YouTube.** Their visibility follows the playlist's YouTube settings; Moosik does not make them private automatically. Existing local playlists are for local audio files. Private client-only playlists of streamed YouTube songs are on the roadmap.
 
-It depends on the system `webkit2gtk-4.1` (for the in-app sign-in window) and `yt-dlp`, and tracks upstream releases.
+### Does it include my old YouTube Music listening history?
 
-### Windows
+No. The detailed local ledger records playback observed in this Moosik installation. It does not backfill your Google account history or capture listening on another device. Your personal genre labels, ratings, and exports stay local unless you choose to share them.
 
-#### Installer
+### Do I need YouTube Music Premium?
 
-Download `refryt-<version>-windows-x86_64-setup.exe` and run it. It installs to Program Files, adds a Start menu entry and registers an uninstaller. The installer is unsigned, so SmartScreen warns on the first run.
+Moosik follows Refryt's intended use with YouTube Premium or YouTube Music Premium. The inherited download feature checks for Premium. Moosik does not provide a subscription or grant rights to content; availability depends on YouTube and your account.
 
-#### MSI
+### How is my account stored?
 
-For managed or silent installs, `refryt-<version>-windows-x86_64.msi` installs the same files with no setup screens, for example with `msiexec /i refryt-<version>-windows-x86_64.msi /qn`. It uses the same folder as the setup, so install one or the other.
+On macOS, Moosik stores its reusable YouTube session in Keychain and verifies migration before removing the legacy session file. That protection is macOS-specific. Windows and Linux session storage has not received the equivalent Moosik migration. Google sign-in also uses the platform web view. Never share session files, cookies, or raw account diagnostics in an issue.
 
-#### Scoop
+## Help shape Moosik
 
-The project's [Scoop](https://scoop.sh) bucket installs the zip:
+We're building this in the open for people who listen all day, collect albums, obsess over queues, and want more from their music history.
 
-```powershell
-scoop bucket add gridoe https://github.com/gridoe/scoop-bucket
-scoop install gridoe/refryt
-```
+[Tell us where listening gets frustrating](https://github.com/AtotheY/moosik/issues/new?template=feature.yml), report a reproducible bug, or help test a platform. Design contributions should show the interaction in context and match the app's existing spacing, typography, and controls. See [CONTRIBUTING.md](CONTRIBUTING.md) before starting a larger change.
 
-`scoop update refryt` updates it.
+Star the repository if you want to find it again; use **Watch → Custom → Releases** for release notifications.
 
-#### Zip
+## Credits and license
 
-Download `refryt-<version>-windows-x86_64.zip`, extract the whole folder and run `refryt.exe`. The executable needs the DLLs next to it.
+**Refryt is the foundation of Moosik.** Thank you to [gridoe](https://github.com/gridoe), [Refryt's contributors](https://github.com/gridoe/refryt/graphs/contributors), and the projects below. This fork began at Refryt v0.1.14 ([`12e899c`](https://github.com/gridoe/refryt/commit/12e899c4b941728680c42ba1a3841d92769cd5f2)). Its playback, API integration, original layout, and much of the desktop functionality are their work.
 
-#### Windows on ARM
-
-Use `refryt-<version>-windows-arm64.msi` or `refryt-<version>-windows-arm64.zip`; Scoop picks the ARM64 zip by itself. This is a native ARM64 build and has not been tested on ARM hardware. The x64 build also runs there through Windows' emulation.
-
-To build any of these from source, see [Build from source](#build-from-source).
-
-### Updates
-
-When refryt starts, it asks GitHub for the latest release. If that release is newer, refryt offers it. Nothing is installed until you click, and you can turn the check off, or run it yourself, in Settings, About.
-
-- The Windows setup and MSI, and the AppImage, update themselves. **Update and restart** downloads the new file and checks it against the release's `SHA256SUMS`. On Windows, refryt then closes, runs the installer and starts again. Windows may ask for permission. The AppImage replaces itself and restarts.
-- The Flatpak, the macOS image, the Windows zip, Homebrew, Scoop and the AUR package only show that a new version is out, with a link to the release. Update those the way you installed them.
-
-## Disclaimer
-
-> [!IMPORTANT]
-> refryt is not a piracy tool. It hosts, shares and unlocks no content. Every song is streamed from YouTube under the account that is signed in.
-
-Premium: refryt is intended for use with a YouTube Premium or YouTube Music Premium subscription, which provides ad-free and background playback. Downloads are available only when the signed-in account has Premium; the app checks the account's Paid memberships page and shows the result in Settings. Downloaded files are for personal offline listening and should not be redistributed.
-
-Account: likes, playlist edits and listening history are saved to the signed-in YouTube account, so they also appear on the website and in the mobile apps.
-
-Affiliation: refryt is an unofficial client. It is not affiliated with, endorsed by or sponsored by YouTube or Google, and "YouTube" and "YouTube Music" are trademarks of Google LLC. The app uses YouTube's undocumented internal API, and third-party clients fall outside YouTube's Terms of Service. Use is at the user's own discretion.
-
-## Features
-
-- Search by type. Choosing Songs, Albums or Artists asks YouTube for that category directly, instead of filtering one mixed list.
-- Playlists. They can be created, renamed and reordered by dragging. Adding a song that is already in a playlist asks first. Playlists the user owns show YouTube's suggestions, each with a + button.
-- Liked songs. A liked song shows its thumb in search, on Home and in every list. Each artist page has a tile with the songs liked by that artist.
-- Home order. Settings lets the user put Home's sections in any order. YouTube decides which sections exist and sends them in batches, so a section that arrives late is added below what is already on screen. The Strict Home order switch, off by default, waits a few seconds longer for the top seven sections before Home is shown.
-- Fullscreen player. It shows the cover, the song information and synced lyrics, with a queue drawer. F opens it and Esc closes it.
-- Local files. A folder added in Settings can be browsed like a file tree, and any folder can become a playlist.
-- Downloads, with Premium. Songs and whole pages can be saved to `~/Music/refryt` for offline listening, with tags and cover art embedded. A downloaded song plays from disk even when the connection is up.
-- Offline mode. Without a connection the app shows a banner and a shortcut to the downloads, and reloads the page when the connection returns.
-- Playback. mpv plays the audio, with an audio quality setting, volume normalisation from YouTube's loudness data, and autoplay that continues when the queue runs out.
-- Brand accounts. If a Google account has more than one channel, the account menu at the top switches between them.
-- Desktop integration. A tray icon, start on boot, media keys and the system media controls (MPRIS on Linux, SMTC on Windows, Now Playing on macOS). Discord Rich Presence is available and off by default.
-- Resizable sidebars. Both sides can be dragged, and the widths are remembered. The left one folds down to an icon rail with just the navigation icons and the playlist covers.
-
-## Using refryt
-
-### Keyboard shortcuts
-
-The shortcuts follow Spotify's desktop app.
-
-| Key | Action |
-|---|---|
-| Space | Play or pause |
-| Up / Down | Previous / next song |
-| M | Mute |
-| F | Open or close the fullscreen player |
-| Esc | Close the queue drawer, then the fullscreen player |
-| Ctrl + S | Shuffle |
-| Ctrl + R | Cycle repeat mode |
-| Ctrl + K or Ctrl + L | Jump to search |
-| ? or F1 | Show the full list |
-| F2 | Show the performance overlay |
-
-On macOS the Ctrl shortcuts use Cmd.
-
-A song is selected with one click and played with two, as in Spotify. The "Double-click to play" setting changes that so one click plays. The mouse's back and forward buttons move through the page history.
-
-### Themes and transparency
-
-The 23 bundled themes are plain CSS files in the `themes` folder of the config folder, and [docs/THEMES.md](docs/THEMES.md) describes the format. A theme file can be edited, added or deleted. The app reads the folder when its window regains focus and when Settings is opened. Album and playlist headers can take their colour from the cover art, which is on by default.
-
-Settings has a transparency slider and a background blur switch. Blur depends on the system: it works on KDE Plasma under Wayland, in compositors that implement the ext-background-effect protocol (niri, GNOME 51 and newer), on Windows, where it is the system's acrylic, and on macOS. It has been tested on KDE Plasma. A Card outlines switch adds a thin edge around each panel, and it is on by default.
-
-### Signing in
-
-The app can sign in from its own window on Linux, Windows and macOS. It can also use the session of a browser that is already signed in: Chrome, Chromium, Firefox, Brave, Vivaldi or Edge. On Windows only Firefox is offered, because the other browsers encrypt their cookies in a way other programs cannot read. The Flatpak cannot see browser profiles, so it hides the browser option and signs in through the app's own window. A third option on Settings' Account tab is pasting the cookie request header copied from a browser's developer tools, for when neither of the other two can be used.
-
-Signed out, the app still searches and plays. It has no library.
-
-### Where the data lives
-
-- The config folder holds the settings, the themes, the saved session, a cache of the liked songs and the log. On Linux it is `~/.config/refryt`, on macOS `~/Library/Application Support/refryt`, and in the Flatpak `~/.var/app/io.github.gridoe.refryt/config/refryt`.
-- The session is a cookie stored with owner-only permissions, since it works like a password.
-- Downloads go to `~/Music/refryt`.
-
-The app has no telemetry. It connects to YouTube, to [LRCLIB](https://lrclib.net) for synced lyrics, to GitHub to check for a newer release (a setting turns that off), and to Discord's local client when Rich Presence is turned on. After a crash it writes a report to the config folder and offers it on the next launch, to copy or to open as a prefilled GitHub issue. Nothing is sent automatically.
-
-## Status
-
-The project is before 1.0 and changes quickly.
-
-| Platform | Package | State |
-|---|---|---|
-| Linux | AppImage, Flatpak | Used and tested regularly |
-| Windows | Installer, MSI, zip; ARM64 MSI and zip | Cross-compiled from the Linux sources; limited testing on real hardware |
-| macOS | DMG, Apple Silicon only | Home, playback, the tray, the sign-in window, transparency and blur tested by hand; media keys, Now Playing and the browser cookie import untested |
-
-Podcasts are not supported. YouTube changes its internal API without notice, and a change can break playback or a page until a fix is released, usually within a few days.
-
-Bugs go to the [issue tracker](https://github.com/gridoe/refryt/issues). The log in the config folder usually shows what went wrong; [CONTRIBUTING.md](CONTRIBUTING.md) lists what to include, and how to send a fix.
-
-## Build from source
-
-The repository is a Cargo workspace with a `Justfile`. `just` builds and runs the app, `just release` makes the optimised build, and `just check` runs formatting, clippy and the tests. Building needs Rust and libmpv. yt-dlp is optional; playback falls back to it when YouTube does not return a stream directly. [docs/BUILDING.md](docs/BUILDING.md) covers the full setup, the Windows cross-build, the Flatpak and the release process.
-
-The app is built with:
-
-- Rust, with [`egui`/`eframe`](https://github.com/emilk/egui) for the interface
-- [`mpv`](https://mpv.io/) through `libmpv2` for playback
-- YouTube's own `player` endpoint for streams, with [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) as the fallback
-- [`ytmapi-rs`](https://github.com/nick42d/youtui) for YouTube Music's InnerTube API
-- `tokio` and `reqwest` with `rustls` for networking
-- `glow` (OpenGL) for drawing on Linux, and `wgpu` on Windows (DirectX 12) and macOS (Metal)
-- `lofty`, `walkdir` and `rfd` for local files
-
-## Credits
+Moosik's changes include a local listening ledger and recap interface, macOS session-storage hardening, Eclipse branding and icon choices, and song-row menu improvements. Moosik is maintained independently by [AtotheY](https://github.com/AtotheY). Please report fork-specific issues here rather than sending them upstream.
 
 - **[Sonora](https://github.com/sonorahq/sonora)** and its
   [`ytmusic-rs`](https://github.com/sonorahq/ytmusic-rs): asking YouTube's `player` endpoint
@@ -294,6 +148,6 @@ The app is built with:
   [Solarized](https://ethanschoonover.com/solarized) and Spotify's own colours. Each file in
   `crates/refryt/themes` names its source.
 
-## Licence
+Licensed under **[GPL-3.0-or-later](LICENSE)**, including this fork's changes. Existing copyright and license notices remain in place. When distributing binaries, provide the corresponding source and required notices under the GPL. Bundled dependencies retain their respective licenses.
 
-[GPL-3.0-or-later](LICENSE).
+Moosik is unofficial and is not affiliated with or endorsed by YouTube, Google, Spotify, or Refryt's maintainers. YouTube and YouTube Music are trademarks of Google LLC. It relies on undocumented YouTube interfaces that can change without notice; continued compatibility is not guaranteed. Use remains subject to the applicable service terms.

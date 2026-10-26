@@ -117,8 +117,8 @@ SQLite backup with integrity check. Existing playback/queue tests are also run.
 Commands:
 
 ```
-./scripts/ark-cargo.sh test --locked -p refryt --lib listening
-./scripts/ark-cargo.sh test --locked -p refryt --lib app::tests
-./scripts/ark-cargo.sh clippy --locked -p refryt --lib --tests -- -D warnings
-./scripts/ark-package.sh
+cargo test --locked -p refryt --lib listening
+cargo test --locked -p refryt --lib app::tests
+cargo clippy --locked -p refryt --lib --tests -- -D warnings
+cargo build --locked --release -p refryt --bin refryt
 ```

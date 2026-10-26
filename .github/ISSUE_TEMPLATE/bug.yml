@@ -9,7 +9,6 @@ body:
       options:
         - Linux AppImage
         - Linux Flatpak
-        - Arch Linux AUR (refryt-bin)
         - Windows setup (.exe)
         - Windows MSI
         - Windows zip
@@ -22,7 +21,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Shown in Settings, for example 0.1.10.
+      description: Shown in Settings; include the commit hash for a source build.
     validations:
       required: true
   - type: input
@@ -51,5 +50,5 @@ body:
     attributes:
       label: Before posting
       options:
-        - label: I looked over the log and removed anything private. I did not attach `browser.json` or `oauth.json`.
+        - label: I looked over the log and removed anything private. I did not attach session files, cookies, a listening database, or raw listening exports.
           required: true
