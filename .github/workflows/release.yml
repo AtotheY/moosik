@@ -1,4 +1,4 @@
-name: Release
+name: Legacy Refryt packages (manual only)
 
 # Pushing a v* tag builds every artifact, checks them with scripts/release.sh, and publishes the
 # GitHub release with its checksums. Running it by hand (Actions > Release > Run workflow) does
@@ -15,8 +15,6 @@ name: Release
 #   git push origin main && git tag -a v0.1.13 -m "refryt 0.1.13" && git push origin v0.1.13
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       platforms:
@@ -287,7 +285,7 @@ jobs:
   # Only a tag publishes. The release stays a draft until every file and the checksums are on it,
   # so nobody, the in-app updater included, sees one that is half there.
   publish:
-    if: github.ref_type == 'tag'
+    if: github.repository == 'gridoe/refryt' && github.ref_type == 'tag'
     needs: [check, verify]
     runs-on: ubuntu-24.04
     permissions:

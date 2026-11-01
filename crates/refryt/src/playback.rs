@@ -149,6 +149,9 @@ pub struct Store {
     pub repeat: Option<RepeatKind>,
     #[serde(default)]
     pub shuffle: bool,
+    /// The actual drawn order, including manual queue moves while shuffle is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shuffle_order: Option<Vec<usize>>,
     /// The last audible volume: muting leaves it as it was, to come back to.
     #[serde(default)]
     pub volume: f64,
@@ -259,10 +262,13 @@ mod tests {
             "an older store must not restore the view"
         );
 
+        assert!(store.shuffle_order.is_none());
+        store.shuffle_order = Some(vec![2, 0, 1]);
         store.video_open = true;
         let json = serde_json::to_string(&store).unwrap();
         let back: Store = serde_json::from_str(&json).unwrap();
         assert!(back.video_open);
+        assert_eq!(back.shuffle_order, Some(vec![2, 0, 1]));
     }
 
     /// A mute rides the store beside the volume it will come back to, and an older file

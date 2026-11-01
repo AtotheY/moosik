@@ -77,8 +77,9 @@ impl std::fmt::Debug for Session {
 pub fn load_session() -> Result<Option<Session>> {
     let path = cookie_path()?;
     #[cfg(target_os = "macos")]
-    let bytes = crate::credential_store::load_migrating(
-        &crate::credential_store::Keychain,
+    let bytes = crate::credential_store::load_migrating_store(
+        &crate::credential_store::Keychain::CURRENT,
+        &crate::credential_store::Keychain::LEGACY,
         &path,
         |bytes| {
             serde_json::from_slice::<StoredCookie>(bytes)
@@ -111,7 +112,7 @@ pub fn save_session(cookie: &str, source: Option<&str>) -> Result<()> {
     let bytes = serde_json::to_vec(&stored).context("could not encode the session")?;
     #[cfg(target_os = "macos")]
     return crate::credential_store::save_verified(
-        &crate::credential_store::Keychain,
+        &crate::credential_store::Keychain::CURRENT,
         &path,
         &bytes,
     );
@@ -136,7 +137,12 @@ pub fn save_session(cookie: &str, source: Option<&str>) -> Result<()> {
 pub fn delete_cookie() -> Result<()> {
     let path = cookie_path()?;
     #[cfg(target_os = "macos")]
-    return crate::credential_store::delete(&crate::credential_store::Keychain, &path);
+    {
+        // Remove the old service first, so sign-out cannot leave a session that
+        // a later launch would import again.
+        crate::credential_store::delete(&crate::credential_store::Keychain::LEGACY, &path)?;
+        crate::credential_store::delete(&crate::credential_store::Keychain::CURRENT, &path)
+    }
     #[cfg(not(target_os = "macos"))]
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),

@@ -5,6 +5,10 @@ the pill navigation to explore. Export and refresh actions are in **•••**;
 and privacy details are behind the **ⓘ** button. Recording begins with playback in Moosik
 0.1.14+ark.5; there is no fabricated backfill from YouTube's history.
 
+Open **Queue** in the sidebar for the live now-playing song and upcoming playback
+order, including shuffle and radio. Drag songs to reorder, use Cmd/Ctrl-click or
+Shift-click for a group, and use Undo to reverse an edit. See [Queue controls](queue.md).
+
 ## What you can explore
 
 - **Overview:** listening time, qualified plays, unique songs/artists, active days,
@@ -13,8 +17,10 @@ and privacy details are behind the **ⓘ** button. Recording begins with playbac
   app-muted time, average listening per active day, observation gaps, and sources.
 - **Songs:** searchable table with listening time, play/skip/completion counts,
   a song detail view with unique coverage and first/last session dates, and sorting by time, plays,
-  skips, completions, recency, title, or personal star rating. Click a row to
-  add comma-separated genres and mood tags and a 0–5 rating (0 = unrated).
+  skips, completions, recency, title, or personal star rating. Song rows use the regular
+  playback controls and right-click menu, including Start Mix and queue actions.
+  Use the row’s info button for listening details, comma-separated genres and mood
+  tags, and a 0–5 rating (0 = unrated).
 - **Artists / Albums / Genres:** rankings by listening time, with play and song
   counts. Every credited artist and every assigned genre receives full credit;
   these group totals overlap, while the headline total counts each second once.

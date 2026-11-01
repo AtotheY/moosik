@@ -7,8 +7,9 @@
 # `backend::yt_dlp_program` looks first). Nothing outside macOS itself is needed at run time.
 #
 # Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode 26 for
-# actool (the icon) and the command line tools for iconutil, sips, codesign and hdiutil. The app is ad-hoc signed, which is
-# enough to run on the machine that built it; a copy downloaded elsewhere needs the quarantine
+# actool (the icon) and the command line tools for iconutil, sips, codesign and hdiutil.
+# Local builds reuse the identity configured by setup-macos-signing.sh. Without one,
+# packaging falls back to ad-hoc signing; a copy downloaded elsewhere needs the quarantine
 # flag cleared (`xattr -cr Refryt.app`) or a real Developer ID signature.
 set -euo pipefail
 
@@ -20,15 +21,19 @@ command -v dylibbundler >/dev/null || { echo "missing dylibbundler: brew install
 version="$(cargo metadata --no-deps --format-version 1 \
     | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
 arch="$(uname -m)"
-app="dist/Refryt.app"
-zip="dist/refryt-$version-macos-$arch.zip"
+app_name="${MOOSIK_APP_NAME:-Refryt}"
+prefix=refryt
+[ "$app_name" != Moosik ] || prefix=moosik
+app="dist/$app_name.app"
+zip="dist/$prefix-$version-macos-$arch.zip"
 
 echo "building release binary"
-cargo build --release -p refryt --bin refryt
+cargo build --locked --release -p refryt --bin refryt
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
 cp target/release/refryt "$app/Contents/MacOS/refryt"
+cp LICENSE "$app/Contents/Resources/LICENSE"
 
 echo "building the icon"
 work="$(mktemp -d)"
@@ -46,7 +51,7 @@ if xcrun actool assets/icons/app/Refryt.icon --compile "$work/icon" \
     && [ -f "$work/icon/Assets.car" ]; then
     cp "$work/icon/Assets.car" "$app/Contents/Resources/Assets.car"
     cp "$work/icon/Refryt.icns" "$app/Contents/Resources/refryt.icns"
-    icon_keys="$icon_keys<key>CFBundleIconName</key><string>Refryt</string>"
+    icon_keys="$icon_keys<key>CFBundleIconName</key><string>$app_name</string>"
 else
     echo "actool could not compile the .icon (needs Xcode 26); falling back to a plain .icns"
     iconset="$work/refryt.iconset"
@@ -64,8 +69,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Refryt</string>
-    <key>CFBundleDisplayName</key><string>Refryt</string>
+    <key>CFBundleName</key><string>$app_name</string>
+    <key>CFBundleDisplayName</key><string>$app_name</string>
     <key>CFBundleIdentifier</key><string>io.github.gridoe.refryt</string>
     <key>CFBundleExecutable</key><string>refryt</string>
     $icon_keys
@@ -101,11 +106,19 @@ curl -fsSL -o "$app/Contents/MacOS/yt-dlp" \
     https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
 chmod +x "$app/Contents/MacOS/yt-dlp"
 
-echo "signing (ad hoc)"
+if [ "$app_name" = Moosik ]; then
+    cp assets/icons/app/moosik.icns "$app/Contents/Resources/moosik.icns"
+    /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile moosik' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$app/Contents/Info.plist" 2>/dev/null || true
+    rm -f "$app/Contents/Resources/Assets.car"
+    "$root/scripts/prepare-macos-updater.sh" "$app"
+fi
+
+echo "signing"
 # codesign fails now and then on a CI runner with nothing to say, and passes on the next try.
 signed=0
 for attempt in 1 2 3; do
-    if codesign --force --deep --sign - "$app"; then
+    if "$root/scripts/sign-macos.sh" --allow-adhoc "$app"; then
         signed=1
         break
     fi
@@ -118,11 +131,11 @@ rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 
 # A drag-to-Applications disk image: the app plus a symlink to /Applications.
-dmg="dist/refryt-$version-macos-$arch.dmg"
+dmg="dist/$prefix-$version-macos-$arch.dmg"
 stage="$work/dmg"
 mkdir -p "$stage"
 cp -R "$app" "$stage/"
 ln -s /Applications "$stage/Applications"
 rm -f "$dmg"
-hdiutil create -quiet -volname "Refryt" -srcfolder "$stage" -ov -format UDZO "$dmg"
+hdiutil create -quiet -volname "$app_name" -srcfolder "$stage" -ov -format UDZO "$dmg"
 echo "built $app, $zip and $dmg"

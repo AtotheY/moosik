@@ -320,8 +320,8 @@ pub struct Settings {
     pub sidebar_width: Option<f32>,
     /// The queue/lyrics panel's width as last dragged. Still capped by the window on the way in.
     pub panel_width: Option<f32>,
-    /// Ask GitHub for the latest release at launch, and offer it when it is newer. One request,
-    /// nothing installed without a click (see `crate::update`).
+    /// Offer Moosik updates with a quiet badge. Configured macOS bundles use Sparkle's
+    /// persisted scheduler preference; other builds check GitHub at launch.
     pub check_for_updates: bool,
     /// A release the user chose to skip: the launch check does not offer it again, though About
     /// still shows it and a manual check still offers it.

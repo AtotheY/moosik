@@ -14,7 +14,7 @@ Our ambition is to make everyday listening feel better than Spotify: effortless 
 
 [Get started](#get-started) · [Listening stats](docs/listening-stats.md) · [Roadmap](docs/ROADMAP.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
 
-> **Developer preview.** Moosik is running and being tested on Apple Silicon Macs. There are no published Moosik installers yet. Windows and Linux support is inherited from Refryt and needs validation with our changes. Start from source if you're comfortable with development builds.
+> **Early release.** [Download Moosik for Apple Silicon Macs](https://github.com/AtotheY/moosik/releases/latest). Updates are available inside the app after the first installation. Windows and Linux support is inherited from Refryt and still needs validation with our changes.
 
 ## A few ways to make it yours
 
@@ -49,7 +49,7 @@ These local stats are separate from YouTube's own account history. There is no c
 
 ### A desktop music player that feels like one
 
-Browse Home, albums, artists, search, and your library in a native Rust/egui interface. Use keyboard shortcuts, synced lyrics, the fullscreen player, and the queue. Hover a song for its **⋮** menu without shifting the row.
+Browse Home, albums, artists, search, and your library in a native Rust/egui interface. Use keyboard shortcuts, synced lyrics, the fullscreen player, and the dedicated [editable queue](docs/queue.md). Select and drag songs together, remove upcoming tracks, and undo queue edits. Songs in listening stats use the same playback and context-menu actions as regular song rows. Hover a song for its **⋮** menu without shifting the row.
 
 Refryt already provides the core listening experience, editable YouTube playlists, local-file playlists, themes, and desktop integrations. Moosik builds on that foundation with listener-focused stats and interface improvements.
 
@@ -59,11 +59,11 @@ Choose from the inherited theme collection, artwork-inspired headers, resizable 
 
 ## Get started
 
-**Current version: `0.1.14+ark.7` — source preview.**
+**Current version: `0.1.15` — first packaged Moosik release.**
 
 | Platform | Moosik status |
 | --- | --- |
-| macOS, Apple Silicon | Locally built and tested; public installer and signing work are pending |
+| macOS, Apple Silicon | DMG installer and signed in-app updates; see the release for macOS requirements |
 | Windows, x64 / ARM64 | Upstream build scripts exist; Moosik builds and hardware testing are pending |
 | Linux | Upstream AppImage / Flatpak tooling exists; Moosik validation is pending |
 | macOS, Intel | Not part of the current release workflow |
@@ -81,14 +81,14 @@ cargo run --locked --release -p refryt --bin refryt
 
 The internal crate and binary names are still `refryt`. Some bundle identifiers and storage paths also retain their original names to preserve existing installations. The `ark-*` scripts are maintainer-specific helpers, not a clean-install setup for other computers.
 
-Follow [Moosik releases](https://github.com/AtotheY/moosik/releases) for future packages. Refryt's Homebrew, Scoop, AUR, and upstream releases install **Refryt**, not this fork. Automatic upstream binary updates are disabled in Moosik.
+Download the DMG from [Moosik releases](https://github.com/AtotheY/moosik/releases), open it, and drag Moosik to Applications. This release is not Apple-notarized; macOS may require approval in System Settings → Privacy & Security on first launch. Refryt's Homebrew, Scoop, AUR, and upstream releases install **Refryt**, not this fork. Moosik's updater uses this fork's own signed GitHub releases; it never installs upstream Refryt binaries. See [in-app updates](docs/client-updates.md) for setup and release status.
 
 ## What we're building next
 
-- **Fluid drag and drop:** reorder the queue, drop songs into playlists, and insert tracks exactly where you want them.
+- **More drag and drop:** queue reordering is available now; dragging songs between Library and playlists is next.
 - **Private music organization:** client-only playlists of streamed YouTube tracks, clearly separated from YouTube account playlists.
 - **Deeper discovery in your own history:** richer comparisons, filters, and ways to revisit music you loved.
-- **Install and go:** branded, verified desktop packages and a dependable update path.
+- **More platforms:** validate and package Windows and Linux builds.
 
 These are planned improvements, not shipped features. [The roadmap](docs/ROADMAP.md) explains the current boundaries and what would make each step complete.
 

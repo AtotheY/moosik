@@ -22,7 +22,7 @@ use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
 use tray_icon::menu::{AboutMetadata, CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
 /// Where Help sends a reader who wants to know more.
-pub const WEBSITE: &str = "https://github.com/gridoe/refryt";
+pub const WEBSITE: &str = "https://github.com/AtotheY/moosik";
 
 /// What choosing one of the app's menu items asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,12 +44,13 @@ pub enum Command {
     Lyrics,
     FullscreenPlayer,
     Settings,
+    CheckUpdates,
     Shortcuts,
     Website,
 }
 
 impl Command {
-    const ALL: [Command; 19] = [
+    const ALL: [Command; 20] = [
         Command::PlayPause,
         Command::Next,
         Command::Previous,
@@ -67,6 +68,7 @@ impl Command {
         Command::Lyrics,
         Command::FullscreenPlayer,
         Command::Settings,
+        Command::CheckUpdates,
         Command::Shortcuts,
         Command::Website,
     ];
@@ -91,6 +93,7 @@ impl Command {
             Command::Lyrics => "ytm-menu-lyrics",
             Command::FullscreenPlayer => "ytm-menu-fullscreen-player",
             Command::Settings => "ytm-menu-settings",
+            Command::CheckUpdates => "ytm-menu-check-updates",
             Command::Shortcuts => "ytm-menu-shortcuts",
             Command::Website => "ytm-menu-website",
         }
@@ -206,11 +209,13 @@ impl MenuBar {
             }),
         );
         let settings = item(Command::Settings, "Settings…", cmd(Code::Comma));
+        let updates = item(Command::CheckUpdates, "Check for Updates…", None);
         let app_menu = Submenu::with_items(
             "Moosik",
             true,
             &[
                 &about,
+                &updates,
                 &separator(),
                 &settings,
                 &separator(),
@@ -297,7 +302,7 @@ impl MenuBar {
             true,
             &[
                 &item(Command::Shortcuts, "Keyboard Shortcuts", None),
-                &item(Command::Website, "Upstream Refryt on GitHub", None),
+                &item(Command::Website, "Moosik on GitHub", None),
             ],
         )
         .ok()?;

@@ -73,6 +73,12 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     {
         app.navigate(Route::History);
     }
+    if app.update.notice
+        && let Some(release) = &app.update.available
+        && crate::ui::update::indicator(&mut right, &p, &release.version)
+    {
+        app.show_update();
+    }
     // Whatever the right group took, plus a gap so the search never touches it.
     let reserved = (rect.right() - right.min_rect().left()).max(0.0) + RIGHT_GAP;
 

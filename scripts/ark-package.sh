@@ -27,6 +27,6 @@ cp "$root/assets/icons/app/moosik.icns" "$stage/Contents/Resources/moosik.icns"
 if [ -f "$stage/Contents/Resources/Assets.car" ]; then
     mv "$stage/Contents/Resources/Assets.car" "$root/.ark-build/upstream-icon-catalog-$(date +%s).car"
 fi
-codesign --force --deep --sign - "$stage"
-codesign --verify --deep --strict "$stage"
+"$root/scripts/prepare-macos-updater.sh" "$stage"
+"$root/scripts/sign-macos.sh" "$stage"
 printf 'Built %s (%s)\n' "$stage" "$version"

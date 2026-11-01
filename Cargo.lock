@@ -4926,11 +4926,13 @@ dependencies = [
 
 [[package]]
 name = "refryt"
-version = "0.1.14+ark.7"
+version = "0.1.15"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "bytes",
  "chrono",
+ "core-foundation 0.10.1",
  "directories",
  "discord-rich-presence",
  "dispatch2",
@@ -4980,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "refryt-resolve"
-version = "0.1.14+ark.7"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",

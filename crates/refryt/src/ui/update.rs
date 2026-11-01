@@ -13,12 +13,17 @@ use crate::widgets;
 pub(crate) struct State {
     /// A release newer than this build, once a check has found one.
     pub(crate) available: Option<crate::update::Release>,
+    /// Sparkle owns the macOS update session when the bundle is configured.
+    pub(crate) native: bool,
+    pub(crate) notice: bool,
     /// The window is open.
     pub(crate) open: bool,
     /// A check is in flight.
     pub(crate) checking: bool,
     /// A check found nothing newer, which About says until the next one.
     pub(crate) up_to_date: bool,
+    /// The release feed has not been published yet.
+    pub(crate) not_published: bool,
     /// The download, 0–100, while an install is under way. The window cannot be closed then:
     /// the app closes by itself once the update is ready.
     pub(crate) progress: Option<f32>,
@@ -175,7 +180,20 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
         app.update_later(&ctx, &release.version);
     }
     if later || skip {
+        app.update.notice = false;
         app.update.open = false;
         app.update.error = None;
     }
+}
+
+/// A quiet top-bar reminder; shares the existing icon button's hit area and focus behavior.
+pub(crate) fn indicator(ui: &mut egui::Ui, p: &theme::Palette, version: &str) -> bool {
+    let response = widgets::icon_button(ui, p, crate::icons::Icon::Download, 18.0, true)
+        .on_hover_text(format!("Moosik {version} is available · Update"));
+    ui.painter().circle_filled(
+        response.rect.right_top() + egui::vec2(-4.0, 4.0),
+        3.0,
+        p.accent,
+    );
+    response.clicked()
 }

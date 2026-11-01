@@ -56,6 +56,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         // and the nav slot is better spent on the page YouTube puts there.
         (Route::Explore, Icon::Compass, "Explore"),
         (Route::Library, Icon::Library, "Library"),
+        (Route::Queue, Icon::ListMusic, "Queue"),
         (Route::Listening, Icon::TrendingUp, "Listening stats"),
     ] {
         let selected = app.current_route() == route;

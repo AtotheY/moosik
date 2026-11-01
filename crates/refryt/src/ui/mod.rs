@@ -20,6 +20,7 @@ pub mod moods;
 pub mod paste_cookies;
 pub mod player_bar;
 pub mod playlist;
+pub(crate) mod queue_edit;
 pub mod releases;
 pub mod search;
 pub mod settings;

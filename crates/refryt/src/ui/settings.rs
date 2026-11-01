@@ -100,6 +100,11 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
 
     // Updates: the launch check's switch, and what the last check found.
     let mut check = app.settings.check_for_updates;
+    #[cfg(target_os = "macos")]
+    if let Some(native_check) = crate::update::macos::automatic_checks() {
+        check = native_check;
+    }
+    let before_check = check;
     let (mut check_now, mut show) = (false, false);
     let (title, detail) = match &app.update.available {
         Some(release) => (
@@ -110,9 +115,20 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             "Checking for updates…".to_owned(),
             "Asking GitHub for the latest release.".to_owned(),
         ),
+        None if app.update.not_published => (
+            "Updates aren’t published yet".to_owned(),
+            "Check back when the first Moosik update is ready.".to_owned(),
+        ),
+        None if app.update.error.is_some() => (
+            "Couldn’t check for updates".to_owned(),
+            "Please try again later.".to_owned(),
+        ),
         None if app.update.up_to_date => (
             "Moosik is up to date".to_owned(),
-            format!("{} is the latest release.", env!("CARGO_PKG_VERSION")),
+            format!(
+                "No newer Moosik release than {} is available.",
+                env!("CARGO_PKG_VERSION")
+            ),
         ),
         None => (
             "Latest version".to_owned(),
@@ -126,7 +142,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             &p,
             "setting-check-updates",
             "Check for updates",
-            "Looks for a new release on GitHub when Moosik starts.",
+            "Shows a small update icon when a new Moosik release is available.",
             &mut check,
         );
         g.row(ui, &title, &detail, |ui| {
@@ -138,12 +154,16 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         });
     });
     let ctx = ui.ctx().clone();
-    app.update_settings(&ctx, |s| s.check_for_updates = check);
+    if check != before_check {
+        #[cfg(target_os = "macos")]
+        crate::update::macos::set_automatic_checks(check);
+        app.update_settings(&ctx, |s| s.check_for_updates = check);
+    }
     if check_now {
         app.check_for_update(true);
     }
     if show {
-        app.update.open = true;
+        app.show_update();
     }
 
     if app.logo.is_none() {

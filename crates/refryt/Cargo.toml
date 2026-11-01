@@ -143,7 +143,9 @@ eframe = { workspace = true, features = ["wgpu"] }
 # The in-app sign-in window (`webview_login.rs`) on macOS: WKWebView through wry, with tao's event
 # loop in the child process that exists for the window.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
 security-framework = "=3.7.0"
+core-foundation = "=0.10.1"
 wry = "0.57"
 tao = "0.37"
 # `tray.rs` brings the window back through AppKit directly: a hidden or minimized window gets no
@@ -164,7 +166,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 # asks `NSProcessInfo` whether this macOS has named WebKit data stores (14 and later); `chrome.rs`
 # reads the system's title-bar double-click preference.
 objc2-foundation = { version = "0.3", default-features = false, features = [
-    "std", "NSGeometry", "NSProcessInfo", "NSString", "NSUserDefaults", "NSData",
+    "std", "NSBundle", "NSError", "NSGeometry", "NSProcessInfo", "NSString", "NSUserDefaults", "NSData",
 ] }
 
 # Embeds refryt.ico as the .exe's own icon resource (build.rs) — unconditional, not under a

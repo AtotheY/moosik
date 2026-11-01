@@ -741,74 +741,139 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         group_row(app, ui, r, g, i, Tab::Artists);
     }
 }
+fn row_track(row: &listening::Row) -> crate::model::Track {
+    row.metadata
+        .clone()
+        .unwrap_or_else(|| listening::Metadata {
+            id: row.id.clone(),
+            title: row.name.clone(),
+            artists: vec![(row.subtitle.clone(), None)],
+            album: (!row.album.is_empty()).then(|| row.album.clone()),
+            artwork: row.artwork.clone(),
+            ..Default::default()
+        })
+        .to_track()
+}
+
+/// Shared song component, with the stats columns and a separate details affordance beside it.
 fn song_row(app: &mut App, ui: &mut egui::Ui, row: &listening::Row, index: usize, table: bool) {
     let p = app.palette;
-    let (rect, response) = ui.allocate_exact_size(
+    let track = row_track(row);
+    let (rect, _) = ui.allocate_exact_size(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
-        Sense::click(),
+        Sense::hover(),
     );
-    if ui.is_rect_visible(rect) {
-        row_hover(ui, &p, rect, &response);
-        ui.painter().text(
-            pos2(rect.left() + 16.0, rect.center().y),
-            Align2::CENTER_CENTER,
-            (index + 1).to_string(),
-            theme::regular(12.0),
-            p.dim,
-        );
-        let cover = Rect::from_min_size(
-            rect.min + vec2(36.0, 8.0),
-            vec2(theme::ART_SIZE, theme::ART_SIZE),
-        );
-        art(app, ui, cover, row.artwork.as_deref());
-        let wide = table && rect.width() > 650.0;
-        let medium = table && rect.width() > 460.0;
-        let reserve = if wide {
-            285.0
-        } else if medium {
-            180.0
-        } else {
-            95.0
-        };
-        let title = Rect::from_min_size(
-            pos2(cover.right() + 12.0, rect.top() + 8.0),
-            vec2((rect.width() - 88.0 - reserve).max(20.0), 20.0),
-        );
-        clipped(
-            ui,
-            &row.name,
-            title,
-            theme::medium(theme::ROW_TITLE_PT),
-            p.text,
-        );
-        clipped(
-            ui,
-            &row.subtitle,
-            title.translate(vec2(0.0, 20.0)),
-            theme::regular(12.0),
-            p.secondary,
-        );
-        let right = rect.right() - 12.0;
-        if wide {
-            value_at(ui, &p, rect, right - 210.0, &clock(row.listen_ms));
-            value_at(ui, &p, rect, right - 138.0, &row.plays.to_string());
-            value_at(ui, &p, rect, right - 72.0, &row.skips.to_string());
-            value_at(ui, &p, rect, right, &row.completed.to_string());
-        } else if medium {
-            value_at(ui, &p, rect, right - 80.0, &clock(row.listen_ms));
-            value_at(ui, &p, rect, right, &row.plays.to_string());
-        } else {
-            value_at(ui, &p, rect, right, &clock(row.listen_ms));
-        }
+    if !ui.is_rect_visible(rect) {
+        return;
     }
-    if response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("View listening details")
-        .clicked()
-    {
+    let wide = table && rect.width() > 650.0;
+    let medium = table && rect.width() > 460.0;
+    let reserve = if wide {
+        285.0
+    } else if medium {
+        180.0
+    } else {
+        95.0
+    };
+    let cell = Rect::from_min_max(rect.min, pos2(rect.right() - reserve - 32.0, rect.bottom()));
+    regular_song(app, ui, &track, cell, index, true);
+    let right = rect.right() - 44.0;
+    if wide {
+        value_at(ui, &p, rect, right - 210.0, &clock(row.listen_ms));
+        value_at(ui, &p, rect, right - 138.0, &row.plays.to_string());
+        value_at(ui, &p, rect, right - 72.0, &row.skips.to_string());
+        value_at(ui, &p, rect, right, &row.completed.to_string());
+    } else if medium {
+        value_at(ui, &p, rect, right - 80.0, &clock(row.listen_ms));
+        value_at(ui, &p, rect, right, &row.plays.to_string());
+    } else {
+        value_at(ui, &p, rect, right, &clock(row.listen_ms));
+    }
+    if details_button(ui, &p, rect, index, "View listening details").clicked() {
         select_song(app, row);
     }
 }
+
+fn details_button(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    rect: Rect,
+    index: usize,
+    tooltip: &str,
+) -> egui::Response {
+    let rect = Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(32.0, 32.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt(("song-details", index))
+            .max_rect(rect),
+        |ui| widgets::icon_button(ui, p, Icon::Info, 16.0, false).on_hover_text(tooltip),
+    )
+    .inner
+}
+
+fn regular_song(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    track: &crate::model::Track,
+    rect: Rect,
+    index: usize,
+    numbered: bool,
+) {
+    use crate::ui::{ListClick, RowSpec, is_active, track_subtitle};
+    let signed_in = app.signed_in();
+    let (click, action) = crate::ui::paint_grid_cell(
+        ui,
+        &app.palette,
+        &mut app.images,
+        &app.backend,
+        &app.liked,
+        rect,
+        index,
+        RowSpec {
+            number: numbered.then_some(index + 1),
+            rank: None,
+            trend: track.trend,
+            title: &track.title,
+            album_id: track.album_id.as_deref(),
+            subtitle: track_subtitle(track),
+            duration: track.duration,
+            plays: None,
+            explicit: track.explicit,
+            active: is_active(&app.now, &track.video_id),
+            playing: is_active(&app.now, &track.video_id) && !app.now.paused,
+            badge: None,
+            shape: widgets::ArtShape::Square,
+            hide_art: false,
+            thumbnail: track.thumbnail.as_ref(),
+            menu: Some(widgets::RowMenu {
+                track,
+                playlist_id: None,
+                playlists: &app.library.playlists.items,
+                signed_in,
+                queue_index: None,
+            }),
+            like: track.like,
+            show_rating: true,
+            quiet_like: false,
+            add_to: None,
+        },
+    );
+    if let Some(action) = action {
+        app.row_action(action);
+    }
+    match click {
+        Some(ListClick::Link(route)) => app.navigate(route),
+        Some(ListClick::Row(_)) => {
+            if is_active(&app.now, &track.video_id) {
+                app.toggle_playback();
+            } else {
+                app.play_row(vec![track.clone()], 0);
+            }
+        }
+        None => {}
+    }
+}
+
 fn value_at(ui: &egui::Ui, p: &theme::Palette, rect: Rect, x: f32, value: &str) {
     ui.painter().text(
         pos2(x, rect.center().y),
@@ -1004,7 +1069,7 @@ fn songs(app: &mut App, ui: &mut egui::Ui, r: &Report) {
 }
 fn table_header(ui: &mut egui::Ui, p: &theme::Palette) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
-    let right = rect.right() - 12.0;
+    let right = rect.right() - 44.0;
     let label = |x: f32, text: &str, align: Align2| {
         ui.painter().text(
             pos2(x, rect.center().y),
@@ -1272,36 +1337,46 @@ fn history(app: &mut App, ui: &mut egui::Ui, r: &Report) {
     ui.add_space(12.0);
     crate::ui::virtual_rows(ui, theme::ROW_HEIGHT, r.recent.len(), |ui, i| {
         let row = &r.recent[i];
-        let (rect, response) = ui.allocate_exact_size(
+        let track = row
+            .metadata
+            .as_ref()
+            .map(listening::Metadata::to_track)
+            .or_else(|| {
+                r.tracks
+                    .iter()
+                    .find(|t| t.id == row.track_id)
+                    .map(row_track)
+            })
+            .unwrap_or_else(|| {
+                listening::Metadata {
+                    id: row.track_id.clone(),
+                    title: row.title.clone(),
+                    artists: vec![(row.artist.clone(), None)],
+                    duration: row.duration,
+                    artwork: row.artwork.clone(),
+                    ..Default::default()
+                }
+                .to_track()
+            });
+        let (rect, _) = ui.allocate_exact_size(
             vec2(ui.available_width(), theme::ROW_HEIGHT),
-            Sense::click(),
+            Sense::hover(),
         );
-        if ui.is_rect_visible(rect) {
-            row_hover(ui, &p, rect, &response);
-            let cover = Rect::from_min_size(rect.min + vec2(8.0, 8.0), vec2(40.0, 40.0));
-            art(app, ui, cover, row.artwork.as_deref());
-            let wide = rect.width() > 620.0;
-            let reserve = if wide { 250.0 } else { 100.0 };
-            let title = Rect::from_min_size(
-                rect.min + vec2(60.0, 8.0),
-                vec2((rect.width() - 60.0 - reserve).max(20.0), 20.0),
-            );
-            clipped(ui, &row.title, title, theme::medium(14.0), p.text);
-            clipped(
-                ui,
-                &row.artist,
-                title.translate(vec2(0.0, 20.0)),
-                theme::regular(12.0),
-                p.secondary,
-            );
-            let right = rect.right() - 12.0;
-            if wide {
-                value_at(ui, &p, rect, right - 150.0, &clock(row.listen_ms));
-                value_at(ui, &p, rect, right, &local_date(row.at));
-            } else {
-                value_at(ui, &p, rect, right, &clock(row.listen_ms));
-            }
+        if !ui.is_rect_visible(rect) {
+            return;
         }
+        let wide = rect.width() > 620.0;
+        let reserve = if wide { 250.0 } else { 100.0 };
+        let cell = Rect::from_min_max(rect.min, pos2(rect.right() - reserve - 32.0, rect.bottom()));
+        regular_song(app, ui, &track, cell, i, false);
+        let right = rect.right() - 44.0;
+        if wide {
+            value_at(ui, &p, rect, right - 150.0, &clock(row.listen_ms));
+            value_at(ui, &p, rect, right, &local_date(row.at));
+        } else {
+            value_at(ui, &p, rect, right, &clock(row.listen_ms));
+        }
+
         let context: listening::Context = serde_json::from_str(&row.context).unwrap_or_default();
         let tooltip = format!(
             "{}\n{} listened · {:.0}% coverage\n{} · {}\n{} · Repeat {}",
@@ -1317,10 +1392,7 @@ fn history(app: &mut App, ui: &mut egui::Ui, r: &Report) {
             },
             context.repeat
         );
-        if response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(tooltip)
-            .clicked()
+        if details_button(ui, &p, rect, i, &tooltip).clicked()
             && let Some(track) = r.tracks.iter().find(|t| t.id == row.track_id)
         {
             select_song(app, track);

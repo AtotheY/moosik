@@ -87,6 +87,11 @@ pub enum Event {
         error: String,
         manual: bool,
     },
+    UpdateNotPublished {
+        manual: bool,
+    },
+    #[cfg(target_os = "macos")]
+    NativeUpdateFeedReady,
     /// The update's download, 0–100.
     UpdateProgress {
         percent: f32,
@@ -1110,13 +1115,36 @@ impl Backend {
         self.rt.spawn(async move {
             tokio::time::sleep(delay).await;
             let event = match crate::update::check(&http).await {
-                Ok(release) => Event::UpdateChecked {
-                    release: release.map(Box::new),
+                Ok(crate::update::Check::Available(release)) => Event::UpdateChecked {
+                    release: Some(Box::new(release)),
                     manual,
                 },
+                Ok(crate::update::Check::Current) => Event::UpdateChecked {
+                    release: None,
+                    manual,
+                },
+                Ok(crate::update::Check::NotPublished) => Event::UpdateNotPublished { manual },
                 Err(e) => Event::UpdateCheckFailed {
                     error: format!("{e:#}"),
                     manual,
+                },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn check_update_feed(&self, url: String) {
+        let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
+        self.rt.spawn(async move {
+            let event = match crate::update::probe_feed(&http, &url).await {
+                Ok(crate::update::FeedStatus::Ready) => Event::NativeUpdateFeedReady,
+                Ok(crate::update::FeedStatus::NotPublished) => {
+                    Event::UpdateNotPublished { manual: true }
+                }
+                Err(error) => Event::UpdateCheckFailed {
+                    error: format!("{error:#}"),
+                    manual: true,
                 },
             };
             Self::emit(&tx, &ctx, event);

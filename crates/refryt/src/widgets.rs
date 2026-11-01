@@ -2336,10 +2336,24 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // start off this response). Harmless everywhere else — nothing reads it unless that row
     // came from an editable playlist, and egui only treats a press as a drag once the pointer
     // has actually moved, so an ordinary click is unaffected.
-    let (rect, response) = ui.allocate_exact_size(
+    let queue_index = menu.as_ref().and_then(|m| m.queue_index);
+    let (rect, allocated) = ui.allocate_exact_size(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
-        Sense::click_and_drag(),
+        if queue_index.is_some() {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        },
     );
+    // Queue toolbar controls and virtual spacers change automatic widget ids.
+    // Keep the pressed occurrence's drag/focus identity stable across those frames.
+    let response = queue_index.map_or(allocated, |index| {
+        ui.interact(
+            rect,
+            ui.id().with(("ytm-queue-row", index)),
+            Sense::click_and_drag(),
+        )
+    });
     // Reserve the menu slot even at rest: no text, duration or rating moves on hover.
     let more_w = if menu.is_some() { 36.0 } else { 0.0 };
     let right_pad = 20.0 + more_w;
@@ -2450,7 +2464,13 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             && response
                 .interact_pointer_pos()
                 .is_some_and(|p| more_rect.contains(p)));
-    let activate = if on_more {
+    let queue_suppress = menu
+        .as_ref()
+        .and_then(|m| m.queue_index)
+        .is_some_and(|index| {
+            crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
+        });
+    let activate = if on_more || queue_suppress {
         false
     } else if (!hide_art
         && on_cover(
@@ -2472,9 +2492,12 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             None => response.clicked(),
         }
     };
-    let selected = menu
-        .as_ref()
-        .is_some_and(|m| is_selected(ui.ctx(), m.track.video_id.as_str()));
+    let selected = menu.as_ref().is_some_and(|m| {
+        m.queue_index.map_or_else(
+            || is_selected(ui.ctx(), m.track.video_id.as_str()),
+            |index| crate::ui::queue_edit::selected(ui.ctx(), index),
+        )
+    });
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::same(theme::RADIUS);
         // The selection (a single click in double-click mode) sits under the hover fill, so the
@@ -2705,7 +2728,10 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     if let (Some(m), Some(more)) = (menu.as_ref(), more_response.as_ref()) {
         let open = egui::Popup::is_id_open(
             ui.ctx(),
-            ui.id().with(("ytm-row-menu", m.track.video_id.as_str())),
+            match m.queue_index {
+                Some(index) => ui.id().with(("ytm-queue-row-menu", index)),
+                None => ui.id().with(("ytm-row-menu", m.track.video_id.as_str())),
+            },
         );
         more.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "More options")
@@ -2787,7 +2813,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     }
     RowClick {
         response,
-        link,
+        link: if queue_suppress { None } else { link },
         activate,
         action,
     }
@@ -2846,7 +2872,10 @@ fn row_menu_with_button(
 ) -> Option<super::ui::RowAction> {
     use super::ui::RowAction;
     let t = menu.track;
-    let id = ui.id().with(("ytm-row-menu", t.video_id.as_str()));
+    let id = match menu.queue_index {
+        Some(index) => ui.id().with(("ytm-queue-row-menu", index)),
+        None => ui.id().with(("ytm-row-menu", t.video_id.as_str())),
+    };
     let via_button = button.is_some_and(|b| b.clicked());
     let anchor_id = id.with("button-anchor");
     if via_button || response.secondary_clicked() {
@@ -2889,6 +2918,11 @@ fn row_menu_with_button(
     popup
         .show(|mui| {
             let mut choice = None;
+            if let Some(index) = menu.queue_index
+                && crate::ui::queue_edit::group_menu(mui, palette, index)
+            {
+                return None;
+            }
 
             // Block one: what to do with it now. No title header — you know which row you
             // right-clicked, and a truncated one only ate a row's worth of height.
@@ -2897,7 +2931,11 @@ fn row_menu_with_button(
                 mui.close();
             }
             if menu_item(mui, palette, Icon::ListStart, "Play next", None).clicked() {
-                choice = Some(RowAction::PlayNext(t.clone()));
+                if let Some(index) = menu.queue_index {
+                    crate::ui::queue_edit::play_next(mui.ctx(), index);
+                } else {
+                    choice = Some(RowAction::PlayNext(t.clone()));
+                }
                 mui.close();
             }
             if menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked() {
@@ -2909,6 +2947,10 @@ fn row_menu_with_button(
             {
                 choice = Some(RowAction::RemoveFromQueue(i));
                 mui.close();
+            }
+
+            if menu.queue_index.is_some() {
+                crate::ui::queue_edit::single_move_menu(mui, palette);
             }
 
             // Block two: where it lives. Save to library / Remove from library, when the row

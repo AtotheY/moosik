@@ -1,5 +1,21 @@
 # Moosik UI work
 
+## Local macOS builds
+
+Use `scripts/ark-package.sh` to package local builds and
+`scripts/sign-macos.sh <app-path>` when re-signing a local app. These reuse
+the certificate configured by `scripts/setup-macos-signing.sh`, preserving
+Keychain approval across rebuilds. Do not replace local signatures with
+`codesign --sign -` or change the bundle identifier. See
+`docs/macos-local-signing.md` for setup and distribution differences.
+For app verification, launch the signed Moosik bundle. Raw `cargo run`,
+`target/*/refryt`, and diagnostic binaries have separate signing identities
+and can trigger extra Keychain approvals if they load the user's session.
+Use dummy profiles/credentials for diagnostic tests; do not repeatedly run
+unsigned diagnostics against the saved login.
+
+## UI changes
+
 Before building UI, inspect Home, Library, and a detail page in the running app. Read `crates/refryt/src/theme.rs`, shared `widgets.rs`, and nearby `ui` implementations. Consult relevant visual references first.
 
 Use the existing Inter weights, semantic palette, page/section type sizes, 20pt page inset, 56pt rows, 40pt row artwork, pill filters, Lucide icons, themed menus, and artwork shapes. Prefer shared widgets over stock egui controls. Keep detail in drilldowns, tooltips, or dialogs; do not crowd the primary view with explanatory copy.

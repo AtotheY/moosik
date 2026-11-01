@@ -12,6 +12,8 @@ pub struct Query {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Row {
     #[serde(default)]
+    pub metadata: Option<Metadata>,
+    #[serde(default)]
     pub artwork: Option<String>,
     #[serde(default)]
     pub artist_keys: Vec<String>,
@@ -45,6 +47,8 @@ pub struct Group {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Recent {
+    #[serde(default)]
+    pub metadata: Option<Metadata>,
     #[serde(default)]
     pub track_id: String,
     #[serde(default)]
@@ -303,6 +307,7 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
             .collect::<Vec<_>>()
             .join(", ");
         let row = tracks.entry(meta.id.clone()).or_insert_with(|| Row {
+            metadata: Some(meta.clone()),
             id: meta.id.clone(),
             artwork: meta.artwork.clone(),
             artist_keys: meta
@@ -388,6 +393,7 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
         );
         if report.recent.len() < 1000 {
             report.recent.push(Recent {
+                metadata: Some(meta.clone()),
                 track_id: meta.id.clone(),
                 artwork: meta.artwork.clone(),
                 at: started,
@@ -499,6 +505,13 @@ mod tests {
             label: "Test".into(),
         };
         let report = build(&db, &q).unwrap();
+        let restored = report.tracks[0].metadata.as_ref().unwrap().to_track();
+        assert_eq!(restored.artists[1].id.as_deref(), Some("b"));
+        assert_eq!(restored.duration, Some(10));
+        assert_eq!(
+            report.recent[0].metadata.as_ref().unwrap().to_track(),
+            restored
+        );
         assert_eq!(report.listen_ms, 5000.0);
         assert_eq!(report.plays, 1);
         assert_eq!(report.completed, 1);

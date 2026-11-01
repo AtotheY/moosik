@@ -7,9 +7,9 @@
 //!   `SHA256SUMS`, and run it once the app has closed; the installer is followed by the new
 //!   version starting.
 //! - The AppImage downloads its successor beside itself, checks it, swaps it in and restarts.
-//! - Everything else only says that a new version exists and links the release: a Flatpak should
-//!   not replace itself from inside its sandbox, an unnotarised macOS bundle that rewrites itself
-//!   trips Gatekeeper, and the Windows zip and a build from source have no installer to run.
+//! - Configured macOS bundles use Sparkle for signed archives, installation and relaunch.
+//! - Flatpak, source builds, and unconfigured bundles link Moosik's own releases.
+//!   A Moosik client never installs an upstream Refryt binary.
 //!
 //! Nothing is installed without a click, and nothing is sent beyond the request itself.
 
@@ -21,11 +21,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-const LATEST: &str = "https://api.github.com/repos/gridoe/refryt/releases/latest";
+#[cfg(target_os = "macos")]
+pub mod diagnostic;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
+
+const LATEST: &str = "https://api.github.com/repos/AtotheY/moosik/releases/latest";
 /// Where the project's releases live. A download or page URL outside it is never followed, even
 /// if the API's answer names one.
-const RELEASES: &str = "https://github.com/gridoe/refryt/releases/";
-const USER_AGENT: &str = concat!("refryt/", env!("CARGO_PKG_VERSION"));
+const RELEASES: &str = "https://github.com/AtotheY/moosik/releases/";
+const USER_AGENT: &str = concat!("Moosik/", env!("CARGO_PKG_VERSION"));
 
 /// How this copy was installed, which decides whether it can update itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,11 +60,11 @@ impl Install {
         };
         match self {
             Install::WindowsSetup if arch == "x86_64" => {
-                Some(format!("refryt-{version}-windows-x86_64-setup.exe"))
+                Some(format!("moosik-{version}-windows-x86_64-setup.exe"))
             }
-            Install::WindowsMsi => Some(format!("refryt-{version}-windows-{arch}.msi")),
+            Install::WindowsMsi => Some(format!("moosik-{version}-windows-{arch}.msi")),
             Install::AppImage if arch == "x86_64" => {
-                Some(format!("refryt-{version}-x86_64.AppImage"))
+                Some(format!("moosik-{version}-x86_64.AppImage"))
             }
             _ => None,
         }
@@ -69,11 +74,11 @@ impl Install {
     pub fn how(self) -> &'static str {
         match self {
             Install::WindowsSetup | Install::WindowsMsi => {
-                "refryt downloads the installer, checks it, then closes and runs it. Windows may \
+                "Moosik downloads the installer, checks it, then closes and runs it. Windows may \
                  ask for permission. The new version starts once it is installed."
             }
             Install::AppImage => {
-                "refryt downloads the new AppImage, checks it, puts it in place of this one and \
+                "Moosik downloads the new AppImage, checks it, puts it in place of this one and \
                  restarts."
             }
             Install::Manual => manual_hint(),
@@ -85,11 +90,11 @@ fn manual_hint() -> &'static str {
     if crate::flatpak::sandboxed() {
         "Download the new .flatpak from the release page and install it the same way as before."
     } else if cfg!(target_os = "macos") {
-        "Download the new disk image from the release page and drag Refryt to Applications again."
+        "Download the new disk image from the release page and drag Moosik to Applications again."
     } else if cfg!(target_os = "windows") {
         "Download the new zip from the release page and unpack it over this copy."
     } else {
-        "Get it from the release page, or update refryt the way you installed it."
+        "Get it from the release page, or update Moosik the way you installed it."
     }
 }
 
@@ -147,6 +152,17 @@ pub struct Release {
     /// What this install updates from. `None` when it cannot update itself, or the release lacks
     /// the file or its checksums — which it does for a few minutes after it is published.
     download: Option<Download>,
+    pub(crate) native: bool,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn native_release(version: String) -> Release {
+    Release {
+        version,
+        page: format!("{RELEASES}latest"),
+        download: None,
+        native: true,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -160,7 +176,7 @@ struct Download {
 impl Release {
     /// Whether "Update and restart" can install it.
     pub fn installable(&self) -> bool {
-        self.download.is_some()
+        self.native || self.download.is_some()
     }
 }
 
@@ -180,11 +196,14 @@ struct GhAsset {
     size: u64,
 }
 
-/// The newest release, if it is newer than this build.
-pub async fn check(http: &reqwest::Client) -> Result<Option<Release>> {
-    if env!("CARGO_PKG_VERSION").contains("+ark.") {
-        return Ok(None);
-    }
+pub enum Check {
+    Available(Release),
+    Current,
+    NotPublished,
+}
+
+/// A missing first release is different from a published release that is already installed.
+pub async fn check(http: &reqwest::Client) -> Result<Check> {
     let response = http
         .get(LATEST)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
@@ -193,6 +212,10 @@ pub async fn check(http: &reqwest::Client) -> Result<Option<Release>> {
         .send()
         .await
         .context("could not reach GitHub")?;
+    // A source-preview repository may not have published its first release yet.
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Check::NotPublished);
+    }
     if !response.status().is_success() {
         bail!("GitHub answered {}", response.status());
     }
@@ -202,7 +225,45 @@ pub async fn check(http: &reqwest::Client) -> Result<Option<Release>> {
         .context("could not read GitHub's answer")?;
     let release: GhRelease =
         serde_json::from_slice(&bytes).context("could not read GitHub's answer")?;
-    Ok(pick(release, &current_version(), Install::current()))
+    Ok(
+        match pick(release, &current_version(), Install::current()) {
+            Some(release) => Check::Available(release),
+            None => Check::Current,
+        },
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FeedStatus {
+    Ready,
+    NotPublished,
+}
+
+/// Avoid opening Sparkle's generic error dialog before the first appcast exists.
+/// Sparkle still fetches and validates the feed and signed archive itself.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) async fn probe_feed(http: &reqwest::Client, url: &str) -> Result<FeedStatus> {
+    let request = |method| {
+        http.request(method, url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .timeout(std::time::Duration::from_secs(20))
+    };
+    let mut response = request(reqwest::Method::HEAD)
+        .send()
+        .await
+        .context("could not reach the update service")?;
+    if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        response = request(reqwest::Method::GET)
+            .send()
+            .await
+            .context("could not reach the update service")?;
+    }
+    match response.status() {
+        reqwest::StatusCode::NOT_FOUND => Ok(FeedStatus::NotPublished),
+        status if status.is_success() => Ok(FeedStatus::Ready),
+        status => bail!("update service answered {status}"),
+    }
 }
 
 /// A test aid: `REFRYT_UPDATE_AS=0.1.11` makes the check treat this build as that version, so the
@@ -219,7 +280,11 @@ pub fn current_version() -> String {
 }
 
 fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> {
-    let version = release.tag_name.trim_start_matches('v').to_owned();
+    let version = release
+        .tag_name
+        .strip_prefix("moosik-v")
+        .unwrap_or_else(|| release.tag_name.trim_start_matches('v'))
+        .to_owned();
     if !newer(&version, current) {
         return None;
     }
@@ -231,7 +296,7 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
     };
     let download = install.asset_name(&version).and_then(|name| {
         let asset = find(&name)?;
-        let sums = find(&format!("refryt-{version}-SHA256SUMS.txt"))?;
+        let sums = find(&format!("moosik-{version}-SHA256SUMS.txt"))?;
         Some(Download {
             url: asset.browser_download_url.clone(),
             size: asset.size,
@@ -247,12 +312,14 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
             format!("{RELEASES}latest")
         },
         download,
+        native: false,
     })
 }
 
 /// `major.minor.patch`, the only shape `release.sh` makes.
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = v.trim().split('.').map(|p| p.parse::<u64>().ok());
+    let v = v.trim().split_once('+').map_or(v.trim(), |(base, _)| base);
+    let mut parts = v.split('.').map(|p| p.parse::<u64>().ok());
     let version = (parts.next()??, parts.next()??, parts.next()??);
     parts.next().is_none().then_some(version)
 }
@@ -512,10 +579,79 @@ fn spawn(pending: Pending) -> Result<()> {
 mod tests {
     use super::*;
 
+    async fn feed_response(responses: &[(&str, u16)]) -> Result<FeedStatus> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/appcast.xml", listener.local_addr().unwrap());
+        let responses: Vec<_> = responses
+            .iter()
+            .map(|(method, status)| (method.to_string(), *status))
+            .collect();
+        let server = tokio::spawn(async move {
+            for (method, status) in responses {
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut bytes = [0; 4096];
+                let size = stream.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..size]);
+                assert!(request.starts_with(&format!("{method} /appcast.xml HTTP/1.1\r\n")));
+                stream
+                    .write_all(
+                        format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let result = probe_feed(&reqwest::Client::new(), &url).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn unpublished_feed_is_distinct_from_a_ready_feed() {
+        assert_eq!(
+            feed_response(&[("HEAD", 404)]).await.unwrap(),
+            FeedStatus::NotPublished
+        );
+        assert_eq!(
+            feed_response(&[("HEAD", 200)]).await.unwrap(),
+            FeedStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_failures_are_not_treated_as_unpublished() {
+        for status in [403, 429, 500] {
+            let error = feed_response(&[("HEAD", status)]).await.unwrap_err();
+            assert!(error.to_string().contains(&status.to_string()));
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/appcast.xml", listener.local_addr().unwrap());
+        drop(listener);
+        assert!(probe_feed(&reqwest::Client::new(), &url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn feed_probe_falls_back_when_head_is_unsupported() {
+        assert_eq!(
+            feed_response(&[("HEAD", 405), ("GET", 200)]).await.unwrap(),
+            FeedStatus::Ready
+        );
+        assert_eq!(
+            feed_response(&[("HEAD", 405), ("GET", 404)]).await.unwrap(),
+            FeedStatus::NotPublished
+        );
+    }
+
     fn release(tag: &str, assets: &[&str]) -> GhRelease {
         GhRelease {
             tag_name: tag.to_owned(),
-            html_url: format!("https://github.com/gridoe/refryt/releases/tag/{tag}"),
+            html_url: format!("https://github.com/AtotheY/moosik/releases/tag/{tag}"),
             assets: assets
                 .iter()
                 .map(|name| GhAsset {
@@ -530,6 +666,8 @@ mod tests {
     #[test]
     fn versions_compare_numerically() {
         assert!(newer("0.1.13", "0.1.12"));
+        assert!(newer("0.1.15", "0.1.14+ark.7"));
+        assert!(!newer("0.1.14", "0.1.14+ark.7"));
         assert!(newer("0.10.0", "0.9.9"));
         assert!(newer("1.0.0", "0.99.99"));
         assert!(!newer("0.1.12", "0.1.12"));
@@ -557,8 +695,8 @@ mod tests {
         if std::env::consts::ARCH != "x86_64" {
             return;
         }
-        let setup = "refryt-0.1.13-windows-x86_64-setup.exe";
-        let sums = "refryt-0.1.13-SHA256SUMS.txt";
+        let setup = "moosik-0.1.13-windows-x86_64-setup.exe";
+        let sums = "moosik-0.1.13-SHA256SUMS.txt";
         let without_sums = pick(
             release("v0.1.13", &[setup]),
             "0.1.12",
@@ -589,28 +727,56 @@ mod tests {
         if std::env::consts::ARCH != "x86_64" {
             return;
         }
-        let setup = "refryt-0.1.13-windows-x86_64-setup.exe";
-        let sums = "refryt-0.1.13-SHA256SUMS.txt";
+        let setup = "moosik-0.1.13-windows-x86_64-setup.exe";
+        let sums = "moosik-0.1.13-SHA256SUMS.txt";
         let mut foreign = release("v0.1.13", &[setup, sums]);
         foreign.assets[0].browser_download_url = format!("https://example.invalid/{setup}");
         foreign.html_url = "https://example.invalid/release".to_owned();
         let r = pick(foreign, "0.1.12", Install::WindowsSetup).unwrap();
         assert!(!r.installable());
-        assert_eq!(r.page, "https://github.com/gridoe/refryt/releases/latest");
+        assert_eq!(r.page, "https://github.com/AtotheY/moosik/releases/latest");
+    }
+
+    #[test]
+    fn fork_release_tags_and_foreign_binaries_stay_separate() {
+        let r = pick(
+            release("moosik-v0.1.15", &[]),
+            "0.1.14+ark.7",
+            Install::Manual,
+        )
+        .unwrap();
+        assert_eq!(r.version, "0.1.15");
+        let mut upstream = release(
+            "v0.1.15",
+            &[
+                "moosik-0.1.15-windows-arm64.msi",
+                "moosik-0.1.15-SHA256SUMS.txt",
+            ],
+        );
+        for asset in &mut upstream.assets {
+            asset.browser_download_url = asset
+                .browser_download_url
+                .replace("AtotheY/moosik", "gridoe/refryt");
+        }
+        assert!(
+            !pick(upstream, "0.1.14", Install::WindowsMsi)
+                .unwrap()
+                .installable()
+        );
     }
 
     #[test]
     fn checksums_are_found_by_file_name() {
-        let sums = "AAAA  refryt-0.1.13-x86_64.AppImage\n\
-                    bbbb *refryt-0.1.13-windows-x86_64.msi\n";
+        let sums = "AAAA  moosik-0.1.13-x86_64.AppImage\n\
+                    bbbb *moosik-0.1.13-windows-x86_64.msi\n";
         assert_eq!(
-            expected_sum(sums, "refryt-0.1.13-x86_64.AppImage").as_deref(),
+            expected_sum(sums, "moosik-0.1.13-x86_64.AppImage").as_deref(),
             Some("aaaa")
         );
         assert_eq!(
-            expected_sum(sums, "refryt-0.1.13-windows-x86_64.msi").as_deref(),
+            expected_sum(sums, "moosik-0.1.13-windows-x86_64.msi").as_deref(),
             Some("bbbb")
         );
-        assert_eq!(expected_sum(sums, "refryt-0.1.13-x86_64.flatpak"), None);
+        assert_eq!(expected_sum(sums, "moosik-0.1.13-x86_64.flatpak"), None);
     }
 }

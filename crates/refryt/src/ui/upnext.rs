@@ -21,7 +21,8 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let upcoming = app
         .q
         .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-    if upcoming.is_empty() {
+    if upcoming.is_empty() && app.q.current_track().is_none() {
+        edit_controls(app, ui, &upcoming, true);
         centered(app, ui, "Empty queue");
         return;
     }
@@ -39,102 +40,9 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // The list runs to the card's top edge now; this is the header's own breathing room,
         // and it scrolls away with it — the same distance the content has from the sides.
         ui.add_space(8.0);
-        now_playing(app, ui);
+        now_playing(app, ui, false);
         section(app, ui, 8.0, "Next up");
-        let signed_in = app.signed_in();
-        // Where the algorithm's tracks begin, for the "Radio" tail those rows carry. Computed
-        // before the destructure below, which borrows `app`'s fields.
-        let radio_tail = app.q.tail_start(app.radio.as_ref().map(|r| &r.chosen));
-        let clicked = {
-            let App {
-                palette,
-                images,
-                backend,
-                stats,
-                liked,
-                now,
-                q,
-                library,
-                ..
-            } = app;
-            spec_rows(
-                ui,
-                palette,
-                images,
-                backend,
-                stats,
-                liked,
-                upcoming.len(),
-                |i| {
-                    let index = upcoming[i];
-                    let t = &q.tracks()[index];
-                    // No album names: this is what happens next, not where each song is
-                    // from.
-                    let subtitle = track_subtitle_no_album(t);
-                    RowSpec {
-                        number: None,
-                        rank: t.rank.as_deref(),
-                        trend: t.trend,
-                        title: &t.title,
-                        album_id: t.album_id.as_deref(),
-                        subtitle,
-                        duration: t.duration,
-                        // The subtitle's tail slot: the algorithm's tracks read "Radio" where
-                        // the listener's own keep their play count.
-                        plays: if radio_tail.is_some_and(|tail| index >= tail) {
-                            Some("Radio")
-                        } else {
-                            t.plays.as_deref()
-                        },
-                        explicit: t.explicit,
-                        active: is_active(now, &t.video_id),
-                        playing: is_active(now, &t.video_id) && !now.paused,
-                        badge: None,
-                        // Square: the queue shows the cover, not a cropped 16:9 still.
-                        shape: ArtShape::Square,
-                        hide_art: false,
-                        thumbnail: t.thumbnail.as_ref(),
-                        menu: Some(widgets::RowMenu {
-                            track: t,
-                            playlist_id: None,
-                            playlists: &library.playlists.items,
-                            signed_in,
-                            queue_index: Some(index),
-                        }),
-                        like: t.like,
-                        // The queue is a list of what happens next, not a place to
-                        // rate things: a column of thumbs repeated down it is noise.
-                        // Rating a queued song is one click away on the player bar.
-                        show_rating: false,
-                        quiet_like: false,
-                        add_to: None,
-                    }
-                },
-            )
-        };
-
-        // Forwarded before the click: a menu choice arrives with no row click, and the
-        // `None` arm below returns early.
-        if let Some(action) = clicked.action {
-            app.row_action(action);
-        }
-        let i = match clicked.click {
-            Some(ListClick::Row(i)) => upcoming[i],
-            Some(ListClick::Link(route)) => {
-                app.navigate(route);
-                return;
-            }
-            None => return,
-        };
-        // Jumping sets `current`; the `Playing` event's `prefetch_next` follows, same as
-        // every other way of moving through the queue. Clicking the row already playing just
-        // pauses/resumes it (see `play_index`) — nothing new to show, so the scroll position
-        // is left alone rather than jumping to the top under you.
-        let already_here = app.q.current() == Some(i);
-        app.play_from_queue(i);
-        if !already_here {
-            app.queue_scroll_reset = true;
-        }
+        next_up(app, ui, &upcoming);
     });
     // Where the list is scrolled to, for the fullscreen view's edge fades: they only belong where
     // there is more to scroll to.
@@ -185,11 +93,15 @@ fn header(app: &App, ui: &mut egui::Ui, label: &str) {
 }
 
 /// The track the transport is on, above the list of what follows it.
-fn now_playing(app: &mut App, ui: &mut egui::Ui) {
+fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
     let Some(track) = app.q.current_track().cloned() else {
         return;
     };
-    header(app, ui, "Now playing");
+    if page {
+        crate::ui::section(ui, &app.palette, "Now playing");
+    } else {
+        header(app, ui, "Now playing");
+    }
     // Namespaced under its own id: this row and "Next up"'s first row both start their own
     // `spec_rows` call at index 0, so without this their title/artist links resolve to the
     // exact same widget id (`ui.id()` is the same parent for both — they're sequential calls on
@@ -250,5 +162,156 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui) {
         // same as clicking it anywhere else it appears.
         Some(ListClick::Row(_)) => app.toggle_playback(),
         None => {}
+    }
+}
+
+/// The full queue uses the same live ordering and actions as the compact panel.
+pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
+        crate::ui::page_title(ui, &app.palette, "Queue");
+        if app.q.current_track().is_none() && app.q.tracks().is_empty() {
+            edit_controls(app, ui, &[], false);
+            centered(app, ui, "Your queue is empty. Play a song to get started.");
+            return;
+        }
+        now_playing(app, ui, true);
+        let upcoming = app
+            .q
+            .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
+        crate::ui::section(ui, &app.palette, "Next up");
+        if upcoming.is_empty() {
+            edit_controls(app, ui, &upcoming, false);
+            ui.label(
+                egui::RichText::new("Nothing up next")
+                    .font(theme::regular(13.0))
+                    .color(app.palette.secondary),
+            );
+        } else {
+            next_up(app, ui, &upcoming);
+        }
+    });
+}
+
+fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
+    let undo = app
+        .queue_undo
+        .as_ref()
+        .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
+    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), upcoming);
+    crate::ui::queue_edit::controls(ui, &app.palette, undo, ui.available_width() < 400.0);
+    let list_top = ui.cursor().top();
+    let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
+    let signed_in = app.signed_in();
+    let clicked = {
+        let App {
+            palette,
+            images,
+            backend,
+            stats,
+            liked,
+            now,
+            q,
+            radio,
+            library,
+            ..
+        } = app;
+        spec_rows(
+            ui,
+            palette,
+            images,
+            backend,
+            stats,
+            liked,
+            upcoming.len(),
+            |i| {
+                let index = upcoming[i];
+                let t = &q.tracks()[index];
+                // No album names: this is what happens next, not where each song is
+                // from.
+                let subtitle = track_subtitle_no_album(t);
+                RowSpec {
+                    number: None,
+                    rank: t.rank.as_deref(),
+                    trend: t.trend,
+                    title: &t.title,
+                    album_id: t.album_id.as_deref(),
+                    subtitle,
+                    duration: t.duration,
+                    // The subtitle's tail slot: the algorithm's tracks read "Radio" where
+                    // the listener's own keep their play count.
+                    // Manual moves can interleave chosen songs and recommendations.
+                    plays: if radio
+                        .as_ref()
+                        .is_some_and(|r| !r.chosen.contains(&t.video_id))
+                    {
+                        Some("Radio")
+                    } else {
+                        t.plays.as_deref()
+                    },
+                    explicit: t.explicit,
+                    active: is_active(now, &t.video_id),
+                    playing: is_active(now, &t.video_id) && !now.paused,
+                    badge: None,
+                    // Square: the queue shows the cover, not a cropped 16:9 still.
+                    shape: ArtShape::Square,
+                    hide_art: false,
+                    thumbnail: t.thumbnail.as_ref(),
+                    menu: Some(widgets::RowMenu {
+                        track: t,
+                        playlist_id: None,
+                        playlists: &library.playlists.items,
+                        signed_in,
+                        queue_index: Some(index),
+                    }),
+                    like: t.like,
+                    // The queue is a list of what happens next, not a place to
+                    // rate things: a column of thumbs repeated down it is noise.
+                    // Rating a queued song is one click away on the player bar.
+                    show_rating: false,
+                    quiet_like: false,
+                    add_to: None,
+                }
+            },
+        )
+    };
+
+    crate::ui::queue_edit::drop_target(ui, &app.palette, list_top, pitch, upcoming.len());
+    if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
+        app.edit_queue(action);
+        return;
+    }
+    // Forwarded before the click: a menu choice arrives with no row click, and the
+    // `None` arm below returns early.
+    if let Some(action) = clicked.action {
+        app.row_action(action);
+    }
+    let i = match clicked.click {
+        Some(ListClick::Row(i)) => upcoming[i],
+        Some(ListClick::Link(route)) => {
+            app.navigate(route);
+            return;
+        }
+        None => return,
+    };
+    // Jumping sets `current`; the `Playing` event's `prefetch_next` follows, same as
+    // every other way of moving through the queue. Clicking the row already playing just
+    // pauses/resumes it (see `play_index`) — nothing new to show, so the scroll position
+    // is left alone rather than jumping to the top under you.
+    let already_here = app.q.current() == Some(i);
+    app.play_from_queue(i);
+    if !already_here {
+        app.queue_scroll_reset = true;
+    }
+}
+
+fn edit_controls(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize], compact: bool) {
+    let undo = app
+        .queue_undo
+        .as_ref()
+        .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
+    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), upcoming);
+    crate::ui::queue_edit::controls(ui, &app.palette, undo, compact);
+    if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
+        app.edit_queue(action);
     }
 }

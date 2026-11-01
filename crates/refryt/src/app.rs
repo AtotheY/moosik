@@ -497,6 +497,7 @@ pub enum Route {
     /// What you played, in dated shelves. Signed in only.
     History,
     Listening,
+    Queue,
     Library,
     Settings,
     Artist(String),
@@ -529,6 +530,7 @@ impl Route {
             "moods" => Some(Route::Moods),
             "history" => Some(Route::History),
             "stats" => Some(Route::Listening),
+            "queue" => Some(Route::Queue),
             "library" => Some(Route::Library),
             "settings" => Some(Route::Settings),
             other => match other.split_once(':') {
@@ -1622,6 +1624,7 @@ pub struct App {
     radio_loading: bool,
     /// The Up Next panel is open.
     pub(crate) upnext_open: bool,
+    pub(crate) queue_undo: Option<(u64, crate::queue::EditSnapshot, Option<Radio>)>,
     /// The lyrics panel is open. Mutually exclusive with the queue: they share the right panel.
     pub(crate) lyrics_open: bool,
     /// The fullscreen now-playing view: whether it is open, and what it remembers.
@@ -2121,6 +2124,7 @@ impl App {
             repeat: RepeatMode::Off,
             radio_loading: false,
             upnext_open: queue,
+            queue_undo: None,
             lyrics_open: lyrics,
             fs: if now_playing {
                 // A test aid: `--now-playing --queue` opens the fullscreen view with its queue
@@ -2246,7 +2250,15 @@ impl App {
         }
         // Not on a scripted run: a timing, a screenshot or a stats line should measure the app,
         // not an update window or the request behind it.
-        if app.settings.check_for_updates
+        #[cfg(target_os = "macos")]
+        if !startup_timing && app.screenshot.is_none() && app.stats_after.is_none() {
+            match crate::update::macos::start(&app.ctx, app.settings.check_for_updates) {
+                Ok(native) => app.update.native = native,
+                Err(e) => tracing::warn!(error = %e, "native updater unavailable"),
+            }
+        }
+        if !app.update.native
+            && app.settings.check_for_updates
             && !startup_timing
             && app.screenshot.is_none()
             && app.stats_after.is_none()
@@ -2530,9 +2542,35 @@ impl App {
         if self.update.checking || self.update.progress.is_some() {
             return;
         }
+        #[cfg(target_os = "macos")]
+        if self.update.native {
+            if manual {
+                self.update.error = None;
+                self.update.not_published = false;
+                self.update.up_to_date = false;
+                if let Some(url) = crate::update::macos::feed_url() {
+                    self.update.checking = true;
+                    self.backend.check_update_feed(url);
+                }
+            }
+            return;
+        }
         self.update.checking = true;
+        self.update.error = None;
+        self.update.not_published = false;
+        self.update.up_to_date = false;
         let delay = Duration::from_secs(if manual { 0 } else { 5 });
         self.backend.check_for_update(delay, manual);
+    }
+
+    /// Open the update found by the badge, About tab, or manual check.
+    pub(crate) fn show_update(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.update.native {
+            self.check_for_update(true);
+            return;
+        }
+        self.update.open = true;
     }
 
     /// Download and install the release the check found. The window closes once it is ready.
@@ -2541,6 +2579,11 @@ impl App {
             return;
         };
         if self.update.progress.is_some() || !release.installable() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if release.native {
+            self.check_for_update(true);
             return;
         }
         self.update.progress = Some(0.0);
@@ -2646,6 +2689,7 @@ impl App {
                     }
                 }
                 Command::Settings => self.navigate(Route::Settings),
+                Command::CheckUpdates => self.check_for_update(true),
                 Command::Shortcuts => self.help_open = true,
                 Command::Website => crate::open_url(crate::menu_bar::WEBSITE),
             }
@@ -2957,8 +3001,8 @@ impl App {
         // any hand-picked one, or Autoplay stops at its end. It is asked for once the queue first
         // plays (see the autoplay step), not here.
         self.radio = Radio::pending(&tracks);
-        // Anything past a couple of seconds is worth resuming; the very start is not. The
-        // shuffle order is not saved: a shuffled session draws a fresh one.
+        // Anything past a couple of seconds is worth resuming; the very start is not.
+        // Restore a saved shuffle permutation after drawing the fallback for older stores.
         self.q.restore_session(
             tracks,
             store.current,
@@ -2966,6 +3010,7 @@ impl App {
             store.shuffle,
             self.radio.as_ref().map(|r| &r.chosen),
         );
+        self.q.restore_shuffle_order(store.shuffle_order);
         self.now.track = self.q.current_track().cloned();
         self.repeat = store.repeat.map(Into::into).unwrap_or(RepeatMode::Off);
         // The video view only comes back for a track that has a video to show; the flag can be
@@ -2974,7 +3019,7 @@ impl App {
     }
 
     /// The queue and transport, as the on-disk store shape. Written with an empty queue too, for
-    /// the volume; nothing empties a queue once it has tracks, so this never overwrites one.
+    /// the volume, including after the listener clears an idle queue.
     fn playback_store(&self) -> Option<crate::playback::Store> {
         let position = self.saved_position();
         Some(crate::playback::Store {
@@ -2989,6 +3034,7 @@ impl App {
             position,
             repeat: Some(self.repeat.into()),
             shuffle: self.q.is_shuffled(),
+            shuffle_order: self.q.saved_shuffle_order(),
             volume: self.last_volume,
             muted: self.muted,
             video_open: self.video_open,
@@ -3030,10 +3076,7 @@ impl App {
     fn playback_fingerprint(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for track in self.q.tracks() {
-            track.video_id.hash(&mut h);
-        }
-        self.q.current().hash(&mut h);
+        self.q.edit_stamp().hash(&mut h);
         self.repeat.hash(&mut h);
         self.q.is_shuffled().hash(&mut h);
         self.last_volume.to_bits().hash(&mut h);
@@ -3435,6 +3478,7 @@ impl App {
     /// new visit has begun. The shelves on screen are deliberately kept: a revisit refreshes
     /// underneath the old list rather than showing the loading skeleton again.
     fn note_route_entered(&mut self) {
+        ui::queue_edit::clear_selection(&self.ctx);
         // Settings is where the themes folder is offered, so what is in it is looked at fresh.
         if matches!(self.current_route(), Route::Settings) {
             self.theme_watch.check();
@@ -3550,7 +3594,7 @@ impl App {
             Route::Charts(params) => self.load_charts(params),
             Route::Moods => self.load_moods(),
             Route::History => self.load_history(),
-            Route::Search | Route::Settings | Route::Listening => {}
+            Route::Search | Route::Settings | Route::Listening | Route::Queue => {}
         }
     }
 
@@ -3935,7 +3979,7 @@ impl App {
                 self.home_shelf_full = None;
                 self.home_shelf_loading = None;
             }
-            Route::Search | Route::Settings | Route::Listening => return,
+            Route::Search | Route::Settings | Route::Listening | Route::Queue => return,
         }
         self.scroll_to_top = true;
         self.ensure_route_loaded();
@@ -4869,6 +4913,7 @@ impl App {
                 Event::UpdateChecked { release, manual } => {
                     self.update.checking = false;
                     self.update.error = None;
+                    self.update.not_published = false;
                     match release {
                         Some(release) => {
                             let skipped = self.settings.skipped_update.as_deref()
@@ -4880,11 +4925,15 @@ impl App {
                                     },
                                 );
                             tracing::info!(version = %release.version, "update available");
-                            self.update.open |= manual || !skipped;
+                            // Background checks leave a quiet badge; only an explicit check opens UI.
+                            self.update.open |= manual;
+                            self.update.notice = !skipped || manual;
+                            self.update.up_to_date = false;
                             self.update.available = Some(*release);
                         }
                         None => {
                             self.update.available = None;
+                            self.update.notice = false;
                             self.update.up_to_date = true;
                             if manual {
                                 self.toast("Moosik is up to date");
@@ -4894,12 +4943,28 @@ impl App {
                 }
                 Event::UpdateCheckFailed { error, manual } => {
                     self.update.checking = false;
+                    self.update.up_to_date = false;
+                    self.update.not_published = false;
+                    self.update.error = Some(error.clone());
                     tracing::warn!(%error, "update check failed");
                     // The launch check stays quiet: being offline is not worth a toast.
                     if manual {
                         self.toast_error(&failure_text("Could not check for updates", &error));
                     }
                 }
+                Event::UpdateNotPublished { manual } => {
+                    self.update.checking = false;
+                    self.update.available = None;
+                    self.update.notice = false;
+                    self.update.up_to_date = false;
+                    self.update.not_published = true;
+                    self.update.error = None;
+                    if manual {
+                        self.toast("Updates aren’t published yet");
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                Event::NativeUpdateFeedReady => crate::update::macos::check(),
                 Event::UpdateProgress { percent } => {
                     if self.update.progress.is_some() {
                         self.update.progress = Some(percent);
@@ -6752,8 +6817,95 @@ impl App {
             RowAction::RemoveFromQueue(i) => {
                 // The "Now playing" row never carries this menu; the queue refuses to remove
                 // the playing track anyway, and moves everything that indexes it.
-                self.q.remove(i);
+                self.edit_queue(ui::queue_edit::Action::Remove {
+                    stamp: self.q.edit_stamp(),
+                    indices: vec![i],
+                });
             }
+        }
+    }
+
+    /// Apply an occurrence-based queue edit only while its source is still current.
+    pub(crate) fn edit_queue(&mut self, edit: ui::queue_edit::Action) {
+        use ui::queue_edit::Action;
+        if matches!(edit, Action::Undo) {
+            if let Some((stamp, snapshot, radio)) = self.queue_undo.take()
+                && stamp == self.q.edit_stamp()
+            {
+                self.q.undo_edit(snapshot);
+                self.radio = radio;
+                self.prefetch_next();
+                self.save_playback();
+                self.toast("Queue edit undone");
+            }
+            return;
+        }
+        let stamp = match &edit {
+            Action::Move { stamp, .. } | Action::Remove { stamp, .. } | Action::Clear { stamp } => {
+                *stamp
+            }
+            Action::Undo => unreachable!(),
+        };
+        if stamp != self.q.edit_stamp() {
+            return;
+        }
+        let snapshot = self.q.edit_snapshot();
+        let radio = self.radio.clone();
+        let upcoming = self
+            .q
+            .upcoming(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
+        let changed = match edit {
+            Action::Move {
+                indices, boundary, ..
+            } => {
+                let changed = self.q.move_upcoming(
+                    &indices,
+                    boundary,
+                    self.repeat,
+                    self.radio.as_ref().map(|r| &r.chosen),
+                );
+                if changed && let Some(radio) = &mut self.radio {
+                    // A deliberately positioned recommendation is now the listener's choice.
+                    for i in indices {
+                        if let Some(track) = snapshot.track(i) {
+                            radio.chosen.insert(track.video_id.clone());
+                        }
+                    }
+                }
+                changed
+            }
+            Action::Remove { indices, .. } => {
+                let mut indices: Vec<_> = indices
+                    .into_iter()
+                    .filter(|i| upcoming.contains(i))
+                    .collect();
+                indices.sort_unstable();
+                indices.dedup();
+                let mut changed = false;
+                for i in indices.into_iter().rev() {
+                    changed |= self.q.remove(i);
+                }
+                changed
+            }
+            Action::Clear { .. } => {
+                // Closing this river also rejects any continuation already in flight.
+                if let Some(radio) = &mut self.radio {
+                    radio.state = River::Dead;
+                }
+                let mut indices = upcoming;
+                indices.sort_unstable();
+                let mut changed = false;
+                for i in indices.into_iter().rev() {
+                    changed |= self.q.remove(i);
+                }
+                changed
+            }
+            Action::Undo => unreachable!(),
+        };
+        if changed {
+            self.queue_undo = Some((self.q.edit_stamp(), snapshot, radio));
+            self.prefetch_next();
+            self.save_playback();
         }
     }
 
@@ -7773,6 +7925,48 @@ impl eframe::App for App {
             self.show_window(ctx);
         }
         self.transport_step(ctx);
+        #[cfg(target_os = "macos")]
+        while let Some(event) = crate::update::macos::poll() {
+            use crate::update::macos::Event;
+            match event {
+                Event::Available(version) => {
+                    self.update.not_published = false;
+                    self.update.available = Some(crate::update::native_release(version));
+                    self.update.notice = true;
+                    self.update.up_to_date = false;
+                    self.update.error = None;
+                }
+                Event::Current => {
+                    self.update.not_published = false;
+                    self.update.available = None;
+                    self.update.notice = false;
+                    self.update.up_to_date = true;
+                    self.update.error = None;
+                }
+                Event::Skipped => self.update.notice = false,
+                Event::Finished => self.update.checking = false,
+                Event::Failed(error) => {
+                    self.update.checking = false;
+                    self.update.not_published = false;
+                    self.update.up_to_date = false;
+                    self.update.error = Some(error);
+                }
+                Event::Relaunch => {
+                    // Sparkle waits until this synchronous checkpoint before terminating us.
+                    if let Some(store) = self.playback_store()
+                        && let Err(error) = crate::playback::save(&store)
+                    {
+                        tracing::warn!(%error, "could not checkpoint playback before update");
+                    }
+                    if let Err(error) = crate::settings::save(&self.settings) {
+                        tracing::warn!(%error, "could not checkpoint settings before update");
+                    }
+                    self.save_liked_if_dirty();
+                    self.quitting = true;
+                    crate::update::macos::continue_relaunch();
+                }
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -7938,8 +8132,11 @@ impl eframe::App for App {
             // back by itself when the window widens again.
             self.fit_window_to_shell(&ctx);
             let screen_w = ctx.input(|i| i.raw.screen_rect.map_or(0.0, |r| r.width()));
+            // The full queue already shows these rows; preserve the panel preference for
+            // other pages while giving this page its room.
+            let queue_panel_open = self.upnext_open && route != Route::Queue;
             let right_open =
-                (self.upnext_open || self.lyrics_open) && theme::right_panel_fits(screen_w);
+                (queue_panel_open || self.lyrics_open) && theme::right_panel_fits(screen_w);
             let sidebar_pref = self.settings.sidebar_width.unwrap_or(theme::SIDEBAR_WIDTH);
             let right_cap = (screen_w * 0.40).clamp(theme::UPNEXT_MIN, theme::UPNEXT_MAX);
             let (sidebar_max, right_max) = theme::panel_limits(
@@ -8029,7 +8226,7 @@ impl eframe::App for App {
                     queue_w,
                     theme::UPNEXT_MIN..=queue_max,
                 );
-                let show_queue = self.upnext_open;
+                let show_queue = queue_panel_open;
                 let show_lyrics = self.lyrics_open;
                 // The card insets: a small side padding, and none top or bottom — content runs to
                 // the card's own top and bottom edges.
@@ -8150,6 +8347,7 @@ impl eframe::App for App {
                             Route::HomeShelf(title) => ui::home::shelf_page(self, ui, &title),
                             Route::History => ui::history::page(self, ui),
                             Route::Listening => ui::listening::page(self, ui),
+                            Route::Queue => ui::upnext::page(self, ui),
                             Route::Home => ui::home::page(self, ui),
                             Route::Library => ui::library::page(self, ui),
                             Route::Settings => ui::settings::page(self, ui),

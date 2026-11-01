@@ -91,6 +91,9 @@ fn http_client_for(page_id: Option<&str>) -> Result<ytmapi_rs::Client> {
     let headers = default_headers(page_id);
 
     let inner = crate::trusted_requests::client_builder()
+        // YouTube can reset the initial signed-in cookie request with an HTTP/2
+        // PROTOCOL_ERROR. HTTP/1.1 accepts the same session and keeps sign-in usable.
+        .http1_only()
         .gzip(true)
         .cookie_store(true)
         .default_headers(headers)
@@ -297,13 +300,21 @@ impl Api {
              out the parts that sign you in.",
         )?;
 
-        auth::save_session(&cookie, source)?;
+        let next_session = auth::Session {
+            cookie: cookie.clone(),
+            source: source.map(str::to_owned),
+        };
+        {
+            let mut session = self.session.lock().await;
+            // Refreshes can return the same cookie. Writing and verifying it
+            // again needlessly asks Keychain for access twice per refresh.
+            if session.as_ref() != Some(&next_session) {
+                auth::save_session(&cookie, source)?;
+                *session = Some(next_session);
+            }
+        }
         *self.refresh_failed.lock().await = None;
         self.share_with_ytdlp(Some(&cookie));
-        *self.session.lock().await = Some(auth::Session {
-            cookie,
-            source: source.map(str::to_owned),
-        });
         *self.browser.lock().await = Some(yt);
         Ok(account)
     }

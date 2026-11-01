@@ -22,7 +22,7 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Metadata {
     pub id: String,
     pub title: String,
@@ -36,6 +36,43 @@ pub struct Metadata {
     pub artwork: Option<String>,
 }
 impl Metadata {
+    /// Restore the domain track so stats use the regular playback and menu paths.
+    pub fn to_track(&self) -> Track {
+        use crate::model::{ArtistLink, ChartTrend, LikeStatus};
+        let path = std::path::Path::new(&self.id);
+        Track {
+            video_id: self.id.clone(),
+            title: self.title.clone(),
+            artists: self
+                .artists
+                .iter()
+                .map(|(name, id)| ArtistLink {
+                    name: name.clone(),
+                    id: id.clone(),
+                })
+                .collect(),
+            album: self.album.clone(),
+            album_id: self.album_id.clone(),
+            duration: (self.duration > 0.0).then_some(self.duration as u64),
+            plays: None,
+            explicit: self.explicit,
+            like: if self.liked {
+                LikeStatus::Like
+            } else {
+                LikeStatus::Indifferent
+            },
+            in_library: false,
+            library_add: None,
+            library_remove: None,
+            set_video_id: None,
+            thumbnail: self.artwork.as_deref().map(std::sync::Arc::from),
+            wide: self.video,
+            rank: None,
+            trend: ChartTrend::default(),
+            local_path: path.is_absolute().then(|| std::sync::Arc::from(path)),
+        }
+    }
+
     pub fn from_track(t: &Track) -> Self {
         Self {
             id: t.video_id.clone(),
@@ -509,6 +546,39 @@ mod tests {
             ..Sample::default()
         }
     }
+    #[test]
+    fn stats_metadata_restores_links_art_and_local_playback() {
+        let meta = Metadata {
+            id: "youtube-id".into(),
+            title: "Song".into(),
+            artists: vec![("Artist".into(), Some("artist-id".into()))],
+            album: Some("Album".into()),
+            album_id: Some("album-id".into()),
+            duration: 240.0,
+            explicit: true,
+            liked: true,
+            video: true,
+            artwork: Some("https://example.com/art.jpg".into()),
+        };
+        let track = meta.to_track();
+        assert_eq!(track.album_id.as_deref(), Some("album-id"));
+        assert_eq!(track.artists[0].id.as_deref(), Some("artist-id"));
+        assert_eq!(track.thumbnail.as_deref(), meta.artwork.as_deref());
+        assert!(track.explicit && track.wide);
+        assert_eq!(track.like, crate::model::LikeStatus::Like);
+        assert!(track.local_path.is_none());
+        let local = Metadata {
+            id: "/tmp/moosik-test-song.flac".into(),
+            ..meta
+        }
+        .to_track();
+        assert_eq!(
+            local.local_path.as_deref(),
+            Some(std::path::Path::new(&local.video_id))
+        );
+        assert_eq!(Metadata::from_track(&local).to_track(), local);
+    }
+
     #[test]
     fn only_audible_progress_counts() {
         assert_eq!(credit(s(10.0), s(11.0), 1.0), (1000.0, 1000.0));

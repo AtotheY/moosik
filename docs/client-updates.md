@@ -1,0 +1,114 @@
+# In-app Moosik updates
+
+Moosik uses GitHub Releases to distribute client updates. An Apple Developer
+membership or App Store listing is **not required**. On macOS, Sparkle 2 handles
+checking, verifying the archive, installation, permissions, and relaunch.
+
+A scheduled check leaves a small download icon with an accent dot beside History
+and the account button. Clicking it opens the native update window. Users install
+and relaunch there instead of finding a download on GitHub. There is also
+**Moosik → Check for Updates…** and **Settings → About → Updates**. Automatic
+checking can be disabled. Downloads/installations require a user choice by default.
+
+Before the first release is published, a manual check shows “Updates aren’t
+published yet.” Missing feeds are distinct from “up to date”; offline, rate-limit,
+and server failures remain errors. The macOS check probes feed availability in
+the background before opening Sparkle, which still validates the feed and archive.
+
+The current queue, playback position, shuffle ordering, settings, and pending liked
+state are checkpointed before Sparkle continues its relaunch. Listening records
+and the saved account stay in their existing stores; the updater replaces the app
+bundle. Failed downloads/signature verification leave the installed app in place.
+
+## Free GitHub distribution
+
+The client checks **AtotheY/moosik**, never installs upstream Refryt binaries, and
+uses this HTTPS feed:
+
+`https://github.com/AtotheY/moosik/releases/latest/download/appcast.xml`
+
+Update archives are signed with our own Ed25519 key. This is free and independent
+of Apple. `SUVerifyUpdateBeforeExtraction` requires Sparkle to validate the archive
+before unpacking it. The private key stays out of the repository; only
+[the public key](../packaging/macos/update-public-key.txt) ships in the client.
+The framework download itself is pinned by version and SHA-256. Its license is
+included in the app bundle.
+
+Without Apple notarization, macOS can warn users during their first manual
+installation. Ad-hoc app signatures can also lead to renewed Keychain approval
+when a build changes. A stable signing certificate and optional Developer ID
+notarization improve that experience; neither changes our GitHub update source.
+The updater does not disable Gatekeeper or change system trust settings.
+
+Existing clients that predate this updater need to install the first updater-enabled
+Moosik release once. Those old binaries have no way to discover the new updater.
+After that, subsequent releases are installed in the app.
+
+## One-time maintainer setup
+
+1. Run `./scripts/setup-update-signing.sh`. It reuses/creates the dedicated
+   `com.sistilli.moosik.updates` Sparkle key in the Mac login Keychain and writes
+   only the public key to `packaging/macos/update-public-key.txt`. Keep this key
+   backed up securely: losing it can prevent existing clients from accepting updates.
+2. Configure the repository secret **SPARKLE_PRIVATE_KEY** with a secure export of
+   that same key. Sparkle's `generate_keys --account com.sistilli.moosik.updates -x
+   <protected-file>` exports it. Send the file to `gh secret set SPARKLE_PRIVATE_KEY
+   --repo AtotheY/moosik < <protected-file>` without printing it, then remove the
+   temporary export. Set a restrictive umask before exporting. Do not paste the
+   key into an issue, chat, or source file.
+3. Keep the public key file committed, or set the repository variable
+   **MOOSIK_UPDATE_PUBLIC_KEY** to that same public key. The workflow checks that
+   the private key used to sign the archive matches the key embedded in the app.
+
+No Apple secrets are needed for the default workflow. It uses ad-hoc bundle signing
+on the CI runner and mandatory Ed25519 archive signing. Local builds continue to
+use the configured local certificate, preserving their existing signing identity.
+An optional stable code-signing certificate can be supplied via
+**MACOS_CERTIFICATE_P12** (base64 PKCS#12) and **MACOS_CERTIFICATE_PASSWORD**.
+
+## Publishing an update
+
+Review and commit the intended Moosik source changes first. Bump the workspace
+version to a new public `major.minor.patch`, refresh the lockfile, and write
+`release-notes/<version>.md`. The fork's `+ark.N` development suffix is accepted
+when comparing installed clients, but public releases use numeric versions.
+
+The **Moosik macOS release** workflow builds, tests, signs, and uploads artifacts
+on `workflow_dispatch` without publishing. A reviewed `moosik-v<version>` tag on
+`main` runs the same checks and publishes the complete GitHub release. For example,
+`moosik-v0.1.15` must match workspace version `0.1.15`.
+
+The release includes the initial-install DMG, the signed update ZIP, checksums, and
+`appcast.xml`. It stays a draft until all files are uploaded, then becomes Latest.
+The feed rejects mismatched versions/architectures or absent signatures. The current
+packaging job ships Apple silicon; its feed declares `arm64` and the minimum macOS
+version required by the actual bundled executables and playback libraries.
+Windows/Linux installers need their own Moosik packaging validation before release.
+
+The inherited Refryt packaging workflow is manual-only, so ordinary upstream-style
+`v*` tags cannot accidentally publish Refryt packages as Moosik updates. Merging
+upstream source remains a separate maintainer action; clients receive our compiled,
+reviewed Moosik releases, not a `git pull` or upstream binaries.
+
+## Optional Apple notarization later
+
+Set repository variable **MOOSIK_NOTARIZE=1**, use a Developer ID Application
+certificate for **MACOS_CERTIFICATE_P12**, and configure **APPLE_ID**,
+**APPLE_APP_PASSWORD**, and variable **APPLE_TEAM_ID**. The workflow then signs
+nested code with hardened runtime, notarizes and staples the app and disk image,
+and assesses the app before publishing. This is optional and does not require
+moving distribution to the App Store.
+
+## Verification
+
+The `updater-check` developer binary never loads the user's account or listening
+profile. Run it only in a separately signed fixture app with a test feed/key and
+`MoosikUpdaterTestState` pointing to dummy JSON. The actual Sparkle callbacks,
+indicator, and checkpoint-before-relaunch bridge are shared with the client.
+Use an older and newer fixture bundle to verify install/relaunch, and corrupt a
+signed archive to verify rejection. Do not use the real app/profile as the target
+of an updater integration test.
+
+References: [Sparkle setup](https://sparkle-project.org/documentation/),
+[gentle reminders](https://sparkle-project.org/documentation/gentle-reminders/),
+[publishing updates](https://sparkle-project.org/documentation/publishing/).
