@@ -14,7 +14,8 @@ Temporary private-key files are removed when setup exits. The ignored file
 Running setup again reuses the same certificate.
 
 Both macOS packaging scripts reuse that fingerprint, so rebuilt apps have a
-consistent signing requirement and Keychain can retain the app's approval.
+consistent signing requirement. This alone does not guarantee prompt-free Keychain
+access: current macOS also partitions self-signed apps by executable hash.
 If a configured identity is missing or unusable, signing fails rather than
 silently changing identity. Preserve the app's bundle identifier as well.
 
@@ -23,10 +24,16 @@ silently changing identity. Preserve the app's bundle identifier as well.
 configuration; `ark-package.sh` requires setup. An explicit value of `-`
 selects ad hoc signing and brings back the approval problem across rebuilds.
 
-This certificate is for local development. Public GitHub updates can use Sparkle Ed25519 signatures without an Apple
-membership. Developer ID signing and notarization are optional for a smoother
-first install; see [client updates](client-updates.md). Keep the existing session in
-Keychain; this setup does not read it or change its access controls.
+This certificate is for local development. Public GitHub updates can use Sparkle
+Ed25519 signatures without an Apple membership. Public releases also pin an
+app-signing certificate. Self-signed certificates retain their designated
+requirement, but macOS Keychain still distinguishes builds by executable hash.
+Apple-issued Developer ID signing is needed for the standard Keychain flow to
+retain permissions across releases. Notarization improves the first-install
+experience; see [client updates](client-updates.md). Switching signing identities
+or rebuilding a self-signed executable can require renewed approval. Keep the
+existing session in Keychain; this setup does not read it or change its access
+controls.
 
 ## Credential name and migration
 

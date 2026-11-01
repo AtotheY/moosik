@@ -4,8 +4,11 @@
 
 Use `scripts/ark-package.sh` to package local builds and
 `scripts/sign-macos.sh <app-path>` when re-signing a local app. These reuse
-the certificate configured by `scripts/setup-macos-signing.sh`, preserving
-Keychain approval across rebuilds. Do not replace local signatures with
+the certificate configured by `scripts/setup-macos-signing.sh`, retaining a
+consistent designated requirement. Self-signed certificates still have a per-build
+Keychain partition: do not promise prompt-free updates based only on matching
+signatures. Test access across different executable hashes with dummy credentials.
+Do not replace local signatures with
 `codesign --sign -` or change the bundle identifier. See
 `docs/macos-local-signing.md` for setup and distribution differences.
 For app verification, launch the signed Moosik bundle. Raw `cargo run`,

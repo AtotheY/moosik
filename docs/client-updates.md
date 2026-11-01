@@ -35,9 +35,19 @@ The framework download itself is pinned by version and SHA-256. Its license is
 included in the app bundle.
 
 Without Apple notarization, macOS can warn users during their first manual
-installation. Ad-hoc app signatures can also lead to renewed Keychain approval
-when a build changes. A stable signing certificate and optional Developer ID
-notarization improve that experience; neither changes our GitHub update source.
+installation. Public builds require a pinned app-signing certificate, separately
+from the Ed25519 archive key, so the workflow cannot silently change app identity.
+
+**A self-signed certificate does not eliminate Keychain prompts across updates.**
+macOS additionally partitions Keychain access by Apple-verified Team ID, or by the
+individual executable's code hash for other signed apps. Our two-build test with a
+self-signed certificate retained identical designated requirements, but the second
+build was denied access to a dummy credential with interaction disabled. Merely
+checking matching certificates is not sufficient evidence of retained access.
+
+For the standard updater and Keychain store to preserve permission across releases,
+use an Apple-issued Developer ID Application certificate. Notarization also improves
+first-install trust. Distribution can continue entirely through GitHub.
 The updater does not disable Gatekeeper or change system trust settings.
 
 Existing clients that predate this updater need to install the first updater-enabled
@@ -60,11 +70,26 @@ After that, subsequent releases are installed in the app.
    **MOOSIK_UPDATE_PUBLIC_KEY** to that same public key. The workflow checks that
    the private key used to sign the archive matches the key embedded in the app.
 
-No Apple secrets are needed for the default workflow. It uses ad-hoc bundle signing
-on the CI runner and mandatory Ed25519 archive signing. Local builds continue to
-use the configured local certificate, preserving their existing signing identity.
-An optional stable code-signing certificate can be supplied via
-**MACOS_CERTIFICATE_P12** (base64 PKCS#12) and **MACOS_CERTIFICATE_PASSWORD**.
+4. Configure a persistent code-signing certificate through **MACOS_CERTIFICATE_P12**
+   (base64 PKCS#12) and **MACOS_CERTIFICATE_PASSWORD**. Keep the same certificate
+   across releases. Commit only its public certificate and SHA-1 certificate
+   fingerprint in `packaging/macos/release-signing-certificate.pem` and
+   `packaging/macos/release-signing-identity.txt`. The fingerprint identifies the
+   certificate; it is not the update archive's integrity hash. Private keys and
+   passwords must never be committed or printed. A self-signed certificate with
+   the code-signing extended key usage works without an Apple account.
+
+The workflow fails if the certificate is missing or differs from the pinned
+identity. It verifies the built app against that identity and rejects a designated
+requirement tied to a single build hash. Ed25519 archive verification is still
+mandatory. Local builds continue to reuse their configured local certificate.
+
+Version 0.1.15 used ad hoc bundle signing. Moving to another signing identity may
+require **Always Allow** approval in Keychain. Self-signed releases can require this
+again after each code update; do not promise a one-time approval for that route.
+**Allow** grants only the current request. Never solve this by granting every app
+access to the credential, removing Keychain partition controls, or moving the
+session to plaintext.
 
 ## Publishing an update
 
@@ -109,6 +134,7 @@ Use an older and newer fixture bundle to verify install/relaunch, and corrupt a
 signed archive to verify rejection. Do not use the real app/profile as the target
 of an updater integration test.
 
-References: [Sparkle setup](https://sparkle-project.org/documentation/),
+References: [Apple Keychain partition identity implementation](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp),
+[Sparkle setup](https://sparkle-project.org/documentation/),
 [gentle reminders](https://sparkle-project.org/documentation/gentle-reminders/),
 [publishing updates](https://sparkle-project.org/documentation/publishing/).

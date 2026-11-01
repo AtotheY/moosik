@@ -14,9 +14,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MOOSIK_DISTRIBUTION: '1'
-      # Apple membership is optional; archive verification uses our own Ed25519 key.
+      # Pin the app certificate to prevent silent signing identity changes.
+      # It can be self-signed; Apple membership/notarization remain optional.
       MOOSIK_NOTARIZE: ${{ vars.MOOSIK_NOTARIZE || '0' }}
-      MOOSIK_SIGNING_IDENTITY: '-'
+      MOOSIK_SIGNING_IDENTITY: ''
       MOOSIK_APP_NAME: Moosik
       MOOSIK_UPDATE_PUBLIC_KEY: ${{ vars.MOOSIK_UPDATE_PUBLIC_KEY }}
     steps:
@@ -41,8 +42,8 @@ jobs:
           if os.environ['GITHUB_REF_TYPE']=='tag':
               assert os.environ['GITHUB_REF_NAME']=='moosik-v'+v, 'Tag/version mismatch'
           assert os.environ.get('UPDATE_KEY'), 'Missing SPARKLE_PRIVATE_KEY secret'
-          if os.environ.get('CERTIFICATE'):
-              assert os.environ.get('CERTIFICATE_PASSWORD'), 'Missing certificate password'
+          assert os.environ.get('CERTIFICATE'), 'Missing persistent MACOS_CERTIFICATE_P12; ad hoc releases change app identity'
+          assert os.environ.get('CERTIFICATE_PASSWORD'), 'Missing certificate password'
           if os.environ.get('MOOSIK_NOTARIZE')=='1':
               for key in ['CERTIFICATE','CERTIFICATE_PASSWORD','APPLE_ID','APPLE_PASSWORD','APPLE_TEAM_ID']:
                   assert os.environ.get(key), 'Missing optional Apple notarization configuration: '+key
@@ -53,12 +54,12 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then git merge-base --is-ancestor "$GITHUB_SHA" origin/main; fi
       - run: brew install mpv dylibbundler
       - uses: Swatinem/rust-cache@v2
-      - name: Import optional release certificate into a temporary keychain
+      - name: Import persistent release certificate into a temporary keychain
         env:
           CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
-          if [ -z "$CERTIFICATE" ]; then exit 0; fi
+          test -n "$CERTIFICATE"
           keychain="$RUNNER_TEMP/moosik-release.keychain-db"
           password="$(openssl rand -base64 32)"
           echo "::add-mask::$password"
@@ -76,6 +77,8 @@ jobs:
             identity="$(security find-identity -p codesigning "$keychain" | awk '/"/{print $2; exit}')"
           fi
           test -n "$identity"
+          expected="$(tr -d '[:space:]' < packaging/macos/release-signing-identity.txt)"
+          test "$identity" = "$expected" || { echo 'Release signing identity changed; review the identity migration before publishing.' >&2; exit 1; }
           echo "MOOSIK_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
           rm -f "$CERT_FILE"
       - name: Checks and build
@@ -85,6 +88,7 @@ jobs:
           cargo test --locked -p refryt --lib
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -q
           ./scripts/build-macos.sh
+          ./scripts/verify-macos-release-signing.sh dist/Moosik.app
       - name: Optional Apple notarization
         if: env.MOOSIK_NOTARIZE == '1'
         env:

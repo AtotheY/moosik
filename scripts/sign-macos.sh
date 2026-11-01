@@ -20,6 +20,14 @@ if [ -z "$identity" ]; then
     fi
 fi
 
+if [ "${MOOSIK_DISTRIBUTION:-0}" = 1 ]; then
+    expected="$(tr -d '[:space:]' < "$root/packaging/macos/release-signing-identity.txt")"
+    [ -n "$expected" ] && [ "$identity" = "$expected" ] || {
+        echo 'Public releases require the pinned persistent signing certificate; ad hoc signing changes app identity.' >&2
+        exit 1
+    }
+fi
+
 echo "Signing $app with $identity"
 if [ "${MOOSIK_NOTARIZE:-0}" = 1 ]; then
     [ "$identity" != - ] || { echo 'Notarized releases require Developer ID signing.' >&2; exit 1; }
