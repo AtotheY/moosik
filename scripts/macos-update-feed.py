@@ -30,8 +30,9 @@ def make_feed(version, archive, signature, notes='', minimum_system_version='11.
     for tag,text in [('version',version),('shortVersionString',version),('minimumSystemVersion',minimum_system_version),('hardwareRequirements','arm64')]:
         ET.SubElement(item,f'{{{SPARKLE}}}{tag}').text=text
     if notes:
-        # Plain text: release notes cannot inject script or untrusted HTML into the updater.
-        ET.SubElement(item,'description').text=notes
+        # Sparkle 2.9+ renders Markdown natively; omitting the format defaults to HTML
+        # and collapses our release notes into a single paragraph.
+        ET.SubElement(item,'description', {f'{{{SPARKLE}}}format':'markdown'}).text=notes
     ET.SubElement(item,'enclosure', {
         'url':f'{RELEASES}download/moosik-v{version}/{archive.name}',
         f'{{{SPARKLE}}}edSignature':signature,

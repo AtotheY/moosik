@@ -21,6 +21,7 @@ class ReleaseContract(unittest.TestCase):
             self.assertEqual(item.find('{'+feed.SPARKLE+'}hardwareRequirements').text,'arm64')
             self.assertEqual(item.find('{'+feed.SPARKLE+'}minimumSystemVersion').text,'14.0')
             self.assertEqual(item.find('description').text,'Fixed <queue> & playback')
+            self.assertEqual(item.find('description').get('{'+feed.SPARKLE+'}format'),'markdown')
     def test_wrong_version_or_architecture_cannot_publish(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive=Path(tmp)/'moosik-1.2.3-macos-x86_64.zip';archive.touch()
