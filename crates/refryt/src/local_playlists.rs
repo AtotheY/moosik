@@ -107,7 +107,7 @@ mod tests {
         }
         .to_track();
         assert_eq!(private.add_tracks(&[a.clone(), b.clone(), a.clone()]), 2);
-        assert_eq!(private.add_tracks(&[a.clone()]), 0);
+        assert_eq!(private.add_tracks(std::slice::from_ref(&a)), 0);
         let lists: Vec<LocalPlaylist> =
             serde_json::from_slice(&serde_json::to_vec(&vec![legacy, private.clone()]).unwrap())
                 .unwrap();

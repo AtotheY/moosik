@@ -17,7 +17,7 @@ This is a direction for development, not a release-date promise. [Suggest a work
 
 The fork is tested locally on Apple Silicon macOS. Inherited platform support does not establish that Moosik is verified on Windows or Linux.
 
-## Implemented after 0.1.15 (next release)
+## New in Moosik 0.1.16
 
 - A dedicated Listening history page with song/artist search, date filters, timestamps,
   and the regular song playback and context menus. YouTube account history remains a separate tab.

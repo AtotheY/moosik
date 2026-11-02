@@ -35,7 +35,7 @@ The dashboard refreshes about every ten seconds; ••• → Refresh requests 
 snapshot. Genres are user-assigned: missing source metadata stays **Unknown**.
 No artist-name lookups or listening-history uploads to an enrichment service occur.
 
-## Listening history and rediscovery (next release)
+## Listening history and rediscovery (0.1.16)
 
 **Listening history** in the sidebar shows recent audible listens, newest first, with
 local timestamps, song/artist search, and Today / 7-day / 30-day filters. Click to play

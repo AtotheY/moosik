@@ -36,7 +36,7 @@ it; undoing an edit does not rewind audio playback. A stale drag is cancelled if
 the underlying queue changes. Dropping outside the queue or pressing Escape leaves
 the queue untouched. Repeated appearances of the same song are separate entries.
 
-## Song transfers (next release)
+## Song transfers (0.1.16)
 
 Drag a regular song row from search, an album, a playlist, stats, or listening history
 onto **Queue** in the sidebar to add it. The open queue also offers a drop zone, and
