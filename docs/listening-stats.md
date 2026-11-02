@@ -24,7 +24,7 @@ Shift-click for a group, and use Undo to reverse an edit. See [Queue controls](q
 - **Artists / Albums / Genres:** rankings by listening time, with play and song
   counts. Every credited artist and every assigned genre receives full credit;
   these group totals overlap, while the headline total counts each second once.
-- **History:** compact artwork rows for the latest 1,000 attempts in a selected range, including partial
+- **History:** compact artwork rows for the latest 5,000 attempts in a selected range, including partial
   listens and unsuccessful attempts. All older rows remain in the ledger/export.
 - **My recap:** an artwork-led recap for any date range, with top songs/artists, discovery,
   streaks, and biggest listening day. Export it as an editable Markdown document.
@@ -34,6 +34,29 @@ calendar dates. You can filter YouTube, downloaded YouTube tracks, or local file
 The dashboard refreshes about every ten seconds; ••• → Refresh requests an immediate
 snapshot. Genres are user-assigned: missing source metadata stays **Unknown**.
 No artist-name lookups or listening-history uploads to an enrichment service occur.
+
+## Listening history and rediscovery (next release)
+
+**Listening history** in the sidebar shows recent audible listens, newest first, with
+local timestamps, song/artist search, and Today / 7-day / 30-day filters. Click to play
+or right-click for the same mix, queue, and save actions as other songs. The view searches
+the latest 5,000 recorded attempts; older activity remains in the full ledger/export.
+**YouTube history** is a separate tab and requires signing in.
+
+**Rediscover** offers three collections from this installation's ledger:
+
+- Forgotten favorites: at least three qualified plays and no session in 30 days.
+- Five-star songs: songs rated five stars in listening stats.
+- Recent discoveries: songs whose first recorded session is in the last 30 days,
+  with observed listening time.
+
+**Keep as smart playlist** saves the rule. Its songs refresh when opened; ordinary
+private playlists instead keep the songs you explicitly save. Both stay on this Mac.
+Use the sidebar's **+** to create either kind, or a song menu to save a private playlist.
+
+Overview adds a listening-time percentage change and up to three rising artists for
+bounded date ranges with previous listening. Comparisons use the preceding equal-length
+period and the same source filter; incomplete recording history can affect comparisons.
 
 ## Definitions
 

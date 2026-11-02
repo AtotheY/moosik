@@ -92,6 +92,8 @@ pub struct Report {
     pub longest_streak: usize,
     pub active_days: usize,
     pub previous_ms: f64,
+    #[serde(default)]
+    pub previous_artists: Vec<Group>,
     pub unknown_genre_ms: f64,
     pub total_events: u64,
     pub database_bytes: u64,
@@ -231,6 +233,7 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
         longest_streak: 0,
         active_days: 0,
         previous_ms: 0.0,
+        previous_artists: vec![],
         unknown_genre_ms: 0.0,
         total_events: db.query_row("SELECT count(*) FROM events", [], |r| r.get(0))?,
         database_bytes: db.query_row(
@@ -391,7 +394,7 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
             time,
             play,
         );
-        if report.recent.len() < 1000 {
+        if report.recent.len() < 5000 {
             report.recent.push(Recent {
                 metadata: Some(meta.clone()),
                 track_id: meta.id.clone(),
@@ -469,6 +472,25 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
         );
         report.previous_ms =
             db.query_row(&sql, params![prev_from, q.from, q.source], |r| r.get(0))?;
+        let sql = format!(
+            "SELECT s.metadata,sum(g.listen_ms*({FACTOR})) FROM segments g JOIN sessions s ON s.id=g.session_id WHERE g.end_ms>?1 AND g.start_ms<?2 AND (?3='' OR s.source=?3) GROUP BY s.id"
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let mut previous_artists = HashMap::new();
+        for row in stmt.query_map(params![prev_from, q.from, q.source], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })? {
+            let (json, time) = row?;
+            let meta: Metadata = serde_json::from_str(&json)?;
+            let mut seen = HashSet::new();
+            for (name, id) in &meta.artists {
+                let key = id.clone().unwrap_or_else(|| name.to_lowercase());
+                if seen.insert(key.clone()) {
+                    add_group(&mut previous_artists, key, name.clone(), &meta.id, time, 0);
+                }
+            }
+        }
+        report.previous_artists = groups(previous_artists);
     }
     Ok(report)
 }
@@ -513,6 +535,14 @@ mod tests {
             restored
         );
         assert_eq!(report.listen_ms, 5000.0);
+        assert_eq!(report.previous_ms, 5000.0);
+        assert_eq!(report.previous_artists.len(), 2);
+        assert!(
+            report
+                .previous_artists
+                .iter()
+                .all(|a| a.listen_ms == 5000.0)
+        );
         assert_eq!(report.plays, 1);
         assert_eq!(report.completed, 1);
         assert_eq!(report.artists.len(), 2);

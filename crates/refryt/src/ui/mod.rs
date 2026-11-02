@@ -25,6 +25,7 @@ pub mod releases;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
+pub(crate) mod song_drag;
 pub mod splash;
 pub mod topbar;
 pub mod update;
@@ -381,6 +382,11 @@ pub(crate) enum ListClick {
 /// track itself for the queue, the linked ids for navigation. Owned, so it crosses the borrow
 /// of the list it came from and every page forwards it with one line.
 pub(crate) enum RowAction {
+    SavePrivate {
+        playlist_id: String,
+        tracks: Vec<Track>,
+    },
+    NewPrivate(Vec<Track>),
     /// Play whatever YouTube handed over — an artist's shuffle or mix.
     PlayTarget {
         seed: String,
@@ -578,6 +584,41 @@ pub(crate) fn spec_rows<'d>(
                 add_to: s.add_to,
             },
         );
+        if hit.response.drag_started()
+            && let Some(menu) = spec(i).menu
+        {
+            let queue = menu.queue_index.is_some();
+            let indices = if queue {
+                (0..count)
+                    .filter(|j| {
+                        spec(*j)
+                            .menu
+                            .and_then(|m| m.queue_index)
+                            .is_some_and(|n| queue_edit::selected(ui.ctx(), n))
+                    })
+                    .collect()
+            } else {
+                song_drag::indices(ui.ctx(), ui.id())
+            };
+            let tracks: Vec<_> = indices
+                .into_iter()
+                .filter(|j| *j < count)
+                .filter_map(|j| spec(j).menu.map(|m| m.track.clone()))
+                .collect();
+            song_drag::start(
+                ui.ctx(),
+                song_drag::Payload {
+                    tracks: if tracks.is_empty() {
+                        vec![menu.track.clone()]
+                    } else {
+                        tracks
+                    },
+                    source: ui.id(),
+                    playlist: menu.playlist_id.map(str::to_owned),
+                    queue,
+                },
+            );
+        }
         // A link wins over the row: clicking the artist name must not also start the track.
         if let Some(link) = hit.link {
             clicked = Some(ListClick::Link(link_route(link)));
@@ -587,7 +628,10 @@ pub(crate) fn spec_rows<'d>(
         if action.is_none() {
             action = hit.action;
         }
-        if draggable {
+        if draggable
+            && song_drag::payload(ui.ctx())
+                .is_none_or(|d| d.source == ui.id() && d.tracks.len() == 1)
+        {
             if hit.response.drag_started() {
                 egui::DragAndDrop::set_payload(ui.ctx(), i);
             }
@@ -599,6 +643,7 @@ pub(crate) fn spec_rows<'d>(
                         && *from != i
                     {
                         reorder = Some((*from, i));
+                        song_drag::take(ui.ctx());
                     }
                 } else {
                     // Always "insert before this row" — a single, direction-independent rule,

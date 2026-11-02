@@ -22,7 +22,7 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Metadata {
     pub id: String,
     pub title: String,
@@ -254,7 +254,7 @@ pub struct Ledger {
     last_flush: Instant,
     last_sample: Instant,
     nonce: u64,
-    pub report: Option<Report>,
+    pub report: Option<std::sync::Arc<Report>>,
     pub error: Option<String>,
     pub notice: Option<String>,
     pub loading: bool,
@@ -486,7 +486,7 @@ impl Ledger {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
                 Reply::Report(report) => {
-                    self.report = Some(*report);
+                    self.report = Some(std::sync::Arc::from(report));
                     self.loading = false;
                 }
                 Reply::Error(e) => {

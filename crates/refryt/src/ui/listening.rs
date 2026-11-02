@@ -478,6 +478,41 @@ fn overview(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         top_songs(app, ui, r);
         top_artists(app, ui, r);
     }
+    if r.query.from > 0 && r.previous_ms > 0.0 {
+        let mut rising: Vec<_> = r
+            .artists
+            .iter()
+            .filter_map(|artist| {
+                let previous = r
+                    .previous_artists
+                    .iter()
+                    .find(|a| a.id == artist.id)
+                    .map_or(0.0, |a| a.listen_ms);
+                let gain = artist.listen_ms - previous;
+                (gain >= 60_000.0).then_some((artist, gain))
+            })
+            .collect();
+        rising.sort_by(|a, b| b.1.total_cmp(&a.1));
+        if !rising.is_empty() {
+            section(ui, &p, "On the rise", None);
+            small(ui, &p, "Compared with the previous equal-length period");
+            ui.add_space(8.0);
+            for (artist, gain) in rising.into_iter().take(3) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(&artist.name)
+                            .font(theme::medium(14.0))
+                            .color(p.text),
+                    );
+                    ui.label(
+                        RichText::new(format!("+{} listening", clock(gain)))
+                            .font(theme::regular(12.0))
+                            .color(p.accent),
+                    );
+                });
+            }
+        }
+    }
     section(ui, &p, "Listening habits", None);
     if ui.available_width() > 640.0 {
         columns(ui, 2, |cols| {
@@ -565,6 +600,18 @@ fn summary(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
         p,
         format!("{} · {}", r.query.label, count(r.active_days, "active day")),
     );
+    if r.query.from > 0 && r.previous_ms > 0.0 {
+        ui.add_space(6.0);
+        let change = (r.listen_ms / r.previous_ms - 1.0) * 100.0;
+        small(
+            ui,
+            p,
+            format!(
+                "{change:+.0}% vs previous period · {} before",
+                clock(r.previous_ms)
+            ),
+        );
+    }
 }
 fn activity(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
     let end = chrono::DateTime::from_timestamp_millis(r.query.to - 1)
@@ -811,7 +858,7 @@ fn details_button(
     .inner
 }
 
-fn regular_song(
+pub(crate) fn regular_song(
     app: &mut App,
     ui: &mut egui::Ui,
     track: &crate::model::Track,

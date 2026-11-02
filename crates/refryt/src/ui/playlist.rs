@@ -10,6 +10,7 @@ use crate::ui::{ListClick, PAGE_ART_SIZE, failed, track_rows_quiet};
 use crate::widgets;
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    app.refresh_smart_playlist();
     if app.playlist_loading {
         crate::ui::skeleton_page_header(
             ui,
@@ -49,6 +50,34 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         track_list(app, ui);
         suggestions(app, ui);
+        if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
+            let id = pl.id.clone();
+            let accepts = super::song_drag::payload(ui.ctx()).is_some_and(|d| {
+                d.playlist.as_deref() != Some(id.as_str())
+                    && (id.starts_with("private:")
+                        || if pl.source == crate::model::PlaylistSource::Local {
+                            d.tracks.iter().all(|t| t.local_path.is_some())
+                        } else {
+                            app.signed_in() && d.tracks.iter().all(|t| t.local_path.is_none())
+                        })
+            });
+            if accepts {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 56.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Drop to add to playlist",
+                    crate::theme::medium(13.0),
+                    app.palette.accent,
+                );
+                if let Some(tracks) = super::song_drag::target(ui, &app.palette, rect, true) {
+                    app.drop_tracks_on_playlist(&id, tracks);
+                }
+            }
+        }
     });
 }
 
@@ -253,7 +282,16 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             return;
         };
         // The type line is the kind only; the meta line below is count and length.
-        let kind_label = "Playlist".to_owned();
+        let kind_label = if pl.id.starts_with("private:") {
+            if pl.editable {
+                "Private playlist"
+            } else {
+                "Smart playlist"
+            }
+        } else {
+            "Playlist"
+        }
+        .to_owned();
         let meta = meta_line(pl);
         // The owner, folded into the meta line below rather than a separate row: linked where
         // the page gave a channel id, so their profile can be opened from the name. Liked Music
@@ -355,7 +393,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             signed_in,
                             share_url: menu_share,
                             has_info: menu_has_info,
-                            manage: pl.editable,
+                            manage: pl.editable || pl.id.starts_with("private:"),
                             remove_from_library: false,
                             context_only: false,
                             // A local playlist has no YouTube radio to start.
@@ -461,6 +499,36 @@ fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> Stri
 }
 
 fn track_list(app: &mut App, ui: &mut egui::Ui) {
+    if let Some(pl) = app
+        .playlist
+        .as_ref()
+        .filter(|p| p.id.starts_with("private:") && p.tracks.is_empty())
+    {
+        if !pl.editable && app.listening.loading {
+            widgets::skeleton_track_rows(ui, &app.palette, 4, false);
+        } else {
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new(if pl.editable {
+                    "Make room for your next favorite"
+                } else {
+                    "This collection grows with your listening"
+                })
+                .font(crate::theme::semibold(16.0))
+                .color(app.palette.text),
+            );
+            ui.label(
+                egui::RichText::new(if pl.editable {
+                    "Drag songs onto this playlist in the sidebar, or save them from a song’s menu."
+                } else {
+                    "Songs appear here automatically when they match the rule above."
+                })
+                .font(crate::theme::regular(13.0))
+                .color(app.palette.secondary),
+            );
+        }
+        return;
+    }
     let signed_in = app.signed_in();
     let clicked = {
         let App {

@@ -690,6 +690,33 @@ impl PlayQueue {
         self.history.forget_within_queue();
     }
 
+    /// Copy tracks into a displayed boundary without changing the current song or shuffle.
+    pub(crate) fn insert_upcoming(
+        &mut self,
+        tracks: Vec<Track>,
+        boundary: usize,
+        repeat: RepeatMode,
+        chosen: Chosen,
+    ) {
+        let old = self.upcoming(repeat, chosen);
+        let anchor = old.get(boundary).copied();
+        let start = self.len();
+        let count = tracks.len();
+        for track in tracks {
+            self.insert(self.len(), track, Slot::BeforeRadio, chosen);
+        }
+        let order = self.upcoming(repeat, chosen);
+        let target = anchor
+            .and_then(|i| order.iter().position(|j| *j == i))
+            .unwrap_or(order.len());
+        self.move_upcoming(
+            &(start..start + count).collect::<Vec<_>>(),
+            target,
+            repeat,
+            chosen,
+        );
+    }
+
     /// Move selected *occurrences* to a boundary in the displayed upcoming order.
     /// The current track and playback position stay put. A shuffle edits its existing
     /// future permutation rather than drawing another one or changing the source playlist.
@@ -884,6 +911,32 @@ mod tests {
 
     /// The listener jumps to a song further down: it plays next, and the songs they jumped over
     /// stay ahead of it rather than being passed over.
+    #[test]
+    fn external_drop_preserves_playback_and_inserts_in_display_order() {
+        for shuffle in [false, true] {
+            let mut q = queue(&["playing", "a", "b", "c"], 0);
+            q.set_resume(Some((0, 73.0)));
+            if shuffle {
+                q.set_shuffle(true, None);
+            }
+            let before: Vec<_> = ids(&q, &q.upcoming(RepeatMode::Off, None));
+            let snapshot = q.edit_snapshot();
+            q.insert_upcoming(
+                vec![track("new-a"), track("new-b")],
+                1,
+                RepeatMode::Off,
+                None,
+            );
+            let mut expected = before.clone();
+            expected.splice(1..1, ["new-a".into(), "new-b".into()]);
+            assert_eq!(ids(&q, &q.upcoming(RepeatMode::Off, None)), expected);
+            assert_eq!(q.current_track().unwrap().video_id, "playing");
+            assert_eq!(q.resume(), Some((0, 73.0)));
+            q.undo_edit(snapshot);
+            assert_eq!(ids(&q, &q.upcoming(RepeatMode::Off, None)), before);
+        }
+    }
+
     #[test]
     fn group_moves_keep_display_order_and_current_position() {
         let mut q = queue(&["playing", "a", "b", "c", "d", "e"], 0);

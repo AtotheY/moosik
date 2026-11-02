@@ -18,6 +18,9 @@ use crate::theme;
 use crate::ui::{ROW_ART_PT, art_texture, virtual_rows};
 use crate::widgets::{self, ArtShape};
 
+#[derive(Clone)]
+struct PlaylistRailDrag(usize);
+
 pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     // The card's own rect, taken before any panel claims space: the corner repaint at the end
     // needs its rounded edges.
@@ -57,10 +60,22 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         (Route::Explore, Icon::Compass, "Explore"),
         (Route::Library, Icon::Library, "Library"),
         (Route::Queue, Icon::ListMusic, "Queue"),
+        (Route::History, Icon::History, "Listening history"),
         (Route::Listening, Icon::TrendingUp, "Listening stats"),
     ] {
         let selected = app.current_route() == route;
-        if widgets::nav_item(ui, &app.palette, icon, label, selected, rail).clicked() {
+        let response = widgets::nav_item(ui, &app.palette, icon, label, selected, rail);
+        if route == Route::Queue
+            && let Some(tracks) = super::song_drag::target(
+                ui,
+                &app.palette,
+                response.rect,
+                super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue),
+            )
+        {
+            app.row_action(super::RowAction::PageQueue(tracks));
+        }
+        if response.clicked() {
             app.navigate(route);
         }
     }
@@ -151,7 +166,10 @@ fn playlists(app: &mut App, ui: &mut egui::Ui, rail: bool) {
 fn toggle_new_playlist(app: &mut App) {
     let open = app.new_playlist.is_some();
     app.new_playlist = if open { None } else { Some(String::new()) };
-    app.new_playlist_kind = crate::app::NewPlaylistKind::YouTube;
+    app.new_playlist_kind = crate::app::NewPlaylistKind::Private {
+        tracks: vec![],
+        rule: None,
+    };
 }
 
 /// The modal the **+** opens: the app dims behind a centered card — name field, Create,
@@ -163,7 +181,9 @@ fn toggle_new_playlist(app: &mut App) {
 /// pointer crossed it, dimming the card along with everything else. In one layer the paint
 /// order is the code order, and the modal stays modal.
 fn new_playlist_popup(app: &mut App, ui: &mut egui::Ui) {
+    let focus_key = egui::Id::new("private-playlist-initial-focus");
     let Some(mut name) = app.new_playlist.clone() else {
+        ui.ctx().data_mut(|d| d.remove::<bool>(focus_key));
         return;
     };
     let Some(screen) = ui.ctx().input(|i| i.raw.screen_rect) else {
@@ -183,7 +203,7 @@ fn new_playlist_popup(app: &mut App, ui: &mut egui::Ui) {
             // Centered, a hair above true centre so it clears the player bar.
             let card = egui::Rect::from_center_size(
                 full.center() - egui::vec2(0.0, 12.0),
-                egui::vec2(320.0, 132.0),
+                egui::vec2(360.0_f32.min(full.width() - 32.0), 240.0),
             );
             // Only a click outside the card dismisses — a click landing on a blank gap between
             // fields inside the card (nothing there senses clicks) used to fall through to this
@@ -227,14 +247,44 @@ fn new_playlist_popup(app: &mut App, ui: &mut egui::Ui) {
                         .font(theme::semibold(15.0))
                         .color(app.palette.text),
                 );
-                body.add_space(4.0);
+                body.add_space(8.0);
+                if !matches!(app.new_playlist_kind, crate::app::NewPlaylistKind::Local { .. }) {
+                    body.horizontal(|ui| {
+                        let private = matches!(app.new_playlist_kind, crate::app::NewPlaylistKind::Private { .. });
+                        if widgets::chip(ui, &app.palette, "Private", private).clicked() && !private {
+                            app.new_playlist_kind = crate::app::NewPlaylistKind::Private { tracks: vec![], rule: None };
+                        }
+                        let seeded = matches!(&app.new_playlist_kind, crate::app::NewPlaylistKind::Private { tracks, rule } if !tracks.is_empty() || rule.is_some());
+                        if !seeded && app.signed_in() && widgets::chip(ui, &app.palette, "YouTube", !private).clicked() && private {
+                            app.new_playlist_kind = crate::app::NewPlaylistKind::YouTube;
+                        }
+                    });
+                    body.add_space(8.0);
+                    if let crate::app::NewPlaylistKind::Private { tracks, rule } = &mut app.new_playlist_kind {
+                        body.label(egui::RichText::new("Only in Moosik · saved on this Mac").font(theme::regular(12.0)).color(app.palette.secondary));
+                        if tracks.is_empty() {
+                            let labels = ["Hand-picked songs", "Forgotten favorites", "Five-star songs", "Recent discoveries"];
+                            let selected = rule.map(|r| crate::local_playlists::SmartRule::ALL.iter().position(|x| *x == r).unwrap_or(0) + 1).unwrap_or(0);
+                            if let Some(i) = widgets::text_dropdown(&mut body, &app.palette, egui::Id::new("private-rule"), labels[selected], &labels) {
+                                *rule = i.checked_sub(1).map(|i| crate::local_playlists::SmartRule::ALL[i]);
+                                if name.is_empty() && let Some(r) = rule { name = r.title().into(); }
+                            }
+                        }
+                    } else {
+                        body.label(egui::RichText::new("Creates a playlist on your YouTube account").font(theme::regular(12.0)).color(app.palette.secondary));
+                    }
+                }
+                body.add_space(8.0);
                 let field = egui::TextEdit::singleline(&mut name)
                     .id(egui::Id::new("ytm-new-playlist"))
                     .hint_text(egui::RichText::new("Playlist name").color(app.palette.dim))
                     .desired_width(f32::INFINITY)
                     .font(theme::regular(13.0));
                 let response = body.add(field);
-                response.request_focus();
+                if !ui.ctx().data(|d| d.get_temp::<bool>(focus_key).unwrap_or(false)) {
+                    response.request_focus();
+                    ui.ctx().data_mut(|d| d.insert_temp(focus_key, true));
+                }
                 let commit =
                     response.lost_focus() && body.input(|i| i.key_pressed(egui::Key::Enter));
                 let cancel = body.input(|i| i.key_pressed(egui::Key::Escape));
@@ -258,8 +308,15 @@ fn new_playlist_popup(app: &mut App, ui: &mut egui::Ui) {
 
                 if create && !name.trim().is_empty() {
                     let title = name.trim().to_owned();
+                    if let crate::app::NewPlaylistKind::Private { tracks, rule } = &app.new_playlist_kind {
+                        let (tracks, rule) = (tracks.clone(), *rule);
+                        if app.create_private_playlist(title, tracks, rule) { app.new_playlist = None; }
+                        else { app.new_playlist = Some(name); }
+                        return;
+                    }
                     match std::mem::take(&mut app.new_playlist_kind) {
                         crate::app::NewPlaylistKind::YouTube => app.create_playlist(title),
+                        crate::app::NewPlaylistKind::Private { .. } => unreachable!(),
                         crate::app::NewPlaylistKind::Local { track_paths } => {
                             app.create_local_playlist(title, track_paths)
                         }
@@ -311,6 +368,7 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     let mut clicked = None;
     let mut reorder = None;
     let mut menu_action = None;
+    let mut dropped = None;
     let from = widgets::painted_so_far(ui);
     let output = egui::ScrollArea::vertical()
         .id_salt("rail")
@@ -350,17 +408,33 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 } else {
                     rail_row(ui, palette, &row, art, selected)
                 };
+                let accepts = p.editable
+                    && super::song_drag::payload(ui.ctx()).is_some_and(|d| {
+                        if p.id.starts_with("private:") {
+                            true
+                        } else if p.source == crate::model::PlaylistSource::Local {
+                            d.tracks.iter().all(|t| t.local_path.is_some())
+                        } else {
+                            signed_in && d.tracks.iter().all(|t| t.local_path.is_none())
+                        }
+                    });
+                if let Some(tracks) = super::song_drag::target(ui, palette, response.rect, accepts)
+                {
+                    dropped = Some((p.id.clone(), tracks));
+                }
                 // Drag a playlist to reorder the rail. The payload is this row's index; the
                 // drop lands on whichever row is under the pointer when the button is released.
                 if response.drag_started() {
-                    egui::DragAndDrop::set_payload(ui.ctx(), i);
+                    egui::DragAndDrop::set_payload(ui.ctx(), PlaylistRailDrag(i));
                 }
-                if egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx())
+                if egui::DragAndDrop::has_payload_of_type::<PlaylistRailDrag>(ui.ctx())
                     && response.contains_pointer()
                 {
                     if ui.ctx().input(|inp| inp.pointer.any_released()) {
-                        if let Some(from) = egui::DragAndDrop::take_payload::<usize>(ui.ctx()) {
-                            reorder = Some((*from, i));
+                        if let Some(from) =
+                            egui::DragAndDrop::take_payload::<PlaylistRailDrag>(ui.ctx())
+                        {
+                            reorder = Some((from.0, i));
                         }
                     } else {
                         // Show where it would land: `remove(from)` then `insert(i, _)` puts the
@@ -370,8 +444,8 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                         // moves, so the insert lands right where `i` used to start). The line
                         // has to flip edges to match, or an upward drag lands one row off from
                         // what it showed.
-                        let from = egui::DragAndDrop::payload::<usize>(ui.ctx());
-                        let dragging_up = from.is_some_and(|from| i < *from);
+                        let from = egui::DragAndDrop::payload::<PlaylistRailDrag>(ui.ctx());
+                        let dragging_up = from.is_some_and(|from| i < from.0);
                         let y = if dragging_up {
                             response.rect.top()
                         } else {
@@ -431,8 +505,10 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                         // Not here: the description only arrives with the fetch, so Info would
                         // pop into an open menu. The playlist page's own ••• offers it.
                         has_info: false,
-                        manage: p.editable,
-                        remove_from_library: !p.editable && !crate::model::is_liked_auto(&p.id),
+                        manage: p.editable || p.id.starts_with("private:"),
+                        remove_from_library: !is_local
+                            && !p.editable
+                            && !crate::model::is_liked_auto(&p.id),
                         context_only: true,
                         // A local playlist has no YouTube radio to start.
                         radio_id: (!is_local).then_some(p.id.as_str()),
@@ -447,6 +523,9 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
             });
         });
     widgets::fade_scroll_edges(ui, from, &output, widgets::scroll_fade(&app.settings));
+    if let Some((id, tracks)) = dropped {
+        app.drop_tracks_on_playlist(&id, tracks);
+    }
     if let Some((from, to)) = reorder {
         app.move_playlist(from, to);
     }

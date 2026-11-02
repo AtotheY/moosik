@@ -17,19 +17,21 @@ This is a direction for development, not a release-date promise. [Suggest a work
 
 The fork is tested locally on Apple Silicon macOS. Inherited platform support does not establish that Moosik is verified on Windows or Linux.
 
-## Next: make the daily interactions effortless
+## Implemented after 0.1.15 (next release)
 
-### Drag songs where they belong
+- A dedicated Listening history page with song/artist search, date filters, timestamps,
+  and the regular song playback and context menus. YouTube account history remains a separate tab.
+- Private playlists for streamed songs and local files, stored only on this Mac, with
+  duplicate handling and Save queue as private playlist.
+- Song transfers to editable sidebar playlists and the queue. Cmd/Ctrl-click and
+  Shift-click select groups in ordinary song lists; queue selections also transfer together.
+- Rediscover presets: forgotten favorites, five-star songs, and recent discoveries.
+  Save a preset as a smart playlist that refreshes from the local listening ledger.
+- Listening-time comparisons and rising artists against the previous equal-length period.
 
-Queue reordering is available. Next, song drops between Library and playlists, with a clear insertion line, a compact artwork preview, auto-scroll, keyboard cancellation, and no accidental playback. Distinguish moving within a queue from adding a copy to a playlist. Test duplicate tracks, shuffle, long lists, and the currently playing item. Existing playlist-row reordering is only part of this work.
-
-### Keep private organization separate from YouTube
-
-Client-only playlists of streamed tracks, visibly distinct from playlists that sync to YouTube. Existing local playlists support local files only. Avoid silent publishing or changing account playlist visibility. Make persistence, export, and duplicate handling predictable.
-
-### Make stats useful over time
-
-Improve comparisons and filtering, help listeners rediscover neglected favorites, and refine recap layouts. Keep measurement definitions visible, label unknown metadata honestly, and preserve raw exportability. Automatic genre enrichment, historical imports, and cross-device sync need separate design and privacy decisions.
+Next refinements: richer playlist editing, external-drag auto-scroll through long lists,
+private-playlist export, and broader keyboard selection across paged grids. Historical imports,
+automatic genre enrichment, and cross-device sync need separate design and privacy decisions.
 
 ## Broader release work
 

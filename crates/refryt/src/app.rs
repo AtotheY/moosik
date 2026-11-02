@@ -463,6 +463,10 @@ pub(crate) enum RepeatMode {
 pub(crate) enum NewPlaylistKind {
     #[default]
     YouTube,
+    Private {
+        tracks: Vec<Track>,
+        rule: Option<crate::local_playlists::SmartRule>,
+    },
     /// Seeded with a specific set of local files — the Library's Local tab's "Save as
     /// playlist," for whichever folder was open when it was pressed.
     Local {
@@ -880,7 +884,7 @@ pub(crate) fn build_local_playlist(
     lp: &crate::local_playlists::LocalPlaylist,
     local_tracks: &[Track],
 ) -> crate::model::Playlist {
-    let tracks: Vec<Track> = lp
+    let mut tracks: Vec<Track> = lp
         .track_paths
         .iter()
         .filter_map(|path| {
@@ -896,17 +900,41 @@ pub(crate) fn build_local_playlist(
             Some(t)
         })
         .collect();
+    if lp.is_private() {
+        tracks = lp
+            .tracks
+            .iter()
+            .map(|m| {
+                let mut t = m.to_track();
+                t.set_video_id = Some(Arc::from(t.video_id.as_str()));
+                t
+            })
+            .collect();
+    }
+    let thumbnail = tracks.first().and_then(|t| t.thumbnail.clone());
     crate::model::Playlist {
         id: lp.id.clone(),
         title: lp.title.clone(),
-        description: None,
-        author: String::new(),
+        description: lp.is_private().then(|| {
+            lp.rule
+                .map(|r| r.description().to_owned())
+                .unwrap_or_else(|| "Only in Moosik · saved on this Mac".into())
+        }),
+        author: if lp.is_private() {
+            "Private · Moosik".into()
+        } else {
+            String::new()
+        },
         author_id: None,
         year: None,
         duration_text: None,
-        track_count: Some(format!("{} tracks", tracks.len())),
-        thumbnail: None,
-        editable: true,
+        track_count: Some(format!(
+            "{} {}",
+            tracks.len(),
+            if tracks.len() == 1 { "track" } else { "tracks" }
+        )),
+        thumbnail,
+        editable: lp.rule.is_none(),
         in_library: false,
         library_add: None,
         library_remove: None,
@@ -924,11 +952,30 @@ fn local_playlist_ref(lp: &crate::local_playlists::LocalPlaylist) -> crate::mode
     crate::model::PlaylistRef {
         id: lp.id.clone(),
         title: lp.title.clone(),
-        author: String::new(),
+        author: if lp.is_private() {
+            "Private · Moosik".into()
+        } else {
+            String::new()
+        },
         author_id: None,
-        track_count: Some(format!("{} tracks", lp.track_paths.len())),
-        thumbnail: None,
-        editable: true,
+        track_count: Some(if lp.rule.is_some() {
+            "Smart playlist".into()
+        } else {
+            format!(
+                "{} tracks",
+                if lp.is_private() {
+                    lp.tracks.len()
+                } else {
+                    lp.track_paths.len()
+                }
+            )
+        }),
+        thumbnail: lp
+            .tracks
+            .first()
+            .and_then(|t| t.artwork.as_deref())
+            .map(Arc::from),
+        editable: lp.rule.is_none(),
         source: crate::model::PlaylistSource::Local,
     }
 }
@@ -1469,6 +1516,7 @@ pub struct App {
     /// guard `album_for`/`playlist_for` already give the page loaders, since two cards' play
     /// buttons clicked close together race each other's fetch exactly the same way.
     pending_card_play: Option<String>,
+    smart_playlist_report: Option<(String, i64)>,
     /// A sidebar or card menu item picked before that page's songs had loaded: the page's id
     /// and what to do. Done when the fetch lands (`cache_album` / `cache_rail_playlist`); a newer
     /// pick replaces an older one, as `pending_card_play` does.
@@ -1718,6 +1766,7 @@ pub struct App {
     pub(crate) stats: Stats,
     pub(crate) listening: crate::listening::Ledger,
     pub(crate) listening_view: crate::ui::listening::View,
+    pub(crate) history_view: crate::ui::history::View,
     /// Print one line of counters and exit, once this much time has passed. Used by
     /// `scripts/perf.sh` to measure a *loaded* app rather than an empty one.
     stats_after: Option<Duration>,
@@ -2068,6 +2117,7 @@ impl App {
             album_for: None,
             account_epoch: 0,
             pending_card_play: None,
+            smart_playlist_report: None,
             pending_page_action: None,
             logo: None,
             detected_browsers: None,
@@ -2201,6 +2251,7 @@ impl App {
             stats: Stats::new(stats),
             listening: crate::listening::Ledger::new(),
             listening_view: crate::ui::listening::View::default(),
+            history_view: crate::ui::history::View::default(),
             stats_after,
             screenshot: screenshot.map(|(path, when)| (path, when, false)),
             content_rect: egui::Rect::NOTHING,
@@ -3479,6 +3530,7 @@ impl App {
     /// underneath the old list rather than showing the loading skeleton again.
     fn note_route_entered(&mut self) {
         ui::queue_edit::clear_selection(&self.ctx);
+        ui::song_drag::clear_selection(&self.ctx);
         // Settings is where the themes folder is offered, so what is in it is looked at fresh.
         if matches!(self.current_route(), Route::Settings) {
             self.theme_watch.check();
@@ -3635,6 +3687,18 @@ impl App {
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
+        if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
+            if lp.rule.is_some() {
+                self.navigate(Route::Playlist(id.clone()));
+                self.smart_playlist_report = None;
+                self.pending_card_play = Some(id);
+                self.refresh_smart_playlist();
+            } else {
+                let tracks = build_local_playlist(&lp, &self.local_tracks).tracks.items;
+                self.play_row(tracks, 0);
+            }
+            return;
+        }
         self.pending_card_play = Some(id.clone());
         self.backend.play_playlist(id);
     }
@@ -3644,6 +3708,7 @@ impl App {
             return;
         }
         self.playlist_for = Some(id.clone());
+        self.smart_playlist_report = None;
         // A new playlist starts back at its own order, not whatever the last one was sorted
         // to, and cancels any load-the-rest-then-sort chain that was still in flight.
         self.playlist_sort = PlaylistSort::default();
@@ -4017,6 +4082,7 @@ impl App {
     /// Refetches from page one, because the order is the server's and applies to the whole
     /// library — not to whatever happens to be loaded.
     pub(crate) fn sort_library(&mut self, sort: LibrarySort) {
+        ui::song_drag::clear_selection(&self.ctx);
         if self.library_sort == sort {
             return;
         }
@@ -4041,6 +4107,7 @@ impl App {
     /// loading-row affordance shown meanwhile, and the sort applies once the last page arrives
     /// (see the `Event::PlaylistMore` handler).
     pub(crate) fn sort_playlist(&mut self, sort: PlaylistSort) {
+        ui::song_drag::clear_selection(&self.ctx);
         self.playlist_sort = sort;
         let Some(playlist) = self.playlist.as_mut() else {
             self.playlist_sort_pending = false;
@@ -4613,6 +4680,7 @@ impl App {
             .playlists
             .items
             .extend(self.local_playlists.iter().map(local_playlist_ref));
+        self.apply_playlist_order();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -6541,6 +6609,31 @@ impl App {
         self.q.insert(at, track, Slot::BeforeRadio, chosen);
     }
 
+    /// Insert an external drag at a displayed upcoming boundary, including shuffle order.
+    pub(crate) fn insert_queue_tracks(&mut self, tracks: Vec<Track>, boundary: usize) {
+        if tracks.is_empty() {
+            return;
+        }
+        let snapshot = self.q.edit_snapshot();
+        let radio = self.radio.clone();
+        let count = tracks.len();
+        if let Some(radio) = &mut self.radio {
+            for track in &tracks {
+                radio.chosen.insert(track.video_id.clone());
+            }
+        }
+        self.q.insert_upcoming(
+            tracks,
+            boundary,
+            self.repeat,
+            self.radio.as_ref().map(|r| &r.chosen),
+        );
+        self.queue_undo = Some((self.q.edit_stamp(), snapshot, radio));
+        self.prefetch_next();
+        self.save_playback();
+        self.toast(&Self::songs_will(count, "added to queue"));
+    }
+
     /// Whether there is a confirmed session. Every write — rating, the library, playlists —
     /// needs one, and the controls for them are hidden without it.
     pub(crate) fn signed_in(&self) -> bool {
@@ -6652,6 +6745,11 @@ impl App {
                 self.backend
                     .toggle_library(token.to_owned(), track.video_id, saving);
             }
+            RowAction::SavePrivate {
+                playlist_id,
+                tracks,
+            } => self.add_private_tracks(&playlist_id, &tracks),
+            RowAction::NewPrivate(tracks) => self.new_private_playlist(tracks),
             RowAction::SaveToPlaylist {
                 playlist_id,
                 video_id,
@@ -6675,6 +6773,14 @@ impl App {
                 video_id,
                 set_video_id,
             } => {
+                if playlist_id.starts_with("private:") {
+                    let mut lists = self.local_playlists.clone();
+                    if let Some(lp) = lists.iter_mut().find(|p| p.id == playlist_id) {
+                        lp.tracks.retain(|t| t.id != video_id);
+                    }
+                    self.persist_private_lists(lists);
+                    return;
+                }
                 if self.is_local_playlist(&playlist_id) {
                     // `video_id` is the track's own canonical path, per `Track.local_path`'s
                     // own doc comment — the same string `local_playlist_as_playlist` gave this
@@ -7130,12 +7236,147 @@ impl App {
                 id: crate::local_playlists::new_id(),
                 title: title.clone(),
                 track_paths,
+                tracks: Vec::new(),
+                rule: None,
             });
         if let Err(e) = crate::local_playlists::save(&self.local_playlists) {
             tracing::warn!(error = %format!("{e:#}"), "could not save local playlists");
         }
         self.resync_local_playlists();
         self.toast(&format!("Created “{title}”"));
+    }
+
+    pub(crate) fn new_private_playlist(&mut self, tracks: Vec<Track>) {
+        self.new_playlist = Some(String::new());
+        self.new_playlist_kind = NewPlaylistKind::Private { tracks, rule: None };
+    }
+
+    pub(crate) fn persist_private_lists(
+        &mut self,
+        lists: Vec<crate::local_playlists::LocalPlaylist>,
+    ) -> bool {
+        if let Err(e) = crate::local_playlists::save(&lists) {
+            self.toast_error(&format!("Couldn't save playlist: {e}"));
+            return false;
+        }
+        self.local_playlists = lists;
+        self.resync_local_playlists();
+        if let Some(id) = self.playlist.as_ref().map(|p| p.id.clone())
+            && let Some(lp) = self.local_playlists.iter().find(|p| p.id == id)
+        {
+            self.playlist = Some(self.local_playlist_as_playlist(lp));
+        }
+        true
+    }
+
+    pub(crate) fn create_private_playlist(
+        &mut self,
+        title: String,
+        tracks: Vec<Track>,
+        rule: Option<crate::local_playlists::SmartRule>,
+    ) -> bool {
+        let mut lp = crate::local_playlists::LocalPlaylist {
+            id: crate::local_playlists::new_id().replacen("local:", "private:", 1),
+            title,
+            track_paths: vec![],
+            tracks: vec![],
+            rule,
+        };
+        lp.add_tracks(&tracks);
+        let id = lp.id.clone();
+        let mut lists = self.local_playlists.clone();
+        lists.push(lp);
+        if self.persist_private_lists(lists) {
+            if let Some(from) = self.library.playlists.items.iter().position(|p| p.id == id) {
+                self.move_playlist(from, 1.min(self.library.playlists.len().saturating_sub(1)));
+            }
+            self.navigate(Route::Playlist(id));
+            self.toast("Private playlist created");
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn add_private_tracks(&mut self, id: &str, tracks: &[Track]) {
+        let mut lists = self.local_playlists.clone();
+        let Some(lp) = lists
+            .iter_mut()
+            .find(|p| p.id == id && p.is_private() && p.rule.is_none())
+        else {
+            return;
+        };
+        let count = lp.add_tracks(tracks);
+        if count == 0 {
+            self.toast("Already in this playlist");
+            return;
+        }
+        if self.persist_private_lists(lists) {
+            self.toast(&Self::songs_will(count, "saved to private playlist"));
+        }
+    }
+
+    pub(crate) fn drop_tracks_on_playlist(&mut self, id: &str, tracks: Vec<Track>) {
+        if id.starts_with("private:") {
+            self.add_private_tracks(id, &tracks);
+        } else if self.is_local_playlist(id) {
+            for track in tracks {
+                if let Some(path) = track.local_path {
+                    self.add_to_local_playlist(id, path.to_path_buf());
+                }
+            }
+        } else if self.signed_in() {
+            let ids: Vec<_> = tracks
+                .into_iter()
+                .filter(|t| t.local_path.is_none())
+                .map(|t| t.video_id)
+                .collect();
+            if !ids.is_empty() {
+                self.backend.add_many_to_playlist(id.to_owned(), ids);
+                self.toast("Adding songs to YouTube playlist…");
+            }
+        }
+    }
+
+    pub(crate) fn refresh_smart_playlist(&mut self) {
+        let Some(id) = self.playlist.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+        let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() else {
+            return;
+        };
+        let Some(rule) = lp.rule else {
+            return;
+        };
+        let query = crate::ui::history::all_time_query();
+        self.listening.request(query.clone(), false);
+        if let Some(report) = self.listening.report.as_ref().filter(|r| r.query == query) {
+            let stamp = (id.clone(), report.generated_ms);
+            if self.smart_playlist_report.as_ref() == Some(&stamp) {
+                return;
+            }
+            self.smart_playlist_report = Some(stamp);
+            let mut resolved = lp;
+            resolved.tracks = rule
+                .tracks(report)
+                .iter()
+                .map(crate::listening::Metadata::from_track)
+                .collect();
+            let mut playlist = build_local_playlist(&resolved, &self.local_tracks);
+            playlist.editable = false;
+            let play = self.pending_card_play.as_deref() == Some(id.as_str());
+            let tracks = play.then(|| playlist.tracks.items.clone());
+            self.playlist = Some(playlist);
+            self.playlist_original_order = None;
+            self.sort_playlist(self.playlist_sort);
+            if let Some(tracks) = tracks {
+                self.pending_card_play = None;
+                if tracks.is_empty() {
+                    self.toast("This smart playlist has no matching songs yet");
+                } else {
+                    self.play_row(tracks, 0);
+                }
+            }
+        }
     }
 
     pub(crate) fn is_local_playlist(&self, id: &str) -> bool {
@@ -7197,6 +7438,18 @@ impl App {
             self.playlist_edit = Some(editor);
             return;
         }
+        if editor.id.starts_with("private:") {
+            let mut lists = self.local_playlists.clone();
+            if let Some(lp) = lists.iter_mut().find(|p| p.id == editor.id) {
+                lp.title = title;
+            }
+            if self.persist_private_lists(lists) {
+                self.toast("Playlist updated");
+            } else {
+                self.playlist_edit = Some(editor);
+            }
+            return;
+        }
         self.set_playlist_title(&editor.id, title.clone());
         if let Some(pl) = self.playlist.as_mut()
             && pl.id == editor.id
@@ -7230,6 +7483,22 @@ impl App {
         let Some((id, _)) = self.playlist_delete.take() else {
             return;
         };
+        if id.starts_with("private:") {
+            let lists = self
+                .local_playlists
+                .iter()
+                .filter(|p| p.id != id)
+                .cloned()
+                .collect();
+            if self.persist_private_lists(lists) {
+                self.drop_playlist(&id);
+                if self.current_route() == Route::Playlist(id) {
+                    self.navigate(Route::Library);
+                }
+                self.toast("Playlist deleted");
+            }
+            return;
+        }
         if self.is_local_playlist(&id) {
             self.local_playlists.retain(|p| p.id != id);
             if let Err(e) = crate::local_playlists::save(&self.local_playlists) {
@@ -7652,6 +7921,28 @@ impl App {
     /// the moment the drag was released — this only ever runs the same frame that produced
     /// them, so nothing else has had a chance to change it first.
     pub(crate) fn reorder_playlist_track(&mut self, from: usize, to: usize) {
+        if let Some(p) = &self.playlist
+            && p.id.starts_with("private:")
+        {
+            let mut lists = self.local_playlists.clone();
+            if let Some(lp) = lists.iter_mut().find(|lp| lp.id == p.id)
+                && lp.rule.is_none()
+            {
+                let mut tracks = p.tracks.items.clone();
+                if reorder_tracks(&mut tracks, from, to).is_some() {
+                    lp.tracks = tracks
+                        .iter()
+                        .map(crate::listening::Metadata::from_track)
+                        .collect();
+                    if self.persist_private_lists(lists) {
+                        self.playlist_sort = PlaylistSort::default();
+                        self.playlist_original_order = None;
+                        ui::song_drag::clear_selection(&self.ctx);
+                    }
+                }
+            }
+            return;
+        }
         let Some(playlist) = self.playlist.as_mut() else {
             return;
         };
@@ -8367,6 +8658,7 @@ impl eframe::App for App {
         }
 
         // The playlist management modals, over everything and on every route.
+        ui::song_drag::finish(ui.ctx(), &self.palette);
         ui::playlist::modals(self, ui);
         ui::help::modal(self, ui);
         ui::home_order::modal(self, ui);

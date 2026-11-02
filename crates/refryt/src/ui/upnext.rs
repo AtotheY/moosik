@@ -15,6 +15,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     // needs its rounded edges. Taken before the empty queue returns, so that card has its edge
     // too. Not in the fullscreen drawer, which is no card (see the notches below).
     let card = widgets::card_rect(ui.available_rect_before_wrap(), theme::CARD_INSET);
+    external_drop(app, ui, card);
     let _edge = (!app.fs.open).then(|| widgets::CardEdge::new(ui, card, &app.palette));
     // What plays after the track playing, in the order it will: the rest of the list, or the
     // shuffle's order, which is drawn when shuffle goes on and then holds.
@@ -167,6 +168,7 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
 
 /// The full queue uses the same live ordering and actions as the compact panel.
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    external_drop(app, ui, ui.available_rect_before_wrap());
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
         if app.q.current_track().is_none() && app.q.tracks().is_empty() {
@@ -174,6 +176,22 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             centered(app, ui, "Your queue is empty. Play a song to get started.");
             return;
         }
+        if widgets::pill_button(ui, &app.palette, "Save as private playlist").clicked() {
+            let tracks = app
+                .q
+                .current_track()
+                .cloned()
+                .into_iter()
+                .chain(
+                    app.q
+                        .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen))
+                        .into_iter()
+                        .map(|i| app.q.tracks()[i].clone()),
+                )
+                .collect();
+            app.new_private_playlist(tracks);
+        }
+        ui.add_space(12.0);
         now_playing(app, ui, true);
         let upcoming = app
             .q
@@ -275,6 +293,34 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
         )
     };
 
+    if super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue) {
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(ui.min_rect().left(), list_top),
+            egui::pos2(
+                ui.max_rect().right(),
+                list_top + upcoming.len() as f32 * pitch,
+            ),
+        )
+        .intersect(ui.clip_rect());
+        if let Some(pos) = ui
+            .input(|i| i.pointer.interact_pos())
+            .filter(|p| rect.contains(*p))
+        {
+            let boundary = (((pos.y - list_top) / pitch) + 0.5).floor().max(0.0) as usize;
+            let boundary = boundary.min(upcoming.len());
+            let y = list_top + boundary as f32 * pitch;
+            ui.painter().hline(
+                rect.x_range(),
+                y,
+                egui::Stroke::new(2.0, app.palette.accent),
+            );
+            if ui.input(|i| i.pointer.any_released())
+                && let Some(drag) = super::song_drag::take(ui.ctx())
+            {
+                app.insert_queue_tracks(drag.tracks, boundary);
+            }
+        }
+    }
     crate::ui::queue_edit::drop_target(ui, &app.palette, list_top, pitch, upcoming.len());
     if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
         app.edit_queue(action);
@@ -313,5 +359,27 @@ fn edit_controls(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize], compact: 
     crate::ui::queue_edit::controls(ui, &app.palette, undo, compact);
     if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
         app.edit_queue(action);
+    }
+}
+
+fn external_drop(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect) {
+    if !super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue) {
+        return;
+    }
+    let target = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), (rect.bottom() - 48.0).max(rect.top())),
+        rect.right_bottom(),
+    );
+    ui.painter()
+        .rect_filled(target, crate::theme::RADIUS, app.palette.surface);
+    ui.painter().text(
+        target.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop to add to queue",
+        theme::medium(13.0),
+        app.palette.accent,
+    );
+    if let Some(tracks) = super::song_drag::target(ui, &app.palette, target, true) {
+        app.row_action(super::RowAction::PageQueue(tracks));
     }
 }

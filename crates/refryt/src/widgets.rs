@@ -2337,23 +2337,16 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // came from an editable playlist, and egui only treats a press as a drag once the pointer
     // has actually moved, so an ordinary click is unaffected.
     let queue_index = menu.as_ref().and_then(|m| m.queue_index);
-    let (rect, allocated) = ui.allocate_exact_size(
+    let (rect, _) = ui.allocate_exact_size(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
-        if queue_index.is_some() {
-            Sense::hover()
-        } else {
-            Sense::click_and_drag()
-        },
+        Sense::hover(),
     );
-    // Queue toolbar controls and virtual spacers change automatic widget ids.
-    // Keep the pressed occurrence's drag/focus identity stable across those frames.
-    let response = queue_index.map_or(allocated, |index| {
-        ui.interact(
-            rect,
-            ui.id().with(("ytm-queue-row", index)),
-            Sense::click_and_drag(),
-        )
-    });
+    // Stable identities survive artwork loading, virtual spacers and toolbar changes.
+    let row_id = match queue_index {
+        Some(index) => ui.id().with(("ytm-queue-row", index)),
+        None => ui.id().with(("ytm-song-row", id_salt)),
+    };
+    let response = ui.interact(rect, row_id, Sense::click_and_drag());
     // Reserve the menu slot even at rest: no text, duration or rating moves on hover.
     let more_w = if menu.is_some() { 36.0 } else { 0.0 };
     let right_pad = 20.0 + more_w;
@@ -2470,7 +2463,16 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         .is_some_and(|index| {
             crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
         });
-    let activate = if on_more || queue_suppress {
+    let song_suppress = menu
+        .as_ref()
+        .filter(|m| m.queue_index.is_none())
+        .is_some_and(|m| {
+            crate::ui::song_drag::interact(ui, &response, id_salt, m.track, m.playlist_id, on_more)
+        });
+    if song_suppress {
+        link = None;
+    }
+    let activate = if on_more || queue_suppress || song_suppress {
         false
     } else if (!hide_art
         && on_cover(
@@ -2494,7 +2496,10 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     };
     let selected = menu.as_ref().is_some_and(|m| {
         m.queue_index.map_or_else(
-            || is_selected(ui.ctx(), m.track.video_id.as_str()),
+            || {
+                is_selected(ui.ctx(), m.track.video_id.as_str())
+                    || crate::ui::song_drag::selected(ui.ctx(), ui.id(), id_salt)
+            },
             |index| crate::ui::queue_edit::selected(ui.ctx(), index),
         )
     });
@@ -2759,6 +2764,9 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             .on_hover_text("More options")
             .on_hover_cursor(egui::CursorIcon::PointingHand);
     }
+    if song_suppress {
+        link = None;
+    }
     let mut action =
         menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m));
     // Rating thumbs are interacted whenever the row is visible — never gated on drawn — for
@@ -2953,6 +2961,36 @@ fn row_menu_with_button(
                 crate::ui::queue_edit::single_move_menu(mui, palette);
             }
 
+            if let Some(action) = sub_menu(
+                mui,
+                palette,
+                Icon::ListPlus,
+                "Save privately",
+                mui.id().with("private-save"),
+                |ui| {
+                    let mut picked = None;
+                    if menu_item_plain(ui, palette, "New private playlist…", None).clicked() {
+                        picked = Some(RowAction::NewPrivate(vec![t.clone()]));
+                    }
+                    for pl in menu
+                        .playlists
+                        .iter()
+                        .filter(|p| p.id.starts_with("private:") && p.editable)
+                    {
+                        if menu_item_plain(ui, palette, &pl.title, None).clicked() {
+                            picked = Some(RowAction::SavePrivate {
+                                playlist_id: pl.id.clone(),
+                                tracks: vec![t.clone()],
+                            });
+                        }
+                    }
+                    picked
+                },
+            ) {
+                choice = Some(action);
+                mui.close();
+            }
+
             // Block two: where it lives. Save to library / Remove from library, when the row
             // carries the token for the direction it needs. Signed-out rows carry no tokens,
             // so the item hides itself.
@@ -2976,7 +3014,9 @@ fn row_menu_with_button(
             let targets: Vec<&crate::model::PlaylistRef> = menu
                 .playlists
                 .iter()
-                .filter(|p| p.editable && p.source == wanted_source)
+                .filter(|p| {
+                    p.editable && p.source == wanted_source && !p.id.starts_with("private:")
+                })
                 .collect();
             let removable = menu.playlist_id.zip(t.set_video_id.as_deref());
             // A download item shows for every YouTube song, so the block is there whenever the
@@ -3224,7 +3264,9 @@ pub(crate) fn page_menu(
             let targets: Vec<&crate::model::PlaylistRef> = menu
                 .playlists
                 .iter()
-                .filter(|p| p.editable && p.source == wanted_source)
+                .filter(|p| {
+                    p.editable && p.source == wanted_source && !p.id.starts_with("private:")
+                })
                 .collect();
             // Offline: save the whole page to disk. Only for YouTube tracks — a folder of local
             // files is already on disk.
@@ -4311,6 +4353,36 @@ pub fn icon_dropdown(
     // as the small one of the row.
     let response = icon_button(ui, palette, icon, 20.0, active);
 
+    dropdown_options(ui, palette, id, response, current, options)
+}
+
+/// A labelled filter: the whole chip opens the menu and shows the current choice.
+pub fn text_dropdown(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: egui::Id,
+    current: &str,
+    options: &[&str],
+) -> Option<usize> {
+    let response = chip(ui, palette, &format!("{current}   "), false);
+    Icon::ChevronDown.image(palette.secondary, 14.0).paint_at(
+        ui,
+        Rect::from_center_size(
+            response.rect.right_center() - vec2(14.0, 0.0),
+            vec2(14.0, 14.0),
+        ),
+    );
+    dropdown_options(ui, palette, id, response, current, options)
+}
+
+fn dropdown_options(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: egui::Id,
+    response: egui::Response,
+    current: &str,
+    options: &[&str],
+) -> Option<usize> {
     let mut choice = None;
     let popup = egui::Popup::from_response(&response)
         .id(id)

@@ -36,5 +36,19 @@ it; undoing an edit does not rewind audio playback. A stale drag is cancelled if
 the underlying queue changes. Dropping outside the queue or pressing Escape leaves
 the queue untouched. Repeated appearances of the same song are separate entries.
 
-These controls move songs within the current queue. Dragging between Library,
-playlists, and the queue is outside this change.
+## Song transfers (next release)
+
+Drag a regular song row from search, an album, a playlist, stats, or listening history
+onto **Queue** in the sidebar to add it. The open queue also offers a drop zone, and
+its upcoming list shows an insertion line for an exact position. Dropping into that
+list preserves the current song, follows the displayed shuffle order, and supports Undo.
+
+Drag songs onto an editable sidebar playlist to add copies. Private playlists accept
+both streamed tracks and local files and skip duplicates; YouTube playlists accept
+streamed tracks, and file playlists accept local files. Smart playlists follow their
+rule instead of accepting manual additions. Queue selections transfer together;
+Cmd/Ctrl-click and Shift-click also select groups in ordinary song lists.
+
+Use **Save as private playlist** on the queue page to keep the current song and its
+upcoming sequence. Choose a name in the dialog. It saves song references on this Mac,
+without uploading a playlist to YouTube or downloading the audio.

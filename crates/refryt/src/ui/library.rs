@@ -44,6 +44,13 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
 
+        if app.rail_filter == RailFilter::Playlists && !app.signed_in() {
+            playlist_grid(app, ui);
+            if widgets::pill_button(ui, &app.palette, "New private playlist").clicked() {
+                app.new_private_playlist(vec![]);
+            }
+            return;
+        }
         match &app.auth {
             AuthState::SignedIn { .. } => content(app, ui),
             AuthState::Checking => centered(app, ui, "Checking your saved session…"),
