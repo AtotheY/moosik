@@ -14,7 +14,7 @@ Our ambition is to make everyday listening feel better than Spotify: effortless 
 
 [Get started](#get-started) · [Listening stats](docs/listening-stats.md) · [Roadmap](docs/ROADMAP.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
 
-> **Early release.** [Download Moosik for Apple Silicon Macs](https://github.com/AtotheY/moosik/releases/latest). Updates are available inside the app after the first installation. Windows and Linux support is inherited from Refryt and still needs validation with our changes.
+> **Early release.** [Download Moosik for Apple Silicon Macs](https://github.com/AtotheY/moosik/releases/latest). Updates are available inside the app after the first installation. Windows x64 now has an experimental installer with automated install and launch checks. Interactive sign-in and playback still need real-device testing; Linux validation is pending.
 
 ## A few ways to make it yours
 
@@ -59,12 +59,13 @@ Choose from the inherited theme collection, artwork-inspired headers, resizable 
 
 ## Get started
 
-**Current version: `0.1.15` — first packaged Moosik release.**
+**Current version: `0.1.18`. Download from [moosik.dev](https://moosik.dev) or [GitHub Releases](https://github.com/AtotheY/moosik/releases/latest).**
 
 | Platform | Moosik status |
 | --- | --- |
 | macOS, Apple Silicon | DMG installer and signed in-app updates; see the release for macOS requirements |
-| Windows, x64 / ARM64 | Upstream build scripts exist; Moosik builds and hardware testing are pending |
+| Windows, x64 | Experimental setup EXE and portable ZIP; automated installation and app launch verified |
+| Windows, ARM64 | Native packaging and hardware testing pending |
 | Linux | Upstream AppImage / Flatpak tooling exists; Moosik validation is pending |
 | macOS, Intel | Not part of the current release workflow |
 | iOS / Android | No Moosik app available |
