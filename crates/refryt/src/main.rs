@@ -157,19 +157,32 @@ fn main() -> eframe::Result {
 
     // One instance per profile: a plain second launch — the desktop entry, the AppImage file —
     // tells the running instance to show its window and exits instead of starting a second
-    // player. A launch with any other argument is scripted (`--page`, `--search`, a test aid),
+    // player. --resume uses the same guard, but requests playback instead of window focus.
+    // A launch with any other argument is scripted (`--page`, `--search`, a test aid),
     // which is not a user clicking the app again, so it runs unguarded. See `instance`'s own
     // module doc.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     {
-        let plain = args.iter().skip(1).all(|a| a == refryt::autostart::ARG);
-        if plain
-            && matches!(
-                refryt::instance::claim(),
-                refryt::instance::Claim::Secondary
-            )
-        {
-            return Ok(());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let resume = args.iter().any(|a| a == "--resume");
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let resume = false;
+        let plain = args
+            .iter()
+            .skip(1)
+            .all(|a| a == refryt::autostart::ARG || (resume && a == "--resume"));
+        if plain {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let claim = if resume {
+                refryt::instance::claim_resume()
+            } else {
+                refryt::instance::claim()
+            };
+            #[cfg(target_os = "windows")]
+            let claim = refryt::instance::claim();
+            if matches!(claim, refryt::instance::Claim::Secondary) {
+                return Ok(());
+            }
         }
     }
 

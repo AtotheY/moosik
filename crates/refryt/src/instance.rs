@@ -12,6 +12,8 @@
 //! real app instead of colliding with it. A launch that only exists to be driven by a script
 //! (`--page`, `--search`, the test aids) is not a user clicking the app again; those bypass the
 //! claim entirely, which `main` decides, not this module.
+//! On Unix, an explicit `--resume` launch uses the same guard to resume the saved queue without
+//! raising an existing window. Ordinary media keys continue through the OS media service.
 //!
 //! On macOS the lock and socket live in the per-user `$TMPDIR`, since macOS has no
 //! `$XDG_RUNTIME_DIR`. `$TMPDIR` is private to the user and short enough for a socket path, which
@@ -48,6 +50,8 @@ mod unix {
 
     /// A second launch asked for the window. The listener thread sets it; [`poll`] takes it.
     static SHOW: AtomicBool = AtomicBool::new(false);
+    /// An explicit fallback launch requested playback, not a play/pause toggle.
+    static RESUME: AtomicBool = AtomicBool::new(false);
     /// The UI's context, installed by [`attach`] once the app is built — the listener thread
     /// starts before that, so a request landing early simply waits for the first frame.
     static CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
@@ -91,19 +95,34 @@ mod unix {
     }
 
     pub fn claim() -> Claim {
+        claim_request(false)
+    }
+
+    /// Resume the saved queue on a cold launch, or ask the existing instance to resume.
+    /// A regular app launch still only shows the window.
+    pub fn claim_resume() -> Claim {
+        claim_request(true)
+    }
+
+    fn claim_request(resume: bool) -> Claim {
         let Some((lock, socket)) = paths() else {
+            RESUME.store(resume, Ordering::SeqCst);
             return Claim::Primary;
         };
-        claim_at(&lock, &socket)
+        let claim = claim_at(&lock, &socket, resume);
+        if resume && matches!(claim, Claim::Primary) {
+            RESUME.store(true, Ordering::SeqCst);
+        }
+        claim
     }
 
     /// [`claim`] with the paths injected, so the profile split and the lock are testable.
     ///
-    /// The lock decides who is primary; the socket only carries the "show" message. Deciding on
+    /// The lock decides who is primary; the socket carries show/resume requests. Deciding on
     /// the socket's existence instead cannot be made race-free: between a failed connect and a
     /// bind, another process may have bound, and unlinking what looks stale then deletes the
     /// winner's live socket. A lock is atomic, and the OS drops it when the holder dies.
-    fn claim_at(lock: &Path, socket: &Path) -> Claim {
+    fn claim_at(lock: &Path, socket: &Path, resume: bool) -> Claim {
         let file = match File::options()
             .create(true)
             .truncate(false)
@@ -124,7 +143,7 @@ mod unix {
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
-                show_running(socket);
+                notify_running(socket, resume);
                 return Claim::Secondary;
             }
             Err(TryLockError::Error(e)) => {
@@ -163,13 +182,19 @@ mod unix {
         Claim::Primary
     }
 
-    /// Ask the running instance to show its window, best-effort. A connect landing in the
-    /// primary's own lock-to-bind window is lost, but that primary is about to show its window
-    /// anyway; there is nothing to retry for.
-    fn show_running(socket: &Path) {
-        if let Ok(mut stream) = UnixStream::connect(socket) {
-            let _ = stream.write_all(b"show\n");
+    /// Retry briefly across the primary's lock-to-bind window so a resume request is not lost.
+    fn notify_running(socket: &Path, resume: bool) {
+        for _ in 0..20 {
+            if let Ok(mut stream) = UnixStream::connect(socket) {
+                let message: &[u8] = if resume { b"resume\n" } else { b"show\n" };
+                if let Err(error) = stream.write_all(message) {
+                    tracing::warn!(%error, "single instance: could not send request");
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        tracing::warn!("single instance: running app did not accept request");
     }
 
     /// The listener loop. One transient `accept()` error (fd exhaustion; `EINTR` is already
@@ -197,15 +222,33 @@ mod unix {
                     continue;
                 }
             };
-            let mut buf = [0u8; 8];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            if buf[..n].starts_with(b"show") {
-                SHOW.store(true, Ordering::SeqCst);
-                if let Ok(ctx) = CTX.lock()
-                    && let Some(ctx) = ctx.as_ref()
-                {
-                    ctx.request_repaint();
+            // A socket read can contain only part of a command. Read the bounded message
+            // through EOF; the sender closes immediately after writing it.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            let mut buf = Vec::new();
+            if Read::by_ref(&mut stream)
+                .take(16)
+                .read_to_end(&mut buf)
+                .is_err()
+            {
+                continue;
+            }
+            let recognized = match buf.as_slice() {
+                b"show\n" => {
+                    SHOW.store(true, Ordering::SeqCst);
+                    true
                 }
+                b"resume\n" => {
+                    RESUME.store(true, Ordering::SeqCst);
+                    true
+                }
+                _ => false,
+            };
+            if recognized
+                && let Ok(ctx) = CTX.lock()
+                && let Some(ctx) = ctx.as_ref()
+            {
+                ctx.request_repaint();
             }
         }
     }
@@ -221,6 +264,10 @@ mod unix {
     /// Whether a second launch is asking for the window, drained once a frame.
     pub fn poll() -> bool {
         SHOW.swap(false, Ordering::SeqCst)
+    }
+
+    pub fn poll_resume() -> bool {
+        RESUME.swap(false, Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -276,8 +323,8 @@ mod unix {
             let _serial = serial();
             let lock = temp_path("second-claim.lock");
             let socket = temp_path("second-claim.sock");
-            assert!(matches!(claim_at(&lock, &socket), Claim::Primary));
-            assert!(matches!(claim_at(&lock, &socket), Claim::Secondary));
+            assert!(matches!(claim_at(&lock, &socket, false), Claim::Primary));
+            assert!(matches!(claim_at(&lock, &socket, false), Claim::Secondary));
             let _ = std::fs::remove_file(&socket);
             let _ = std::fs::remove_file(&lock);
         }
@@ -294,6 +341,62 @@ mod unix {
             serve([Err(std::io::Error::other("transient")), Ok(server)]);
             writer.join().unwrap();
             assert!(SHOW.swap(false, Ordering::SeqCst));
+        }
+
+        #[test]
+        fn fragmented_resume_is_delivered_without_raising_the_window() {
+            let _serial = serial();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            SHOW.store(false, Ordering::SeqCst);
+            RESUME.store(false, Ordering::SeqCst);
+            let writer = std::thread::spawn(move || {
+                client.write_all(b"res").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                client.write_all(b"ume\n").unwrap();
+            });
+            serve([Ok(server)]);
+            writer.join().unwrap();
+            assert!(poll_resume());
+            assert!(!poll_resume(), "a request must be consumed only once");
+            assert!(!poll(), "resume must not bring an existing player forward");
+        }
+
+        #[test]
+        fn showing_the_window_does_not_request_playback() {
+            let _serial = serial();
+            let (mut client, server) = UnixStream::pair().unwrap();
+            SHOW.store(false, Ordering::SeqCst);
+            RESUME.store(false, Ordering::SeqCst);
+            client.write_all(b"show\n").unwrap();
+            drop(client);
+            serve([Ok(server)]);
+            assert!(poll());
+            assert!(!poll_resume());
+        }
+
+        #[test]
+        fn resume_launch_uses_the_existing_instance() {
+            let _serial = serial();
+            let lock = temp_path("resume-existing.lock");
+            let socket = temp_path("resume-existing.sock");
+            let _ = std::fs::remove_file(&socket);
+            let primary = File::options()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock)
+                .unwrap();
+            primary.try_lock().unwrap();
+            let listener = UnixListener::bind(&socket).unwrap();
+            SHOW.store(false, Ordering::SeqCst);
+            RESUME.store(false, Ordering::SeqCst);
+            assert!(matches!(claim_at(&lock, &socket, true), Claim::Secondary));
+            serve(listener.incoming().take(1));
+            assert!(poll_resume());
+            assert!(!poll());
+            let _ = std::fs::remove_file(&socket);
+            let _ = std::fs::remove_file(&lock);
         }
 
         /// A listener that keeps failing stops instead of spinning forever.
@@ -415,7 +518,7 @@ mod windows {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use unix::{attach, claim, poll};
+pub use unix::{attach, claim, claim_resume, poll, poll_resume};
 
 #[cfg(target_os = "windows")]
 pub use windows::{attach, claim, poll};

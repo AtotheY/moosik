@@ -8215,6 +8215,21 @@ impl eframe::App for App {
             tracing::info!("second launch: showing the window");
             self.show_window(ctx);
         }
+        // Only an explicit --resume launch requests this. Normal launches remain paused;
+        // native OS media commands continue to control whichever player macOS selects.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if crate::instance::poll_resume() {
+            if self.playback_started {
+                if let Some(player) = &self.player {
+                    // Set the state explicitly: duplicate fallback requests must never pause.
+                    player.set_paused(false);
+                    tracing::info!("fallback launch: ensuring playback is active");
+                }
+            } else if !self.now.resolving && !self.q.is_empty() {
+                tracing::info!("fallback launch: resuming the saved queue");
+                self.toggle_playback();
+            }
+        }
         self.transport_step(ctx);
         #[cfg(target_os = "macos")]
         while let Some(event) = crate::update::macos::poll() {
