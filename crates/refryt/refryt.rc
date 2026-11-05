@@ -1,4 +1,4 @@
-1 ICON "../../assets/icons/app/refryt.ico"
+1 ICON "../../assets/icons/app/moosik.ico"
 
 // Filled in by build.rs from Cargo's version.
 1 VERSIONINFO
@@ -11,13 +11,13 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "refryt"
-            VALUE "FileDescription", "refryt"
+            VALUE "CompanyName", "Moosik"
+            VALUE "FileDescription", "Moosik"
             VALUE "FileVersion", "@VERSION@"
             VALUE "InternalName", "refryt"
             VALUE "LegalCopyright", "GPL-3.0-or-later"
             VALUE "OriginalFilename", "refryt.exe"
-            VALUE "ProductName", "refryt"
+            VALUE "ProductName", "Moosik"
             VALUE "ProductVersion", "@VERSION@"
         END
     END

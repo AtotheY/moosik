@@ -1,0 +1,121 @@
+name: Moosik Windows release
+on:
+  push:
+    branches: [codex/windows-distribution]
+    tags: ['moosik-v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: moosik-windows-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: always
+  WINEDLLOVERRIDES: mscoree,mshtml=
+  WINEDEBUG: -all
+  INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+  INNO_SETUP_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config curl zip unzip p7zip-full msitools wixl \
+            mingw-w64 wine wine32:i386 xvfb \
+            libmpv-dev libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcb1-dev libssl-dev python3-pil
+      - name: Rust targets
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Install Inno Setup under Wine
+        run: |
+          curl -fsSL -o innosetup.exe "$INNO_SETUP_URL"
+          echo "$INNO_SETUP_SHA256  innosetup.exe" | sha256sum -c -
+          Xvfb :99 -screen 0 1024x768x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          sleep 2
+          # Wine's first start is flaky (the installer has exited non-zero on a run that
+          # worked the time before), and its exit code says little: try again, and judge by
+          # whether the compiler is there.
+          iscc=""
+          for attempt in 1 2 3; do
+            DISPLAY=:99 wine innosetup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART || true
+            # This installer puts Inno Setup in "Program Files" when the prefix is 64-bit; the
+            # script looks under "Program Files (x86)", where older installers put it. Find it
+            # and link it to where the script looks.
+            iscc="$(find "$HOME/.wine/drive_c" -iname ISCC.exe | head -1)"
+            [ -n "$iscc" ] && break
+            echo "attempt $attempt: no ISCC.exe yet"
+            wineserver -k || true
+            sleep 5
+          done
+          if [ -z "$iscc" ]; then
+            echo "::error::Inno Setup did not install; the Wine prefix holds:"
+            find "$HOME/.wine/drive_c" -maxdepth 3 -type d | head -40
+            exit 1
+          fi
+          echo "ISCC is at $iscc"
+          want="$HOME/.wine/drive_c/Program Files (x86)/Inno Setup 6"
+          if [ ! -f "$want/ISCC.exe" ]; then
+            mkdir -p "$(dirname "$want")"
+            ln -sfn "$(dirname "$iscc")" "$want"
+          fi
+          test -f "$want/ISCC.exe"
+          rm innosetup.exe
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+      - name: Windows x64 (zip, setup, MSI)
+        run: |
+          ./scripts/build-windows.sh
+      - name: Verify packages exist and checksum
+        run: |
+          test -s dist/moosik-*-windows-x86_64-setup.exe
+          cd dist
+          sha256sum moosik-*-windows-*.zip moosik-*-windows-*-setup.exe > moosik-windows-SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moosik-windows
+          path: dist/moosik-*
+          if-no-files-found: error
+  smoke:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: moosik-windows
+          path: dist
+      - name: Install and launch on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = (Get-ChildItem dist/*-setup.exe).FullName
+          $dest = Join-Path $env:RUNNER_TEMP 'MoosikSmoke'
+          $setup = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dest" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "Installer failed: $($setup.ExitCode)" }
+          @('refryt.exe','libmpv-2.dll','WebView2Loader.dll','yt-dlp.exe','NotoColorEmoji.ttf','LICENSE.txt','NOTICE.txt') | ForEach-Object {
+            if (!(Test-Path (Join-Path $dest $_))) { throw "Missing $_" }
+          }
+          & "$dest/yt-dlp.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'yt-dlp failed' }
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'moosik-test-profile'
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'moosik-test-local'
+          New-Item -ItemType Directory -Force $env:APPDATA,$env:LOCALAPPDATA | Out-Null
+          $app = Start-Process "$dest/refryt.exe" -PassThru -RedirectStandardError "$env:RUNNER_TEMP/moosik-stderr.txt"
+          Start-Sleep -Seconds 20
+          $app.Refresh()
+          if ($app.HasExited) {
+            Get-Content "$env:RUNNER_TEMP/moosik-stderr.txt"
+            throw "App exited early: $($app.ExitCode)"
+          }
+          if ($app.MainWindowHandle -eq 0) { Stop-Process -Id $app.Id; throw 'No application window appeared' }
+          Write-Output "Moosik window opened: $($app.MainWindowTitle)"
+          Stop-Process -Id $app.Id
+          $uninstall = Start-Process "$dest/unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru -Wait
+          if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }

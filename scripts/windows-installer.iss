@@ -6,14 +6,14 @@
 ; rather than a second, separate install:
 ; A doubled leading brace is Inno Setup's own escape for a literal "{" — without it, the GUID
 ; below parses as a (nonexistent) named constant rather than a literal string.
-#define AppId "{{534D3A53-19D8-4423-94FD-1AEE64DBD7C3}"
+#define AppId "{{73B56621-DB27-4CA7-9B11-36B637A06EA4}"
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
 ; The file name to write; build-windows.sh passes it.
 #ifndef OutputName
-  #define OutputName "refryt-" + AppVersion + "-windows-x86_64-setup"
+  #define OutputName "moosik-" + AppVersion + "-windows-x86_64-setup"
 #endif
 #ifndef StageDir
   #define StageDir "stage"
@@ -21,12 +21,12 @@
 
 [Setup]
 AppId={#AppId}
-AppName=refryt
+AppName=Moosik
 AppVersion={#AppVersion}
-AppPublisher=refryt
-AppPublisherURL=https://github.com/gridoe/refryt
-DefaultDirName={autopf}\refryt
-DefaultGroupName=refryt
+AppPublisher=Moosik
+AppPublisherURL=https://github.com/AtotheY/moosik
+DefaultDirName={autopf}\Moosik
+DefaultGroupName=Moosik
 UninstallDisplayIcon={app}\refryt.exe
 OutputDir=..\dist
 OutputBaseFilename={#OutputName}
@@ -38,7 +38,7 @@ LicenseFile=..\LICENSE
 DisableProgramGroupPage=yes
 ; No signing key exists for this project, so an unsigned installer will still trip Windows'
 ; SmartScreen the first few times anyone runs it — a known, disclosed limitation, not a bug.
-SetupIconFile=..\assets\icons\app\refryt.ico
+SetupIconFile=..\assets\icons\app\moosik.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -54,10 +54,13 @@ Source: "{#StageDir}\NotoColorEmoji.ttf"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
+
 [Icons]
-Name: "{group}\refryt"; Filename: "{app}\refryt.exe"
-Name: "{autodesktop}\refryt"; Filename: "{app}\refryt.exe"; Tasks: desktopicon
-Name: "{group}\Uninstall refryt"; Filename: "{uninstallexe}"
+Name: "{group}\Moosik"; Filename: "{app}\refryt.exe"
+Name: "{autodesktop}\Moosik"; Filename: "{app}\refryt.exe"; Tasks: desktopicon
+Name: "{group}\Uninstall Moosik"; Filename: "{uninstallexe}"
 
 [Run]
 ; `runasoriginaluser`: the setup is elevated (Program Files), and without this the post-install
@@ -66,7 +69,7 @@ Name: "{group}\Uninstall refryt"; Filename: "{uninstallexe}"
 ; moment it meets a scoop-style junction, because Windows marks junctions made by a
 ; non-elevated process as untrusted for elevated ones. That read as "all resolvers failed" on
 ; the first launch after installing, and only that one.
-Filename: "{app}\refryt.exe"; Description: "Launch refryt"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\refryt.exe"; Description: "Launch Moosik"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallDelete]
 ; Nothing under {app} to clean up beyond the files listed above — settings and the signed-in
