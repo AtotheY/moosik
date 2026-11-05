@@ -1798,6 +1798,8 @@ pub struct App {
     pub(crate) help_open: bool,
     /// The open tab of the Settings page. Kept for the session, not saved.
     pub(crate) settings_tab: ui::settings::SettingsTab,
+    #[cfg(target_os = "macos")]
+    pub(crate) media_fallback: crate::media_fallback::State,
     /// The "Order of homepage" window is open.
     pub(crate) home_order_open: bool,
     /// The "Paste cookies" window is open, and what has been pasted into it so far. Cleared the
@@ -2239,6 +2241,8 @@ impl App {
             page_info: None,
             help_open: false,
             settings_tab: ui::settings::SettingsTab::default(),
+            #[cfg(target_os = "macos")]
+            media_fallback: crate::media_fallback::State::default(),
             home_order_open: false,
             paste_cookies_open: false,
             pasted_cookie: String::new(),

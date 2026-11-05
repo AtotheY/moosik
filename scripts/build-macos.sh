@@ -111,6 +111,7 @@ if [ "$app_name" = Moosik ]; then
     /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile moosik' "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$app/Contents/Info.plist" 2>/dev/null || true
     rm -f "$app/Contents/Resources/Assets.car"
+    "$root/scripts/prepare-macos-media-helper.sh" "$app"
     "$root/scripts/prepare-macos-updater.sh" "$app"
 fi
 

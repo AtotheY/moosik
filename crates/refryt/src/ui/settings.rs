@@ -702,6 +702,9 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
+    #[cfg(target_os = "macos")]
+    mac_media_fallback(app, ui);
+
     // Discord Rich Presence. Nothing to configure: the app connects as its own Discord
     // application (the id is fixed in `crate::discord`), so the toggle is the whole setting.
     let mut discord = app.settings.discord_rich_presence;
@@ -726,6 +729,57 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
         s.hide_tray_on_close = hide_tray;
         s.discord_rich_presence = discord;
     });
+}
+
+#[cfg(target_os = "macos")]
+fn mac_media_fallback(app: &mut App, ui: &mut egui::Ui) {
+    use crate::media_fallback::Status;
+    let p = app.palette;
+    let state = &mut app.media_fallback;
+    state.refresh(ui.ctx());
+    let mut enabled = matches!(state.status, Some(Status::On | Status::Approval));
+    let before = enabled;
+    let mut open_settings = false;
+    widgets::setting_group(ui, &p, Some("Media keys"), |ui, g| {
+        g.row(
+            ui,
+            "Use Moosik instead of Apple Music",
+            "Resumes Moosik when your Mac tries to open Apple Music.",
+            |ui| {
+                widgets::toggle_enabled(
+                    ui,
+                    &p,
+                    ui.id().with("media-fallback"),
+                    &mut enabled,
+                    !state.busy()
+                        && matches!(
+                            state.status,
+                            Some(Status::Off | Status::On | Status::Approval)
+                        ),
+                );
+            },
+        );
+        g.free(ui, |ui| {
+            ui.label(RichText::new("Works even when Moosik is closed. Other apps keep their media controls. Turn off to open Apple Music manually.")
+                .font(theme::regular(11.0)).color(p.dim));
+            if state.status == Some(Status::Approval) {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Allow Moosik’s background activity in System Settings to finish enabling.")
+                    .font(theme::regular(11.0)).color(p.secondary));
+                ui.add_space(8.0);
+                open_settings = widgets::outline_button(ui, &p, "Open System Settings").clicked();
+            }
+            if let Some(error) = &state.error {
+                ui.add_space(8.0);
+                ui.label(RichText::new(error).font(theme::regular(11.0)).color(p.secondary));
+            }
+        });
+    });
+    if enabled != before {
+        state.start(ui.ctx(), if enabled { "--enable" } else { "--disable" });
+    } else if open_settings {
+        state.start(ui.ctx(), "--settings");
+    }
 }
 
 fn account(app: &mut App, ui: &mut egui::Ui) {
