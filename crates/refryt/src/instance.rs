@@ -321,10 +321,21 @@ mod unix {
         #[test]
         fn a_second_claim_becomes_secondary() {
             let _serial = serial();
+            SHOW.store(false, Ordering::SeqCst);
             let lock = temp_path("second-claim.lock");
             let socket = temp_path("second-claim.sock");
             assert!(matches!(claim_at(&lock, &socket, false), Claim::Primary));
             assert!(matches!(claim_at(&lock, &socket, false), Claim::Secondary));
+            // claim_at's listener is asynchronous. Consume its notification before releasing
+            // the test lock, otherwise it can set SHOW during the next test's resume check.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !poll() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "show was not delivered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             let _ = std::fs::remove_file(&socket);
             let _ = std::fs::remove_file(&lock);
         }
