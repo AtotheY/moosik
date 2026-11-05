@@ -24,7 +24,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "Moosik"))')"
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
 tools=".windows-tools"
 # Everything that differs between the two architectures. The ARM64 target is the `gnullvm` one:
 # it links with llvm-mingw's clang and lld, and the mpv ARM64 package is built with the same
