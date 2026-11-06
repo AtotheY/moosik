@@ -3066,12 +3066,11 @@ impl App {
         if !self.settings.discord_rich_presence && self.hosting() {
             self.leave_room();
         }
-        self.discord =
-            if self.settings.discord_rich_presence && crate::discord::client_id().is_some() {
-                Some(crate::discord::Discord::spawn())
-            } else {
-                None
-            };
+        self.discord = if self.settings.discord_rich_presence {
+            Some(crate::discord::Discord::spawn())
+        } else {
+            None
+        };
         // A new worker has not been told what is playing.
         self.presence_key = None;
     }

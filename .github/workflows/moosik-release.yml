@@ -8,8 +8,6 @@ permissions:
 concurrency:
   group: moosik-release-${{ github.ref }}
   cancel-in-progress: false
-env:
-  MOOSIK_DISCORD_APPLICATION_ID: ${{ vars.MOOSIK_DISCORD_APPLICATION_ID }}
 jobs:
   macos-checks:
     runs-on: macos-latest

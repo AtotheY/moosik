@@ -30,7 +30,7 @@ The repository's `.cargo/config.toml` includes `/opt/homebrew/lib` for Apple Sil
 - [`just`](https://github.com/casey/just) (optional) — the `Justfile` has a command for
   everything below; without it, the plain `cargo`/`./scripts/...` equivalent is noted alongside.
 
-For Discord Rich Presence, set the public numeric `MOOSIK_DISCORD_APPLICATION_ID` at build time. GitHub releases read the repository variable of the same name. Discord displays the registered application's name.
+Discord Rich Presence uses Moosik’s registered public application ID in `crates/moosik/src/discord.rs`. The desktop client needs no Discord token.
 
 ## Everyday development
 

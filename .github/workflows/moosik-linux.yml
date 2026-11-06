@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-env:
-  MOOSIK_DISCORD_APPLICATION_ID: ${{ vars.MOOSIK_DISCORD_APPLICATION_ID }}
 jobs:
   build:
     runs-on: ubuntu-24.04

@@ -711,24 +711,15 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
     let mut hosting = app.hosting();
     let mut leave = false;
     widgets::setting_group(ui, &p, Some("Integrations"), |ui, g| {
-        if crate::discord::client_id().is_some() {
-            toggle_row(
-                g,
-                ui,
-                &p,
-                "setting-discord",
-                "Discord Rich Presence",
-                "Shows what you're playing on Discord.",
-                &mut discord,
-            );
-        } else {
-            g.row(
-                ui,
-                "Discord Rich Presence",
-                "Unavailable in this build.",
-                |_| {},
-            );
-        }
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-discord",
+            "Discord Rich Presence",
+            "Shows what you're playing on Discord.",
+            &mut discord,
+        );
         if app.following() {
             g.row(
                 ui,
@@ -738,7 +729,7 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
                     leave = widgets::outline_button(ui, &p, "Leave").clicked();
                 },
             );
-        } else if discord && crate::discord::client_id().is_some() {
+        } else if discord {
             toggle_row(
                 g,
                 ui,

@@ -36,11 +36,8 @@ const URL_LIMIT: usize = 256;
 /// and the same length in the URL whatever number is chosen.
 const COVER_PX: u32 = 544;
 
-/// Public application ID, supplied by the maintainer when building Moosik.
-pub fn client_id() -> Option<&'static str> {
-    option_env!("MOOSIK_DISCORD_APPLICATION_ID")
-        .filter(|id| id.parse::<u64>().is_ok_and(|value| value > 0))
-}
+/// Moosik's public Discord application ID, shared by all desktop builds.
+const APPLICATION_ID: &str = "1568322186417274880";
 
 /// What the presence should say, assembled by the app.
 ///
@@ -293,7 +290,7 @@ fn run(rx: mpsc::Receiver<Cmd>) {
 /// One connection attempt. A failure is expected whenever Discord is not running, so it is logged
 /// at debug and retried rather than surfaced.
 fn connect() -> Option<DiscordIpcClient> {
-    let mut client = DiscordIpcClient::new(client_id()?);
+    let mut client = DiscordIpcClient::new(APPLICATION_ID);
     match client.connect() {
         Ok(()) => {
             tracing::debug!("connected to Discord");

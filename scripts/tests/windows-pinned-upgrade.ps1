@@ -37,7 +37,7 @@ function Install-App($dir) {
 function Find-Button {
   $nodes = $bar.FindAll($scope,$all)
   Write-Host ('Taskbar: ' + (($nodes | ForEach-Object {$_.Current.Name}) -join ' | '))
-  $matchesForApp=@($nodes | Where-Object { $_.Current.Name -match 'Moosik|moosik' -and $_.Current.BoundingRectangle.Width -gt 0 })
+  $matchesForApp=@($nodes | Where-Object { $_.Current.Name -match 'Moosik|refryt' -and $_.Current.BoundingRectangle.Width -gt 0 })
   if ($matchesForApp.Count -gt 1) {throw 'Explorer shows duplicate Moosik buttons'}
   $matchesForApp | Select-Object -First 1
 }
