@@ -15,7 +15,7 @@ use windows::{
             PKEY_AppUserModel_RelaunchDisplayNameResource, PKEY_AppUserModel_RelaunchIconResource,
         },
         System::Com::{
-            CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ,
+            CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READWRITE,
             StructuredStorage::PROPVARIANT,
         },
         UI::Shell::PropertiesSystem::{
@@ -142,7 +142,9 @@ fn update_link(path: &Path, exe: &Path, icon: &Path) -> anyhow::Result<()> {
     unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         let file: IPersistFile = link.cast()?;
-        file.Load(&path, STGM_READ)?;
+        // The shell property store inherits this mode. STGM_READ lets SetIconLocation
+        // succeed in memory but refuses the AppUserModelID write with STG_E_ACCESSDENIED.
+        file.Load(&path, STGM_READWRITE)?;
         let mut buf = vec![0; 32768];
         link.GetPath(&mut buf, std::ptr::null_mut(), 0)?;
         let target = path_from_buffer(&buf);

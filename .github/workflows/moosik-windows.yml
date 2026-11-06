@@ -156,3 +156,31 @@ jobs:
           name: windows-taskbar-preview
           path: ${{ runner.temp }}/taskbar.png
           if-no-files-found: ignore
+
+  pinned-upgrade:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: moosik-windows
+          path: dist
+      - name: Fetch the installer that introduced icon selection on the taskbar
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download moosik-v0.1.20 -p '*-setup.exe' -D old
+          $file = (Get-ChildItem old/*-setup.exe).FullName
+          if ((Get-FileHash $file).Hash -ne '295812973cbe64642babbe8ad48b9e8edeb003cd5f317c132e22a9526ae58f5a') { throw 'Unexpected 0.1.20 installer' }
+          python -m pip install pillow
+      - name: Pin the old install in Explorer and verify the upgraded taskbar open and closed
+        shell: powershell
+        run: ./scripts/tests/windows-pinned-upgrade.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upgraded-taskbar
+          path: taskbar-*.png
+          if-no-files-found: ignore
