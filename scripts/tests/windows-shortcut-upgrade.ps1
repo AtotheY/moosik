@@ -34,7 +34,7 @@ try {
         $ready = $app.MainWindowHandle -ne 0 -and $link.TargetPath -eq $exe -and $link.IconLocation -eq "$icon,0"
     } until ($ready -or [DateTime]::UtcNow -ge $deadline)
     if (!$ready) { throw "Shortcut after upgrade: target=$($link.TargetPath), icon=$($link.IconLocation), window=$($app.MainWindowHandle)" }
-    & "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -Exe $exe -Icon $icon -Pin $pin
+    & "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -AppProcess $app -Exe $exe -Icon $icon -Pin $pin
 } finally {
     if (!$app.HasExited) { Stop-Process -Id $app.Id }
 }
