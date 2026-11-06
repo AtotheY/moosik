@@ -1,19 +1,27 @@
 import { DurableObject } from 'cloudflare:workers';
+import { addressKey, allowance, hmacKey, issueId, reserve, validId, writeKey } from './guards.mjs';
 import { publicState, validState } from './state.mjs';
 
 const ttl = 45_000;
 const reply = (status, state) => new Response(state === undefined ? null : JSON.stringify(state), {
   status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
 });
-const token = () => crypto.randomUUID().replaceAll('-', '');
+const allowCreate = allowance('create');
+const allowPlayback = allowance('playback');
+
+export class RelayBudget extends DurableObject {
+  reserve(kind, address) {
+    return this.ctx.storage.transactionSync(() => reserve(this.ctx.storage.kv, kind, Date.now(), address));
+  }
+}
 
 export class Room extends DurableObject {
-  async create() {
-    const key = token() + token();
+  async create(key) {
     const now = Date.now();
+    if (await this.ctx.storage.get('room')) return false;
     await this.ctx.storage.put('room', { key, state: null, seen: now });
     await this.ctx.storage.setAlarm(now + ttl);
-    return key;
+    return true;
   }
   async read() {
     const room = await this.ctx.storage.get('room');
@@ -71,24 +79,37 @@ export default {
   async fetch(req, env) {
     const path = new URL(req.url).pathname;
     if (path === '/rooms' && req.method === 'POST') {
-      const quota = await env.CREATIONS.limit({ key: req.headers.get('CF-Connecting-IP') || 'unknown' });
+      const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+      const quota = await env.CREATIONS.limit({ key: ip });
       if (!quota.success) return reply(429);
-      const id = token();
-      const key = await env.ROOMS.getByName(id).create();
+      const signer = await hmacKey(env.ROOM_SIGNING_KEY);
+      if (!await allowCreate(env, Date.now(), await addressKey(signer, ip))) return reply(429);
+      const id = await issueId(signer, Date.now());
+      const key = await writeKey(signer, id);
+      if (!await env.ROOMS.getByName(id).create(key)) return reply(503);
       return reply(201, { id, key });
     }
     const id = /^\/rooms\/([a-f0-9]{32})$/.exec(path)?.[1];
     if (!id) return reply(404);
-    const room = env.ROOMS.getByName(id);
-    if (req.method === 'GET') return room.read();
-    if (!['PUT', 'DELETE'].includes(req.method)) return reply(405);
+    if (!['GET', 'PUT', 'DELETE'].includes(req.method)) return reply(405);
+    const ip = req.headers.get('CF-Connecting-IP') || 'unknown';
+    if (!(await env.TRAFFIC.limit({ key: ip })).success) return reply(429);
+    const signer = await hmacKey(env.ROOM_SIGNING_KEY);
+    if (!await validId(signer, id, Date.now())) return reply(404);
+    if (req.method === 'GET') {
+      if (!await allowPlayback(env, Date.now())) return reply(429);
+      return env.ROOMS.getByName(id).read();
+    }
     const key = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.get('Authorization') || '')?.[1];
     if (!key) return reply(403);
+    const enc = new TextEncoder();
+    if (!crypto.subtle.timingSafeEqual(enc.encode(await writeKey(signer, id)), enc.encode(key))) return reply(403);
     let state = null;
     if (req.method === 'PUT') {
       try { state = await readState(req); }
       catch (e) { return reply(e instanceof RangeError ? 413 : 400); }
     }
-    return room.update(key, state, req.method === 'DELETE');
+    if (!await allowPlayback(env, Date.now())) return reply(429);
+    return env.ROOMS.getByName(id).update(key, state, req.method === 'DELETE');
   },
 };
