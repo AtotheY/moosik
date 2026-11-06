@@ -2,7 +2,7 @@
   <img src="assets/icons/app/moosik-256.png" width="100" alt="Moosik Ceramic Eclipse app icon">
 </p>
 
-# Moosik — YouTube Music desktop player for Mac and Windows
+# Moosik — YouTube Music desktop player for Mac, Windows, and Linux
 
 [**Download for Apple Silicon Mac**](https://moosik.dev/?platform=mac#download) · [Windows x64 installer and all downloads](https://github.com/AtotheY/moosik/releases/latest)
 
@@ -12,7 +12,7 @@ Keep your YouTube Music library and playlists in an open-source desktop player. 
 
 [Get started](#get-started) · [Listening stats](docs/listening-stats.md) · [Roadmap](docs/ROADMAP.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
 
-> **Early release.** [Download Moosik for Apple Silicon Macs](https://github.com/AtotheY/moosik/releases/latest). Updates are available inside the app after the first installation. Windows x64 now has an experimental installer with automated install and launch checks. Interactive sign-in and playback still need real-device testing; Linux validation is pending.
+> **Early release.** [Download Moosik for Apple Silicon Macs](https://github.com/AtotheY/moosik/releases/latest). Updates are available inside the app after the first installation. Windows x64 now has an experimental installer with automated install and launch checks. The release workflow also builds an experimental Ubuntu 24.04 x86-64 package. Interactive sign-in and playback on Windows and Linux still need real-device testing.
 
 ## A few ways to make it yours
 
@@ -66,7 +66,7 @@ Get the [latest published installers](https://github.com/AtotheY/moosik/releases
 | macOS, Apple Silicon | DMG installer and signed in-app updates; see the release for macOS requirements |
 | Windows, x64 | Experimental setup EXE and portable ZIP; automated installation and app launch verified |
 | Windows, ARM64 | Native packaging and hardware testing pending |
-| Linux | Upstream AppImage / Flatpak tooling exists; Moosik validation is pending |
+| Linux, Ubuntu 24.04 x86-64 | Experimental `.deb` with an install-and-launch check. See the [Linux package instructions](docs/BUILDING.md#ubuntu-2404-x86-64). |
 | macOS, Intel | Not part of the current release workflow |
 | iOS / Android | No Moosik app available |
 

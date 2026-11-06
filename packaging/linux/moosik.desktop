@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Moosik
+GenericName=Music Player
+Comment=Play YouTube Music and your local library
+Exec=moosik %u
+Icon=moosik
+StartupWMClass=refryt
+MimeType=x-scheme-handler/moosik;
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;youtube;player;

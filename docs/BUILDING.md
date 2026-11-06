@@ -1,6 +1,6 @@
 # Building Moosik
 
-> **Moosik source preview:** clean source builds are the entry point. The packaging and release sections below are inherited Refryt implementation notes; their filenames and bundle branding have not yet been migrated, and they are not a claim that Moosik installers have been published or validated on every platform.
+> **Moosik source preview:** clean source builds are the entry point. For current Moosik release artifacts and signing, see [Publishing an update](client-updates.md#publishing-an-update). The AppImage, Flatpak and MSI sections below describe inherited Refryt tools.
 
 ## Clone and run
 
@@ -41,6 +41,17 @@ just check        # fmt --check + clippy (both feature sets) + tests — what CI
 
 Without `just`, the equivalents are `cargo run -p refryt --bin refryt`, and the four commands
 listed in `just check`'s own recipe in the `Justfile`.
+
+## Ubuntu 24.04 x86-64
+
+Download the `moosik-<version>-linux-amd64.deb` asset from the matching GitHub release when available. In the download directory, run the following command, replacing `<version>` with the downloaded version. APT installs the required system libraries.
+
+```sh
+sudo apt install "./moosik-<version>-linux-amd64.deb"
+moosik
+```
+
+The package adds Moosik to the application launcher and registers the `moosik://` link handler. Install a newer release with the same command. To build it locally, use Ubuntu 24.04 amd64 with Rust and the development packages listed in [the Linux workflow](../.github/workflows/moosik-linux.yml), then run `./scripts/build-linux-deb.sh`. It writes the package to `dist/` and includes a checksum-verified copy of yt-dlp alongside the player.
 
 ## Linux: the AppImage
 

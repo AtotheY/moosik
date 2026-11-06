@@ -100,8 +100,9 @@ version to a new public `major.minor.patch`, refresh the lockfile, and write
 `release-notes/<version>.md`. The fork's `+ark.N` development suffix is accepted
 when comparing installed clients, but public releases use numeric versions.
 
-The **Moosik macOS release** workflow builds, tests, signs, and uploads artifacts
-on `workflow_dispatch` without publishing. A reviewed `moosik-v<version>` tag on
+The **Moosik release** workflow builds macOS, Windows x64 and Ubuntu 24.04 amd64
+packages in parallel. Dispatch it on `main` to rehearse all three builds and warm
+the release caches. A branch dispatch only uploads workflow artifacts. A reviewed `moosik-v<version>` tag on
 `main` runs the same checks and publishes the complete GitHub release. For example,
 `moosik-v0.1.15` must match workspace version `0.1.15`.
 
@@ -110,7 +111,9 @@ The release includes the initial-install DMG, the signed update ZIP, checksums, 
 The feed rejects mismatched versions/architectures or absent signatures. The current
 packaging job ships Apple silicon; its feed declares `arm64` and the minimum macOS
 version required by the actual bundled executables and playback libraries.
-Windows/Linux installers need their own Moosik packaging validation before release.
+Publication also requires the Windows installer launch and pinned-upgrade checks,
+and installation and rendering from the Linux .deb on clean Ubuntu. The versioned
+checksum manifest covers the Windows setup and ZIP and the Ubuntu package.
 
 The inherited Refryt packaging workflow is manual-only, so ordinary upstream-style
 `v*` tags cannot accidentally publish Refryt packages as Moosik updates. Merging
