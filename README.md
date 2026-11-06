@@ -8,7 +8,6 @@
 
 Keep your YouTube Music library and playlists in an open-source desktop player. Search songs you played in Moosik by title or artist, find yesterday’s listens by date, and move several upcoming tracks together. Save the current queue as a private playlist on your computer. [Follow the listening history guide](https://moosik.dev/guides/listening-history/).
 
-**Built on [Refryt](https://github.com/gridoe/refryt), created by [gridoe](https://github.com/gridoe) and contributors.** Moosik is an independent fork; most of its playback engine and original desktop interface come from their work. The original history and GPL license are preserved.
 
 [Get started](#get-started) · [Listening stats](docs/listening-stats.md) · [Roadmap](docs/ROADMAP.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
 
@@ -49,7 +48,7 @@ These local stats are separate from YouTube's own account history. There is no c
 
 Browse Home, albums, artists, search, and your library in a native Rust/egui interface. Use keyboard shortcuts, synced lyrics, the fullscreen player, and the dedicated [editable queue](docs/queue.md). Select and drag songs together, remove upcoming tracks, and undo queue edits. Songs in listening stats use the same playback and context-menu actions as regular song rows. Hover a song for its **⋮** menu without shifting the row.
 
-Refryt already provides the core listening experience, editable YouTube playlists, local-file playlists, themes, and desktop integrations. Moosik builds on that foundation with listener-focused stats and interface improvements.
+Moosik supports editable YouTube playlists, local music, themes, and desktop media controls.
 
 [Show your YouTube Music activity on Discord](https://moosik.dev/guides/youtube-music-discord/).
 
@@ -77,12 +76,12 @@ Install Rust **1.90 or newer** and the platform dependencies in the [build guide
 ```sh
 git clone https://github.com/AtotheY/moosik.git
 cd moosik
-cargo run --locked --release -p refryt --bin refryt
+cargo run --locked --release -p moosik --bin moosik
 ```
 
-The internal crate and binary names are still `refryt`. Some bundle identifiers and storage paths also retain their original names to preserve existing installations. The `ark-*` scripts are maintainer-specific helpers, not a clean-install setup for other computers.
+The `ark-*` scripts are maintainer-specific helpers, not a clean-install setup for other computers.
 
-Download the DMG from [Moosik releases](https://github.com/AtotheY/moosik/releases), open it, and drag Moosik to Applications. This release is not Apple-notarized; macOS may require approval in System Settings → Privacy & Security on first launch. Refryt's Homebrew, Scoop, AUR, and upstream releases install **Refryt**, not this fork. Moosik's updater uses this fork's own signed GitHub releases; it never installs upstream Refryt binaries. See [in-app updates](docs/client-updates.md) for setup and release status.
+Download the DMG from [Moosik releases](https://github.com/AtotheY/moosik/releases), open it, and drag Moosik to Applications. This release is not Apple-notarized; macOS may require approval in System Settings → Privacy & Security on first launch. See [in-app updates](docs/client-updates.md) for setup and release status.
 
 ## What we're building next
 
@@ -92,7 +91,7 @@ Private playlists and song transfers shipped in [0.1.16](https://github.com/Atot
 
 ### Is this a different YouTube Music UI or just the website in a window?
 
-The main interface is native Rust/egui, inherited from Refryt. Moosik connects to YouTube Music for browsing and playback; it does not simply wrap the YouTube Music website. An embedded web view is used for Google sign-in.
+The main interface is native Rust/egui. Moosik connects to YouTube Music for browsing and playback; it does not simply wrap the YouTube Music website. An embedded web view is used for Google sign-in.
 
 ### Is Moosik a Spotify alternative?
 
@@ -108,7 +107,7 @@ No. The detailed local ledger records playback observed in this Moosik installat
 
 ### Do I need YouTube Music Premium?
 
-Moosik follows Refryt's intended use with YouTube Premium or YouTube Music Premium. The inherited download feature checks for Premium. Moosik does not provide a subscription or grant rights to content; availability depends on YouTube and your account.
+Moosik is designed for YouTube Premium or YouTube Music Premium. The inherited download feature checks for Premium. Moosik does not provide a subscription or grant rights to content; availability depends on YouTube and your account.
 
 ### How is my account stored?
 
@@ -124,7 +123,7 @@ Star the repository if you want to find it again; use **Watch → Custom → Rel
 
 ## Credits and license
 
-**Refryt is the foundation of Moosik.** Thank you to [gridoe](https://github.com/gridoe), [Refryt's contributors](https://github.com/gridoe/refryt/graphs/contributors), and the projects below. This fork began at Refryt v0.1.14 ([`12e899c`](https://github.com/gridoe/refryt/commit/12e899c4b941728680c42ba1a3841d92769cd5f2)). Its playback, API integration, original layout, and much of the desktop functionality are their work.
+Moosik is based on the original work of [gridoe](https://github.com/gridoe) and contributors. The playback engine, API integration and original desktop interface come from their [GPL-licensed source](https://github.com/AtotheY/moosik/tree/12e899c4b941728680c42ba1a3841d92769cd5f2).
 
 Moosik's changes include a local listening ledger and recap interface, macOS session-storage hardening, Eclipse branding and icon choices, and song-row menu improvements. Moosik is maintained independently by [AtotheY](https://github.com/AtotheY). Please report fork-specific issues here rather than sending them upstream.
 
@@ -148,8 +147,8 @@ Moosik's changes include a local listening ledger and recap interface, macOS ses
   [Dracula](https://spec.draculatheme.com), [Rosé Pine](https://github.com/rose-pine/palette),
   [Everforest](https://github.com/sainnhe/everforest),
   [Solarized](https://ethanschoonover.com/solarized) and Spotify's own colours. Each file in
-  `crates/refryt/themes` names its source.
+  `crates/moosik/themes` names its source.
 
 Licensed under **[GPL-3.0-or-later](LICENSE)**, including this fork's changes. Existing copyright and license notices remain in place. When distributing binaries, provide the corresponding source and required notices under the GPL. Bundled dependencies retain their respective licenses.
 
-Moosik is unofficial and is not affiliated with or endorsed by YouTube, Google, Spotify, or Refryt's maintainers. YouTube and YouTube Music are trademarks of Google LLC. It relies on undocumented YouTube interfaces that can change without notice; continued compatibility is not guaranteed. Use remains subject to the applicable service terms.
+Moosik is unofficial and is not affiliated with or endorsed by YouTube, Google, Spotify. YouTube and YouTube Music are trademarks of Google LLC. It relies on undocumented YouTube interfaces that can change without notice; continued compatibility is not guaranteed. Use remains subject to the applicable service terms.

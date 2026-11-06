@@ -91,9 +91,9 @@ activity outside this Moosik installation is captured.
 
 The local database is at:
 
-`~/Library/Application Support/refryt/listening/listening.sqlite3`
+`~/Library/Application Support/moosik/listening/listening.sqlite3`
 
-The existing `refryt` data directory is intentional; it preserves the established
+The existing `moosik` data directory is intentional; it preserves the established
 app identity and account settings. The listening folder is owner-only on macOS;
 the database is created with owner read/write permissions. This is **not separate
 application encryption**. Mac account/disk security still matters.
@@ -146,8 +146,8 @@ SQLite backup with integrity check. Existing playback/queue tests are also run.
 Commands:
 
 ```
-cargo test --locked -p refryt --lib listening
-cargo test --locked -p refryt --lib app::tests
-cargo clippy --locked -p refryt --lib --tests -- -D warnings
-cargo build --locked --release -p refryt --bin refryt
+cargo test --locked -p moosik --lib listening
+cargo test --locked -p moosik --lib app::tests
+cargo clippy --locked -p moosik --lib --tests -- -D warnings
+cargo build --locked --release -p moosik --bin moosik
 ```

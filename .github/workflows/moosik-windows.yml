@@ -10,6 +10,7 @@ concurrency:
   group: moosik-windows-${{ github.ref }}
   cancel-in-progress: false
 env:
+  MOOSIK_DISCORD_APPLICATION_ID: ${{ vars.MOOSIK_DISCORD_APPLICATION_ID }}
   CARGO_TERM_COLOR: always
   INNO_SETUP_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
   INNO_SETUP_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
@@ -89,7 +90,7 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP 'MoosikSmoke'
           $setup = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=$dest" -PassThru -Wait
           if ($setup.ExitCode -ne 0) { throw "Installer failed: $($setup.ExitCode)" }
-          @('refryt.exe','libmpv-2.dll','WebView2Loader.dll','yt-dlp.exe','NotoColorEmoji.ttf','LICENSE.txt','NOTICE.txt') | ForEach-Object {
+          @('moosik.exe','libmpv-2.dll','WebView2Loader.dll','yt-dlp.exe','NotoColorEmoji.ttf','LICENSE.txt','NOTICE.txt') | ForEach-Object {
             if (!(Test-Path (Join-Path $dest $_))) { throw "Missing $_" }
           }
           & "$dest/yt-dlp.exe" --version
@@ -97,10 +98,10 @@ jobs:
           # A clean unpinned install. The pinned-upgrade job pins through Explorer;
           # dropping a .lnk straight into the pin folder does not create a real pin.
           $roaming = [Environment]::GetFolderPath('ApplicationData')
-          $config = Join-Path $roaming 'refryt\config'
+          $config = Join-Path $roaming 'moosik\config'
           New-Item -Type Directory -Force $config | Out-Null
           '{"app_icon":"amber"}' | Set-Content (Join-Path $config 'settings.json') -Encoding utf8NoBOM
-          $app = Start-Process "$dest/refryt.exe" -PassThru -RedirectStandardError "$env:RUNNER_TEMP/moosik-stderr.txt"
+          $app = Start-Process "$dest/moosik.exe" -PassThru -RedirectStandardError "$env:RUNNER_TEMP/moosik-stderr.txt"
           Start-Sleep -Seconds 20
           $app.Refresh()
           if ($app.HasExited) {
@@ -121,7 +122,7 @@ jobs:
           if ([WindowIcon]::SendMessage($app.MainWindowHandle, 0x007F, [IntPtr]1, [IntPtr]0) -eq [IntPtr]::Zero) {
             throw "Running window has no taskbar icon (WM_GETICON / ICON_BIG)"
           }
-          ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon
+          ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'moosik.exe') -Icon $icon
           python scripts/tests/windows-taskbar-image.py $icon "$env:RUNNER_TEMP/taskbar.png"
           if ($LASTEXITCODE -ne 0) { throw 'Taskbar artwork did not match the selected finish' }
           Stop-Process -Id $app.Id

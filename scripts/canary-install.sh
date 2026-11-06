@@ -17,9 +17,9 @@ install_units() {
         exit 1
     }
     mkdir -p "$unit_dir"
-    cat > "$unit_dir/refryt-api.service" <<EOF
+    cat > "$unit_dir/moosik-api.service" <<EOF
 [Unit]
-Description=refryt API canary (search, mix, library, home)
+Description=moosik API canary (search, mix, library, home)
 After=network-online.target
 Wants=network-online.target
 
@@ -28,9 +28,9 @@ Type=oneshot
 WorkingDirectory=$root
 ExecStart=$just_bin api
 EOF
-    cat > "$unit_dir/refryt-api.timer" <<EOF
+    cat > "$unit_dir/moosik-api.timer" <<EOF
 [Unit]
-Description=Run the refryt API canary daily
+Description=Run the moosik API canary daily
 
 [Timer]
 OnCalendar=daily
@@ -41,13 +41,13 @@ Persistent=true
 WantedBy=timers.target
 EOF
     systemctl --user daemon-reload
-    systemctl --user enable --now refryt-api.timer
-    echo "canary scheduled daily (refryt-api.timer)"
+    systemctl --user enable --now moosik-api.timer
+    echo "canary scheduled daily (moosik-api.timer)"
 }
 
 uninstall_units() {
-    systemctl --user disable --now refryt-api.timer 2>/dev/null || true
-    rm -f "$unit_dir/refryt-api.timer" "$unit_dir/refryt-api.service"
+    systemctl --user disable --now moosik-api.timer 2>/dev/null || true
+    rm -f "$unit_dir/moosik-api.timer" "$unit_dir/moosik-api.service"
     systemctl --user daemon-reload
     echo "canary removed"
 }

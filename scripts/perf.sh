@@ -46,8 +46,8 @@ MAX_LOADED_PSS_MB=158
 MAX_TEXTURE_MB=32
 MAX_FRAME_MS=8
 
-cargo build --release -p refryt --bin refryt
-bin=./target/release/refryt
+cargo build --release -p moosik --bin moosik
+bin=./target/release/moosik
 
 # Time to first painted frame. The app reports it itself: everything before the first frame is
 # invisible to the user and everything after it is not startup.

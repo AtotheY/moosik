@@ -1,7 +1,7 @@
-# Keeping Moosik current with Refryt
+# Keeping Moosik current with upstream
 
-Moosik can keep Refryt's fixes without giving up its own UI, stats, branding, or
-macOS session handling. Treat Refryt as an upstream source and integrate into a
+Moosik can keep upstream's fixes without giving up its own UI, stats, branding, or
+macOS session handling. Treat upstream as an upstream source and integrate into a
 review branch, then test the resulting Moosik app.
 
 ## Current comparison (November 1, 2026)
@@ -10,7 +10,7 @@ review branch, then test the resulting Moosik app.
 - `upstream`: `https://github.com/gridoe/refryt.git`
 - Shared base: `12e899c4b941728680c42ba1a3841d92769cd5f2` (v0.1.14).
 - Committed Moosik `main`: `21eef5a`, 9 fork commits beyond that base.
-- Refryt `main`: `e9685b0`, 18 commits beyond that base; latest release is v0.2.1.
+- upstream `main`: `e9685b0`, 18 commits beyond that base; latest release is v0.2.1.
 - There are also uncommitted local changes. They must be reviewed and checkpointed
   before preparing an integration branch that includes all current Moosik work.
 
@@ -31,7 +31,7 @@ fetches and reports; it does not merge, reset, commit, or modify source files.
 - `6fa8432`, `af41a1d`: album/playlist extras and UI changes. Review individually
   against Moosik's design, interaction preferences, and shared song menus.
 
-Sources: [Refryt commits](https://github.com/gridoe/refryt/commits/main/),
+Sources: [upstream commits](https://github.com/gridoe/refryt/commits/main/),
 [v0.2.0 notes](https://github.com/gridoe/refryt/blob/main/release-notes/0.2.0.md),
 [v0.2.1 notes](https://github.com/gridoe/refryt/blob/main/release-notes/0.2.1.md).
 
@@ -43,7 +43,7 @@ Sources: [Refryt commits](https://github.com/gridoe/refryt/commits/main/),
 3. Create a separate worktree and merge there:
 
    ```sh
-   git worktree add ../upstream-integration -b integrate/refryt-0.2.1 main
+   git worktree add ../upstream-integration -b integrate/upstream-0.2.1 main
    cd ../upstream-integration
    git merge --no-ff --no-commit upstream/main
    ```
@@ -62,7 +62,7 @@ Sources: [Refryt commits](https://github.com/gridoe/refryt/commits/main/),
 
 A dry run using `git merge-tree` on the **committed tips** reported textual conflicts
 in `CONTRIBUTING.md`, `Cargo.lock`, `Cargo.toml`, `README.md`, and
-`crates/refryt/src/widgets.rs`. This is not a full preview of the uncommitted work;
+`crates/moosik/src/widgets.rs`. This is not a full preview of the uncommitted work;
 checkpointing it can reveal further conflicts, especially around the queue.
 No upstream merge has been applied by this workflow's setup.
 

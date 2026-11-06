@@ -1,0 +1,22 @@
+/* Rosé Pine
+   Rosé Pine: github.com/rose-pine/palette (palette.json).
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: dark;
+
+  --base:             #1f1d2e;  /* the cards */
+  --text:             #e0def4;  /* body text */
+  --accent:           #c4a7e7;  /* play buttons, selection, links */
+  --on-accent:        #191724;  /* text and icons on the accent */
+
+  --gutter:           #191724;  /* the gap behind the cards */
+  --popup:            #26233a;  /* menus and popups */
+  --surface:          #26233a;  /* chips, inputs */
+  --subtext:          #908caa;  /* second-rank text */
+  --muted:            #6e6a86;  /* third-rank text */
+  --danger:           #eb6f92;
+  --warning:          #f6c177;
+}

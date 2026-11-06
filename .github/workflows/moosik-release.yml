@@ -8,6 +8,8 @@ permissions:
 concurrency:
   group: moosik-release-${{ github.ref }}
   cancel-in-progress: false
+env:
+  MOOSIK_DISCORD_APPLICATION_ID: ${{ vars.MOOSIK_DISCORD_APPLICATION_ID }}
 jobs:
   macos-checks:
     runs-on: macos-latest
@@ -21,8 +23,8 @@ jobs:
           shared-key: ci-macos
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
-      - run: cargo clippy --locked -p refryt --lib --tests -- -D warnings
-      - run: cargo test --locked -p refryt --lib
+      - run: cargo clippy --locked -p moosik --lib --tests -- -D warnings
+      - run: cargo test --locked -p moosik --lib
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -q
   macos:
     runs-on: macos-latest

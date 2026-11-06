@@ -42,7 +42,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo clippy -p refryt-resolve --features native-resolver --all-targets -- -D warnings
+      - run: cargo clippy -p moosik-resolve --features native-resolver --all-targets -- -D warnings
       - run: cargo test --workspace
 
   windows:

@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  MOOSIK_DISCORD_APPLICATION_ID: ${{ vars.MOOSIK_DISCORD_APPLICATION_ID }}
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -47,12 +49,21 @@ jobs:
           sha256sum --check moosik-linux-SHA256SUMS.txt
           apt-get -o Acquire::Retries=3 update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ./moosik-*-linux-amd64.deb dbus-daemon xvfb xauth libgl1-mesa-dri desktop-file-utils
+            ./moosik-*-linux-amd64.deb dbus-daemon xvfb xauth libgl1-mesa-dri desktop-file-utils libglib2.0-bin
           desktop-file-validate /usr/share/applications/moosik.desktop
           /usr/lib/moosik/yt-dlp --version
           useradd -m smoke
           runuser -u smoke -- env HOME=/home/smoke LIBGL_ALWAYS_SOFTWARE=1 \
-            dbus-run-session -- xvfb-run -a timeout 90s moosik --screenshot /home/smoke/window.png --screenshot-after 2
+            dbus-run-session -- xvfb-run -a timeout 90s sh -eu <<'SMOKE'
+          moosik --screenshot /home/smoke/window.png --screenshot-after 10 &
+          player=$!
+          service=org.mpris.MediaPlayer2.Moosik
+          gdbus wait --session --timeout 45 "$service"
+          entry=$(gdbus call --session --dest "$service" --object-path /org/mpris/MediaPlayer2 \
+            --method org.freedesktop.DBus.Properties.Get org.mpris.MediaPlayer2 DesktopEntry)
+          test "$entry" = "(<'moosik'>,)"
+          wait "$player"
+          SMOKE
           test -s /home/smoke/window.png
       - uses: actions/upload-artifact@v4
         if: always()

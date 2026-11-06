@@ -13,8 +13,8 @@
 /M*-plan.md
 
 # Nothing in this repo holds real session cookies or API keys — the app keeps those in
-# ~/.config/refryt/ on whatever machine runs it, never in the source tree — but this stays
-# as a guard in case a local diagnostic dump (REFRYT_DUMP_*) or test cookie jar ever lands
+# ~/.config/moosik/ on whatever machine runs it, never in the source tree — but this stays
+# as a guard in case a local diagnostic dump (MOOSIK_DUMP_*) or test cookie jar ever lands
 # here by accident.
 *.session
 *cookie*.txt

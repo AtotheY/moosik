@@ -37,7 +37,7 @@ function Install-App($dir) {
 function Find-Button {
   $nodes = $bar.FindAll($scope,$all)
   Write-Host ('Taskbar: ' + (($nodes | ForEach-Object {$_.Current.Name}) -join ' | '))
-  $matchesForApp=@($nodes | Where-Object { $_.Current.Name -match 'Moosik|refryt' -and $_.Current.BoundingRectangle.Width -gt 0 })
+  $matchesForApp=@($nodes | Where-Object { $_.Current.Name -match 'Moosik|moosik' -and $_.Current.BoundingRectangle.Width -gt 0 })
   if ($matchesForApp.Count -gt 1) {throw 'Explorer shows duplicate Moosik buttons'}
   $matchesForApp | Select-Object -First 1
 }
@@ -70,14 +70,14 @@ function Show-Pins {
 }
 Show-Pins
 Install-App dist
-$app=Start-Process "$dest/refryt.exe" -PassThru
+$app=Start-Process "$dest/moosik.exe" -PassThru
 Start-Sleep 12
 $icon=Join-Path $dest 'icons\amber.ico'
 Show-Pins
 $pin=(Get-ChildItem $profilePins -Filter 'Moosik*.lnk' | Select-Object -First 1).FullName
 if (!$pin -or $keys.CreateShortcut($pin).IconLocation -ne "$icon,0") {throw 'Legacy pin was not migrated'}
 $app.Refresh()
-& "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon -Pin $pin
+& "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -Exe (Join-Path $dest 'moosik.exe') -Icon $icon -Pin $pin
 if (!(Find-Button)) {throw 'No running Moosik taskbar button'}
 python scripts/tests/windows-taskbar-image.py $icon taskbar-running.png
 $running=$LASTEXITCODE
@@ -89,7 +89,7 @@ if ($running -or $closed) { throw "Amber on real upgraded pin: open=$running, cl
 # A later selection must also persist on the same real pin. Load the other
 # setting through the regular startup path and compare both shell states again.
 [IO.File]::WriteAllText((Join-Path $config 'settings.json'),'{"app_icon":"frost"}')
-$app=Start-Process "$dest/refryt.exe" -PassThru
+$app=Start-Process "$dest/moosik.exe" -PassThru
 Start-Sleep 10
 $icon=Join-Path $dest 'icons\frost.ico'
 if (!(Find-Button)) {throw 'Moosik taskbar button missing after relaunch'}

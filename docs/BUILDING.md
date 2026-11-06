@@ -1,6 +1,6 @@
 # Building Moosik
 
-> **Moosik source preview:** clean source builds are the entry point. For current Moosik release artifacts and signing, see [Publishing an update](client-updates.md#publishing-an-update). The AppImage, Flatpak and MSI sections below describe inherited Refryt tools.
+> **Moosik source preview:** clean source builds are the entry point. For current Moosik release artifacts and signing, see [Publishing an update](client-updates.md#publishing-an-update). The AppImage, Flatpak and MSI sections below describe optional packaging tools.
 
 ## Clone and run
 
@@ -13,22 +13,24 @@ On Apple Silicon macOS, install a current Rust toolchain (at least 1.90) and the
 
 ```sh
 brew install mpv yt-dlp
-cargo run --locked --release -p refryt --bin refryt
+cargo run --locked --release -p moosik --bin moosik
 ```
 
-The repository's `.cargo/config.toml` includes `/opt/homebrew/lib` for Apple Silicon linking. A different Homebrew prefix needs an equivalent linker path. Rust and Cargo must already be on your PATH. The main UI is Moosik; internal crate, binary, and existing data-directory names remain `refryt`.
+The repository's `.cargo/config.toml` includes `/opt/homebrew/lib` for Apple Silicon linking. A different Homebrew prefix needs an equivalent linker path. Rust and Cargo must already be on your PATH. New installs use the `moosik` profile. Upgrades reuse the previous profile to preserve sign-in, playlists and listening history.
 
 `ark-cargo.sh` and `ark-package.sh` reuse a maintainer's sibling toolchain and an existing app bundle. They are not portable prerequisites or the recommended starting point for a fresh clone. Use standard Cargo commands for contributions.
 
 ## Prerequisites
 
 - Rust 1.90+ (see `rust-version` in `Cargo.toml`)
-- [`mpv`](https://mpv.io/) development libraries (`libmpv`) — refryt plays audio through it
+- [`mpv`](https://mpv.io/) development libraries (`libmpv`) — moosik plays audio through it
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — the fallback for songs YouTube's `player`
   endpoint won't hand over, plus the video view and downloads. Not needed to build, and songs
   play without it.
 - [`just`](https://github.com/casey/just) (optional) — the `Justfile` has a command for
   everything below; without it, the plain `cargo`/`./scripts/...` equivalent is noted alongside.
+
+For Discord Rich Presence, set the public numeric `MOOSIK_DISCORD_APPLICATION_ID` at build time. GitHub releases read the repository variable of the same name. Discord displays the registered application's name.
 
 ## Everyday development
 
@@ -39,7 +41,7 @@ just release      # optimised run, for judging real performance
 just check        # fmt --check + clippy (both feature sets) + tests — what CI runs
 ```
 
-Without `just`, the equivalents are `cargo run -p refryt --bin refryt`, and the four commands
+Without `just`, the equivalents are `cargo run -p moosik --bin moosik`, and the four commands
 listed in `just check`'s own recipe in the `Justfile`.
 
 ## Ubuntu 24.04 x86-64
@@ -61,21 +63,21 @@ just appimage-install  # installs it to ~/.local/bin with a desktop launcher ent
 ```
 
 This bundles the release binary, every shared library short of glibc (`libmpv` included), a
-freshly-fetched `yt-dlp`, and the app icon into a single `dist/refryt-<version>-x86_64.AppImage`.
+freshly-fetched `yt-dlp`, and the app icon into a single `dist/moosik-<version>-x86_64.AppImage`.
 Needs `python3` with Pillow and `curl`; no root required anywhere.
 
 ## Linux: the Flatpak
 
 ```sh
 just flatpak           # or: ./scripts/build-flatpak.sh
-flatpak install --user dist/refryt-<version>-x86_64.flatpak
+flatpak install --user dist/moosik-<version>-x86_64.flatpak
 ```
 
-This builds `dist/refryt-<version>-x86_64.flatpak` from `packaging/flatpak/`. It needs
+This builds `dist/moosik-<version>-x86_64.flatpak` from `packaging/flatpak/`. It needs
 `flatpak`, `flatpak-builder`, the GNOME 49 Platform and Sdk, and the `rust-stable` Sdk extension
 (`org.freedesktop.Sdk.Extension.rust-stable//25.08`), all installed for your user. The first
 build takes a while: it compiles libass, libplacebo, a libmpv-only mpv and the tray's libraries,
-because the GNOME runtime has none of them. The refryt module also needs the network, for the
+because the GNOME runtime has none of them. The moosik module also needs the network, for the
 crates.
 
 The Flatpak differs from the AppImage in three ways. The sandbox cannot read a browser's profile
@@ -95,16 +97,12 @@ just macos             # or: ./scripts/build-macos.sh
 does for Apple Silicon (`/opt/homebrew/lib`). The script builds the release binary, makes an
 icon, copies libmpv and its whole dylib tail into `Contents/Frameworks` (`dylibbundler`), puts a
 standalone `yt-dlp` next to the executable, signs the bundle ad hoc, and writes a zip and a
-DMG. Output is `dist/Refryt.app`, `dist/refryt-<version>-macos-arm64.zip` and
-`dist/refryt-<version>-macos-arm64.dmg`. Nothing outside macOS itself is needed to run it.
+DMG. Output is `dist/Moosik.app`, `dist/moosik-<version>-macos-arm64.zip` and
+`dist/moosik-<version>-macos-arm64.dmg`. Nothing outside macOS itself is needed to run it.
 
 Things that are specific to macOS and easy to trip over:
 
-- **The icon.** `assets/icons/app/Refryt.icon` is an Icon Composer document, compiled by `actool`
-  (Xcode 26) into `Assets.car`. macOS only restyles an icon for Dark, Clear and Tinted
-  (monochrome) mode when it is built this way; a plain `.icns` gets a generic treatment. `actool`
-  also writes an `.icns` for older systems, and the script falls back to a `sips` and `iconutil`
-  one if `actool` is not available.
+- **The icon.** The bundle uses the Ceramic Eclipse artwork in `assets/icons/app/moosik.icns`.
 - **The window.** On macOS the window is a native one with its title bar hidden and the content
   running under it (`main.rs`), not a borderless rectangle. That lets the system round the
   corners, clip the shadow and the blur to them, and keep them correct when the window is zoomed.
@@ -121,7 +119,7 @@ Things that are specific to macOS and easy to trip over:
 - **The tray.** A hidden window gets no frames on macOS, so `tray.rs` raises the window through
   AppKit instead of waiting for the UI loop.
 - **Gatekeeper.** The app is ad-hoc signed and not notarized. On another Mac, clear the
-  quarantine flag with `xattr -cr Refryt.app`, or sign and notarize with a Developer ID.
+  quarantine flag with `xattr -cr Moosik.app`, or sign and notarize with a Developer ID.
 
 ## Windows: cross-compiled from Linux
 
@@ -141,8 +139,8 @@ build script finds `rustup`'s `cargo`/`rustc` explicitly either way, so it does 
 which one your shell resolves to by default.)
 
 `ARCH=aarch64 ./scripts/build-windows.sh` builds the Windows on ARM zip instead,
-`refryt-<version>-windows-arm64.zip`, and `ARCH=aarch64 ./scripts/build-msi.sh` turns it into
-`refryt-<version>-windows-arm64.msi`, ARM's only installer. GCC has no aarch64 Windows target, so
+`moosik-<version>-windows-arm64.zip`, and `ARCH=aarch64 ./scripts/build-msi.sh` turns it into
+`moosik-<version>-windows-arm64.msi`, ARM's only installer. GCC has no aarch64 Windows target, so
 the build links with llvm-mingw's clang and uses the `aarch64-pc-windows-gnullvm` Rust target:
 
 ```sh
@@ -174,24 +172,24 @@ The script fetches the current [mpv Windows dev
 package](https://sourceforge.net/projects/mpv-player-windows/files/libmpv/) (cached under
 `.windows-tools/`, since — unlike yt-dlp's GitHub releases — there's no stable "latest" URL for
 it) to link against, cross-builds with `mingw-w64-gcc`, fetches a fresh `yt-dlp.exe`, zips
-`refryt.exe` + `libmpv-2.dll` + `WebView2Loader.dll` + `NotoColorEmoji.ttf` + `yt-dlp.exe` into
-`dist/refryt-<version>-windows-x86_64.zip`, and — when Wine + Inno Setup are set up — compiles
+`moosik.exe` + `libmpv-2.dll` + `WebView2Loader.dll` + `NotoColorEmoji.ttf` + `yt-dlp.exe` into
+`dist/moosik-<version>-windows-x86_64.zip`, and — when Wine + Inno Setup are set up — compiles
 `scripts/windows-installer.iss` (via `ISCC.exe` under Wine) into
-`dist/refryt-<version>-windows-x86_64-setup.exe`: Program Files, a Start Menu entry, an optional
+`dist/moosik-<version>-windows-x86_64-setup.exe`: Program Files, a Start Menu entry, an optional
 desktop shortcut, and a real uninstaller.
 
 Every other Windows dependency (`tray-icon`, `rfd`, and the WebView2 *runtime* the sign-in window
 runs on) resolves to DLLs that ship with Windows itself — `libmpv-2.dll` and `WebView2Loader.dll`
 are the only two that have to be bundled by hand. The loader is only a loader: the GNU target
-links it dynamically, so it must sit next to `refryt.exe`, and a native Windows dev build needs
-the same copy beside `target/debug/refryt.exe` (it is in the `webview2-com-sys` crate's source
+links it dynamically, so it must sit next to `moosik.exe`, and a native Windows dev build needs
+the same copy beside `target/debug/moosik.exe` (it is in the `webview2-com-sys` crate's source
 tree under `~/.cargo/registry/src/...`; `scripts/build-windows.sh` finds it there for the packaged
 zip). `NotoColorEmoji.ttf` is not a library at all: it is the one colour emoji font with the PNG
 bitmap strikes the emoji painter reads (`emoji.rs`) — Windows' own Segoe UI Emoji is COLR — so it
 is copied from `assets/fonts` into the package (a native dev run finds the same file through the
 repository path compiled into `emoji.rs`).
 
-The `.exe` carries its own icon (`assets/icons/app/refryt.ico`, generated from the same master
+The `.exe` carries its own icon (`assets/icons/app/moosik.ico`, generated from the same master
 PNG the Linux icon set comes from) via `build.rs` + `embed-resource` — Windows-only, and gated
 on the actual cross-compile *target*, not the host running the build, which is what lets it
 stay a no-op on every other platform without a `cfg` that would just check the wrong thing.
@@ -215,7 +213,7 @@ just release-prep 0.1.13     # version, Cargo.lock, metainfo, the gate, release-
 $EDITOR release-notes/0.1.13.md                    # write the changes
 git commit -a --amend --no-edit
 git push origin main
-git tag -a v0.1.13 -m "refryt 0.1.13" && git push origin v0.1.13
+git tag -a v0.1.13 -m "moosik 0.1.13" && git push origin v0.1.13
 ```
 
 `prep` refuses a dirty tree, a version that isn't newer, a tag that already exists, and a tree
@@ -230,7 +228,7 @@ AppImage in an Arch Linux container, and the macOS image on macOS. The AppImage 
 library short of glibc, so it is built on a system as new as the ones it runs on, as it is by
 hand: bundled from Ubuntu's older glib, it fails to start on a newer host. It then runs `scripts/release.sh verify --strict` over all
 of them, and only then creates the release, as a draft with every file and
-`refryt-<version>-SHA256SUMS.txt`, and publishes it. A run started by hand from the Actions tab
+`moosik-<version>-SHA256SUMS.txt`, and publishes it. A run started by hand from the Actions tab
 does the same without the publishing, which is how a change to the scripts or the workflow is
 tried. The build scripts are the ones used locally; the workflow only installs their tools.
 

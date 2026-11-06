@@ -24,7 +24,7 @@ bundle. Failed downloads/signature verification leave the installed app in place
 
 ## Free GitHub distribution
 
-The client checks **AtotheY/moosik**, never installs upstream Refryt binaries, and
+The client checks **AtotheY/moosik**, and
 uses this HTTPS feed:
 
 `https://github.com/AtotheY/moosik/releases/latest/download/appcast.xml`
@@ -115,10 +115,7 @@ Publication also requires the Windows installer launch and pinned-upgrade checks
 and installation and rendering from the Linux .deb on clean Ubuntu. The versioned
 checksum manifest covers the Windows setup and ZIP and the Ubuntu package.
 
-The inherited Refryt packaging workflow is manual-only, so ordinary upstream-style
-`v*` tags cannot accidentally publish Refryt packages as Moosik updates. Merging
-upstream source remains a separate maintainer action; clients receive our compiled,
-reviewed Moosik releases, not a `git pull` or upstream binaries.
+The alternative packaging workflow runs on manual dispatch.
 
 ## Optional Apple notarization later
 

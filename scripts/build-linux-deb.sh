@@ -8,12 +8,12 @@ cd "$root"
     exit 1
 }
 version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
-cargo build --locked --release -p refryt --bin refryt
+cargo build --locked --release -p moosik --bin moosik
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 pkg="$work/pkg"
-install -Dm755 "${CARGO_TARGET_DIR:-target}/release/refryt" "$pkg/usr/lib/moosik/moosik"
+install -Dm755 "${CARGO_TARGET_DIR:-target}/release/moosik" "$pkg/usr/lib/moosik/moosik"
 mkdir -p "$pkg/usr/bin" "$pkg/DEBIAN" "$work/debian" dist
 ln -s ../lib/moosik/moosik "$pkg/usr/bin/moosik"
 install -Dm644 packaging/linux/moosik.desktop "$pkg/usr/share/applications/moosik.desktop"
