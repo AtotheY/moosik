@@ -284,7 +284,13 @@ impl Api {
     ///    shelf, and it is what stops the app claiming a session it does not have.
     pub async fn install_cookie(&self, cookie: String, source: Option<&str>) -> Result<String> {
         let cookie = auth::extract_cookie(&cookie);
-        auth::validate_cookie(&cookie)?;
+        let browser = source
+            .filter(|&s| s != "window")
+            .map(crate::browser_cookies::label_for);
+        auth::validate_cookie(&cookie).map_err(|error| match &browser {
+            Some(label) => anyhow::anyhow!("No complete YouTube Music login found in {label}."),
+            None => error,
+        })?;
 
         let http = self.http().await;
         let token = BrowserToken::from_str(&cookie, &http).await.context(
@@ -296,11 +302,10 @@ impl Api {
             .build()
             .context("could not build the signed-in client")?;
 
-        let account = account_name(&yt).await?.context(
-            "YouTube did not recognise that session. If you pasted it, copy the cookie header \
-             from the Network tab rather than document.cookie from the Console, which leaves \
-             out the parts that sign you in.",
-        )?;
+        let account = account_name(&yt).await?.with_context(|| match browser {
+            Some(label) => format!("YouTube Music no longer recognizes the login in {label}."),
+            None => "YouTube did not recognise that session. If you pasted it, copy the cookie header from the Network tab.".to_owned(),
+        })?;
 
         let next_session = auth::Session {
             cookie: cookie.clone(),

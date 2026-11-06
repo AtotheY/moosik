@@ -57,11 +57,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     }
     let signed_in = app.signed_in();
     let chip = account_chip(app, &mut right);
-    // The chip opens the account menu in every state and on every platform — View profile,
-    // Switch account, Settings, Sign out when signed in; Log in and Settings when not. Log in
-    // leads to the sign-in window on Windows and to Settings' browser import elsewhere, but
-    // the menu itself no longer differs by platform. Button-anchored: `Toggle` records no
-    // pointer position, so a pointer-anchored popup would never render.
+    // Anchor to the button so keyboard activation has a position too.
     account_menu(app, &mut right, &chip, signed_in);
     right.add_space(2.0);
     // This group lays out right to left: put an available update directly beside the avatar.
@@ -701,9 +697,6 @@ fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response, signed_in: bo
             .or_else(|| accounts.iter().find(|a| a.selected))
             .or(accounts.first())
             .and_then(|a| a.channel_id.clone());
-        // Signed out, this item is the menu's reason to exist: on Windows the sign-in window is
-        // the one path that works when every browser on the machine is a modern Chromium, and
-        // on Linux and macOS it is the door to Settings' browser import.
         if !signed_in && widgets::menu_item(mui, &p, Icon::CircleUser, "Log in", None).clicked() {
             choice = Some(Choice::LogIn);
             mui.close();
