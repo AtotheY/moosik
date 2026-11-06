@@ -1,8 +1,6 @@
 # Keeping Moosik current with upstream
 
-Moosik can keep upstream's fixes without giving up its own UI, stats, branding, or
-macOS session handling. Treat upstream as an upstream source and integrate into a
-review branch, then test the resulting Moosik app.
+Integrate changes from the upstream repository on a review branch. Verify Moosik’s UI, listening stats, branding and macOS session handling before merging.
 
 ## Current comparison (November 1, 2026)
 

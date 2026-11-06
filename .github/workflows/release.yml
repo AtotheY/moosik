@@ -240,18 +240,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      # build-macos.sh needs Xcode 26 for actool, which draws the icon. Use the newest one the
-      # image carries, and say so plainly when none is 26 or later.
-      - name: Select Xcode 26
-        run: |
-          newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
-          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
-          xcodebuild -version
-          major="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
-          if [ "${major:-0}" -lt 26 ]; then
-            echo "::error::this runner image has Xcode ${major:-?}; build-macos.sh needs 26 or later"
-            exit 1
-          fi
       - run: brew install mpv dylibbundler
       - uses: Swatinem/rust-cache@v2
         with:

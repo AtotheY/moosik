@@ -20,7 +20,7 @@ finish-args:
   - --socket=pulseaudio
   - --device=dri
   # Media keys and the desktop's media controls: the name playwire registers.
-  - --own-name=org.mpris.MediaPlayer2.moosik
+  - --own-name=org.mpris.MediaPlayer2.Moosik
   # The tray icon, a StatusNotifierItem. Inside the sandbox it registers under the connection's
   # unique name, so it needs no name of its own (see `tray.rs`).
   - --talk-name=org.kde.StatusNotifierWatcher
