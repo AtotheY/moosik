@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build dist/refryt-<version>-windows-x86_64.msi from the Windows zip that build-windows.sh makes:
-# the same files the setup .exe installs, into Program Files\refryt, with a Start menu entry and
+# Build dist/moosik-<version>-windows-x86_64.msi from the Windows zip that build-windows.sh makes:
+# the same files the setup .exe installs, into Program Files\moosik, with a Start menu entry and
 # an Add/Remove Programs entry. Built on Linux with msitools' `wixl`, so it has no setup screens:
 # an MSI installs as it is asked to, which is what deployment tools (Intune, Group Policy, winget)
 # want from one.
 #
 # The MSI and the setup .exe install to the same folder; use one or the other, not both.
 #
-# `ARCH=aarch64` builds refryt-<version>-windows-arm64.msi from the ARM64 zip, the one installer
+# `ARCH=aarch64` builds moosik-<version>-windows-arm64.msi from the ARM64 zip, the one installer
 # Windows on ARM gets. wixl has no ARM64 target, so the package is built as x64 and its summary
 # information's platform is then set to Arm64 with msibuild: that field is what Windows Installer
 # reads to decide which machines take the package, and nothing else in it differs (the 64-bit
@@ -30,7 +30,7 @@ for tool in wixl msibuild; do
 done
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "moosik"))')"
 case "${ARCH:-x86_64}" in
     x86_64) arch_name=x86_64 platform=x64 ;;
     aarch64) arch_name=arm64 platform=Arm64 ;;
@@ -38,8 +38,8 @@ case "${ARCH:-x86_64}" in
         echo "error: ARCH must be x86_64 or aarch64, not '$ARCH'" >&2
         exit 1 ;;
 esac
-zip="dist/refryt-$version-windows-$arch_name.zip"
-out="dist/refryt-$version-windows-$arch_name.msi"
+zip="dist/moosik-$version-windows-$arch_name.zip"
+out="dist/moosik-$version-windows-$arch_name.msi"
 [ -f "$zip" ] || {
     echo "error: $zip is missing; run ${ARCH:+ARCH=$ARCH }./scripts/build-windows.sh first" >&2
     exit 1
@@ -48,8 +48,8 @@ out="dist/refryt-$version-windows-$arch_name.msi"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 unzip -q "$zip" -d "$work"
-stage="$work/refryt"
-for f in refryt.exe libmpv-2.dll WebView2Loader.dll yt-dlp.exe NotoColorEmoji.ttf; do
+stage="$work/Moosik"
+for f in moosik.exe libmpv-2.dll WebView2Loader.dll yt-dlp.exe NotoColorEmoji.ttf; do
     [ -f "$stage/$f" ] || {
         echo "error: $f is not in $zip" >&2
         exit 1
@@ -61,31 +61,31 @@ done
 # versions. Never reuse one for something else, and never change them. The ARM64 MSI shares
 # them: it installs the same files to the same place, so on an ARM machine it replaces an x64
 # install instead of sitting beside it.
-cat > "$work/refryt.wxs" <<EOF
+cat > "$work/moosik.wxs" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="refryt" Language="1033" Version="$version" Manufacturer="refryt"
+  <Product Id="*" Name="Moosik" Language="1033" Version="$version" Manufacturer="Moosik"
            UpgradeCode="3BC13FF4-48B0-4B15-82F1-B2AF7FD35E35">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
-             Description="refryt $version" Comments="A native YouTube Music client" />
-    <Media Id="1" Cabinet="refryt.cab" EmbedCab="yes" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of refryt is already installed." />
+             Description="moosik $version" Comments="A native YouTube Music client" />
+    <Media Id="1" Cabinet="moosik.cab" EmbedCab="yes" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of moosik is already installed." />
 
-    <Icon Id="refryt.ico" SourceFile="$root/assets/icons/app/refryt.ico" />
-    <Property Id="ARPPRODUCTICON" Value="refryt.ico" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/gridoe/refryt" />
+    <Icon Id="moosik.ico" SourceFile="$root/assets/icons/app/moosik.ico" />
+    <Property Id="ARPPRODUCTICON" Value="moosik.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/AtotheY/moosik" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLDIR" Name="refryt">
+        <Directory Id="INSTALLDIR" Name="Moosik">
           <Component Id="App" Guid="CBFAAC8B-7037-4B9E-8A93-44F64E6CF35A" Win64="yes">
-            <File Id="refryt.exe" Name="refryt.exe" Source="$stage/refryt.exe" KeyPath="yes" />
+            <File Id="moosik.exe" Name="moosik.exe" Source="$stage/moosik.exe" KeyPath="yes" />
           </Component>
           <Component Id="PlaybackProtocol" Guid="479C0EC0-146B-43DC-A1B7-8C8F50E72925" Win64="yes">
             <RegistryValue Root="HKLM" Key="Software\Classes\moosik" Type="string" Value="URL:Moosik playback" />
             <RegistryValue Root="HKLM" Key="Software\Classes\moosik" Name="URL Protocol" Type="string" Value="" />
             <RegistryValue Root="HKLM" Key="Software\Classes\moosik\shell\open\command" Type="string"
-                           Value="&quot;[#refryt.exe]&quot; --open-url &quot;%1&quot;" KeyPath="yes" />
+                           Value="&quot;[#moosik.exe]&quot; --open-url &quot;%1&quot;" KeyPath="yes" />
           </Component>
           <Component Id="Mpv" Guid="2FA232FE-34FA-4F1C-9336-0FBE7027ED28" Win64="yes">
             <File Id="libmpv.dll" Name="libmpv-2.dll" Source="$stage/libmpv-2.dll" KeyPath="yes" />
@@ -104,9 +104,9 @@ cat > "$work/refryt.wxs" <<EOF
       </Directory>
       <Directory Id="ProgramMenuFolder">
         <Component Id="StartMenu" Guid="16878CE6-DEB5-4087-B106-2BE8DEC7F23F" Win64="yes">
-          <Shortcut Id="StartMenuShortcut" Name="refryt" Target="[INSTALLDIR]refryt.exe"
+          <Shortcut Id="StartMenuShortcut" Name="Moosik" Target="[INSTALLDIR]moosik.exe"
                     WorkingDirectory="INSTALLDIR" />
-          <RegistryValue Root="HKLM" Key="Software\refryt" Name="StartMenuShortcut" Type="integer"
+          <RegistryValue Root="HKLM" Key="Software\moosik" Name="StartMenuShortcut" Type="integer"
                          Value="1" KeyPath="yes" />
         </Component>
       </Directory>
@@ -126,7 +126,7 @@ cat > "$work/refryt.wxs" <<EOF
 EOF
 
 mkdir -p dist
-wixl -a x64 -o "$out" "$work/refryt.wxs"
+wixl -a x64 -o "$out" "$work/moosik.wxs"
 
 # wixl leaves the File table's Version column empty, and Windows Installer then treats every file
 # as unversioned. On an upgrade it compares that against the file already installed, which does
@@ -148,6 +148,6 @@ done
 if [ "$platform" != x64 ]; then
     # Rewrites the whole summary stream: title, subject (the name argument), author, platform
     # and a fresh package code. The schema version (500) and the rest carry over.
-    msibuild "$out" -s "refryt $version" refryt "$platform;1033" "{$(python3 -c 'import uuid; print(str(uuid.uuid4()).upper())')}"
+    msibuild "$out" -s "moosik $version" moosik "$platform;1033" "{$(python3 -c 'import uuid; print(str(uuid.uuid4()).upper())')}"
 fi
 echo "built $out ($(du -h "$out" | cut -f1))"

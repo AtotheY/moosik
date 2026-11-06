@@ -1,4 +1,4 @@
-name: Legacy Refryt packages (manual only)
+name: Legacy Moosik packages (manual only)
 
 # Pushing a v* tag builds every artifact, checks them with scripts/release.sh, and publishes the
 # GitHub release with its checksums. Running it by hand (Actions > Release > Run workflow) does
@@ -12,7 +12,7 @@ name: Legacy Refryt packages (manual only)
 #
 #   scripts/release.sh prep 0.1.13    # version, notes template, gate, "Release 0.1.13"
 #   (write release-notes/0.1.13.md and amend the commit)
-#   git push origin main && git tag -a v0.1.13 -m "refryt 0.1.13" && git push origin v0.1.13
+#   git push origin main && git tag -a v0.1.13 -m "moosik 0.1.13" && git push origin v0.1.13
 
 on:
   workflow_dispatch:
@@ -152,9 +152,9 @@ jobs:
         with:
           name: windows
           path: |
-            dist/refryt-*-windows-*.zip
-            dist/refryt-*-windows-*-setup.exe
-            dist/refryt-*-windows-*.msi
+            dist/moosik-*-windows-*.zip
+            dist/moosik-*-windows-*-setup.exe
+            dist/moosik-*-windows-*.msi
           if-no-files-found: error
           retention-days: 1
 
@@ -183,7 +183,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: appimage
-          path: dist/refryt-*-x86_64.AppImage
+          path: dist/moosik-*-x86_64.AppImage
           if-no-files-found: error
           retention-days: 1
 
@@ -223,14 +223,14 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: packaging/flatpak/.flatpak-builder
-          key: flatpak-builder-${{ hashFiles('packaging/flatpak/io.github.gridoe.refryt.yml') }}
+          key: flatpak-builder-${{ hashFiles('packaging/flatpak/io.github.AtotheY.moosik.yml') }}
           restore-keys: flatpak-builder-
       - name: Build the bundle
         run: ./scripts/build-flatpak.sh
       - uses: actions/upload-artifact@v4
         with:
           name: flatpak
-          path: dist/refryt-*-x86_64.flatpak
+          path: dist/moosik-*-x86_64.flatpak
           if-no-files-found: error
           retention-days: 1
 
@@ -240,18 +240,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      # build-macos.sh needs Xcode 26 for actool, which draws the icon. Use the newest one the
-      # image carries, and say so plainly when none is 26 or later.
-      - name: Select Xcode 26
-        run: |
-          newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
-          if [ -n "$newest" ]; then sudo xcode-select -s "$newest"; fi
-          xcodebuild -version
-          major="$(xcodebuild -version | sed -n 's/^Xcode \([0-9]*\).*/\1/p')"
-          if [ "${major:-0}" -lt 26 ]; then
-            echo "::error::this runner image has Xcode ${major:-?}; build-macos.sh needs 26 or later"
-            exit 1
-          fi
       - run: brew install mpv dylibbundler
       - uses: Swatinem/rust-cache@v2
         with:
@@ -260,7 +248,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/refryt-*-macos-arm64.dmg
+          path: dist/moosik-*-macos-arm64.dmg
           if-no-files-found: error
           retention-days: 1
 
@@ -281,32 +269,3 @@ jobs:
       - run: cargo fetch --locked
       - name: Verify the release
         run: scripts/release.sh verify "${{ needs.check.outputs.version }}" --strict ${{ github.ref_type != 'tag' && '--test-build' || '' }}
-
-  # Only a tag publishes. The release stays a draft until every file and the checksums are on it,
-  # so nobody, the in-app updater included, sees one that is half there.
-  publish:
-    if: github.repository == 'gridoe/refryt' && github.ref_type == 'tag'
-    needs: [check, verify]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Create the release
-        env:
-          VERSION: ${{ needs.check.outputs.version }}
-        run: |
-          # Written outside dist/ and moved in after: the list is read before the file exists.
-          (cd dist && sha256sum refryt-*) > sums.txt
-          cat sums.txt
-          mv sums.txt "dist/refryt-$VERSION-SHA256SUMS.txt"
-          gh release create "v$VERSION" dist/refryt-* \
-            --title "refryt $VERSION" --notes-file "release-notes/$VERSION.md" \
-            --verify-tag --draft
-          gh release edit "v$VERSION" --draft=false

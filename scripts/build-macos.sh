@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Build dist/Refryt.app, a zip of it, and a drag-to-Applications disk image
-# (dist/refryt-<version>-macos-<arch>.zip and .dmg).
+# Build dist/Moosik.app, a zip of it, and a drag-to-Applications disk image
+# (dist/moosik-<version>-macos-<arch>.zip and .dmg).
 #
-# The bundle holds the release binary, an adaptive icon (see below), libmpv and its whole dylib
+# The bundle holds the release binary, the Moosik icon, libmpv and its whole dylib
 # tail copied into Contents/Frameworks, and a standalone yt-dlp next to the executable (where
 # `backend::yt_dlp_program` looks first). Nothing outside macOS itself is needed at run time.
 #
-# Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode 26 for
-# actool (the icon) and the command line tools for iconutil, sips, codesign and hdiutil.
+# Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode command line tools, codesign and hdiutil.
 # Local builds reuse the identity configured by setup-macos-signing.sh. Without one,
 # packaging falls back to ad-hoc signing; a copy downloaded elsewhere needs the quarantine
-# flag cleared (`xattr -cr Refryt.app`) or a real Developer ID signature.
+# flag cleared (`xattr -cr Moosik.app`) or a real Developer ID signature.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,50 +18,25 @@ cd "$root"
 command -v dylibbundler >/dev/null || { echo "missing dylibbundler: brew install dylibbundler" >&2; exit 1; }
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "moosik"))')"
 arch="$(uname -m)"
-app_name="${MOOSIK_APP_NAME:-Refryt}"
-prefix=refryt
-[ "$app_name" != Moosik ] || prefix=moosik
+app_name="${MOOSIK_APP_NAME:-Moosik}"
+prefix=moosik
 app="dist/$app_name.app"
 zip="dist/$prefix-$version-macos-$arch.zip"
 
 echo "building release binary"
-cargo build --locked --release -p refryt --bin refryt
+cargo build --locked --release -p moosik --bin moosik
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
-cp target/release/refryt "$app/Contents/MacOS/refryt"
+cp target/release/moosik "$app/Contents/MacOS/moosik"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 
 echo "building the icon"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-# macOS 26 restyles an icon for Dark, Clear and Tinted (monochrome) mode, but only one built as an
-# Icon Composer document and compiled into Assets.car; a plain .icns just gets the generic
-# treatment. actool also writes a .icns fallback for older systems.
-icon_keys="<key>CFBundleIconFile</key><string>refryt</string>"
-mkdir -p "$work/icon"
-if xcrun actool assets/icons/app/Refryt.icon --compile "$work/icon" \
-    --output-format human-readable-text --errors --warnings \
-    --output-partial-info-plist "$work/icon.plist" --app-icon Refryt \
-    --include-all-app-icons --enable-on-demand-resources NO --development-region en \
-    --target-device mac --minimum-deployment-target 26.0 --platform macosx >/dev/null 2>&1 \
-    && [ -f "$work/icon/Assets.car" ]; then
-    cp "$work/icon/Assets.car" "$app/Contents/Resources/Assets.car"
-    cp "$work/icon/Refryt.icns" "$app/Contents/Resources/refryt.icns"
-    icon_keys="$icon_keys<key>CFBundleIconName</key><string>$app_name</string>"
-else
-    echo "actool could not compile the .icon (needs Xcode 26); falling back to a plain .icns"
-    iconset="$work/refryt.iconset"
-    mkdir -p "$iconset"
-    master="assets/icons/app/refryt-master.png"
-    for size in 16 32 128 256 512; do
-        sips -z "$size" "$size" "$master" --out "$iconset/icon_${size}x${size}.png" >/dev/null
-        sips -z "$((size * 2))" "$((size * 2))" "$master" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
-    done
-    iconutil -c icns "$iconset" -o "$app/Contents/Resources/refryt.icns"
-fi
+cp assets/icons/app/moosik.icns "$app/Contents/Resources/moosik.icns"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -72,8 +46,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$app_name</string>
     <key>CFBundleDisplayName</key><string>$app_name</string>
     <key>CFBundleIdentifier</key><string>io.github.gridoe.refryt</string>
-    <key>CFBundleExecutable</key><string>refryt</string>
-    $icon_keys
+    <key>CFBundleExecutable</key><string>moosik</string>
+    <key>CFBundleIconFile</key><string>moosik</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
@@ -85,14 +59,14 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "bundling libmpv"
-dylibbundler -od -b -x "$app/Contents/MacOS/refryt" \
+dylibbundler -od -b -x "$app/Contents/MacOS/moosik" \
     -d "$app/Contents/Frameworks" -p "@executable_path/../Frameworks" \
     -s /opt/homebrew/lib -s /usr/local/lib >/dev/null 2>&1
 
 # dylibbundler adds its rpath once per library it rewrites, and dyld refuses a binary with the
 # same LC_RPATH twice. Keep exactly one.
 rpath="@executable_path/../Frameworks"
-for bin in "$app/Contents/MacOS/refryt" "$app"/Contents/Frameworks/*.dylib; do
+for bin in "$app/Contents/MacOS/moosik" "$app"/Contents/Frameworks/*.dylib; do
     count="$(otool -l "$bin" | grep -c "path $rpath/\? " || true)"
     while [ "$count" -gt 1 ]; do
         install_name_tool -delete_rpath "$rpath/" "$bin" 2>/dev/null \
@@ -107,10 +81,6 @@ curl -fsSL -o "$app/Contents/MacOS/yt-dlp" \
 chmod +x "$app/Contents/MacOS/yt-dlp"
 
 if [ "$app_name" = Moosik ]; then
-    cp assets/icons/app/moosik.icns "$app/Contents/Resources/moosik.icns"
-    /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile moosik' "$app/Contents/Info.plist"
-    /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$app/Contents/Info.plist" 2>/dev/null || true
-    rm -f "$app/Contents/Resources/Assets.car"
     "$root/scripts/prepare-macos-media-helper.sh" "$app"
     plutil -replace CFBundleURLTypes -json "$(cat "$root/packaging/macos/url-types.json")" "$app/Contents/Info.plist"
     "$root/scripts/prepare-macos-updater.sh" "$app"

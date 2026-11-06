@@ -15,7 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "fs", "sync"] }
 tracing = "0.1"
-# No `env-filter`: `filter::Targets` (see `refryt::init_tracing`) parses the same `RUST_LOG`
+# No `env-filter`: `filter::Targets` (see `moosik::init_tracing`) parses the same `RUST_LOG`
 # syntax without `matchers` + `regex-automata` + `regex-syntax`, the only regex in the build.
 tracing-subscriber = "0.3"
 url = "2.5"
@@ -34,7 +34,7 @@ libmpv2 = "6.0"
 # `serde_json` exposes `Json::into_inner`, which is how `innertube.rs` gets at the raw
 # response for the two endpoints whose typed parsers are stale.
 ytmapi-rs = { version = "0.3", default-features = false, features = ["rustls", "simplified-queries", "reqwest", "serde_json"] }
-refryt-resolve = { path = "crates/refryt-resolve" }
+moosik-resolve = { path = "crates/moosik-resolve" }
 
 # Iteration speed: our code compiles fast, dependencies are optimised once and then cached.
 # Without this an egui debug build is unusably slow at runtime; with it the edit-run loop stays

@@ -1,4 +1,4 @@
-param([IntPtr]$Window, [string]$Exe, [string]$Icon, [string]$Pin)
+param([IntPtr]$Window, [string]$Exe, [string]$Icon, [string]$Pin, [System.Diagnostics.Process]$AppProcess)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -32,10 +32,30 @@ public static class TaskbarProps {
 }
 '@
 $expected = @{ 2 = ('"' + $Exe + '"'); 3 = "$Icon,0"; 4 = 'Moosik'; 5 = 'Moosik.Desktop' }
-foreach ($key in $expected.Keys) {
-    $actual = [TaskbarProps]::Read($Window, $key)
-    if ($actual -ne $expected[$key]) { throw "Taskbar property $key was '$actual', expected '$($expected[$key])'" }
-}
+# Startup can briefly expose an HWND before Explorer sees its taskbar properties.
+# Refresh the process handle and wait for the complete metadata on the same window.
+$deadline = [DateTime]::UtcNow.AddSeconds(30)
+do {
+    if ($AppProcess) {
+        $AppProcess.Refresh()
+        if ($AppProcess.HasExited) { throw 'Moosik exited while waiting for its taskbar window' }
+        $Window = $AppProcess.MainWindowHandle
+    }
+    $mismatch = 'No main window yet'
+    if ($Window -ne [IntPtr]::Zero) {
+        $mismatch = $null
+        foreach ($key in $expected.Keys) {
+            $actual = [TaskbarProps]::Read($Window, $key)
+            if ($actual -ne $expected[$key]) {
+                $mismatch = "Taskbar property $key was '$actual', expected '$($expected[$key])'"
+                break
+            }
+        }
+    }
+    if (!$mismatch) { break }
+    Start-Sleep -Milliseconds 300
+} while ([DateTime]::UtcNow -lt $deadline)
+if ($mismatch) { throw $mismatch }
 $shell = New-Object -ComObject Shell.Application
 $shortcuts = @((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Moosik\Moosik.lnk'))
 $launcherIcon = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Moosik\Taskbar\current.ico'

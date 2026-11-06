@@ -67,7 +67,7 @@ let moosik = Bundle.main.bundleURL
     .deletingLastPathComponent() // Moosik.app
 guard moosik.pathExtension == "app",
       FileManager.default.isExecutableFile(atPath:
-          moosik.appendingPathComponent("Contents/MacOS/refryt").path) else { exit(1) }
+          moosik.appendingPathComponent("Contents/MacOS/moosik").path) else { exit(1) }
 
 let application = NSApplication.shared
 application.setActivationPolicy(.prohibited)

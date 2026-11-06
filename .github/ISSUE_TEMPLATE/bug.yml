@@ -41,9 +41,9 @@ body:
     attributes:
       label: Log
       description: |
-        The end of `refryt.log` from the config folder:
-        Linux `~/.config/refryt`, Flatpak `~/.var/app/io.github.gridoe.refryt/config/refryt`,
-        macOS `~/Library/Application Support/refryt`, Windows `%APPDATA%\refryt\config`.
+        The end of `moosik.log` from the config folder:
+        Linux `~/.config/moosik`, Flatpak `~/.var/app/io.github.AtotheY.moosik/config/moosik`,
+        macOS `~/Library/Application Support/moosik`, Windows `%APPDATA%\moosik\config`.
       render: shell
   - type: checkboxes
     id: private

@@ -1,0 +1,23 @@
+/* Solarized Light
+   Solarized: ethanschoonover.com/solarized.
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: light;
+
+  --base:             #fdf6e3;  /* the cards */
+  --text:             #073642;  /* body text */
+  --accent:           #268bd2;  /* play buttons, selection, links */
+  --on-accent:        #fdf6e3;  /* text and icons on the accent */
+
+  --popup:            #eee8d5;  /* menus and popups */
+  --surface:          #eee8d5;  /* chips, inputs */
+  --surface-hover:    #e3dcc6;
+  --outline:          #e3dcc6;  /* hairlines */
+  --subtext:          #586e75;  /* second-rank text */
+  --muted:            #657b83;  /* third-rank text */
+  --danger:           #dc322f;
+  --warning:          #b58900;
+}

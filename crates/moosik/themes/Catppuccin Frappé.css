@@ -1,0 +1,25 @@
+/* Catppuccin Frappé
+   Catppuccin: github.com/catppuccin/palette (palette.json v1.7.1).
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: dark;
+
+  --base:             #303446;  /* the cards */
+  --text:             #c6d0f5;  /* body text */
+  --accent:           #ca9ee6;  /* play buttons, selection, links */
+  --on-accent:        #232634;  /* text and icons on the accent */
+
+  --gutter:           #232634;  /* the gap behind the cards */
+  --popup:            #292c3c;  /* menus and popups */
+  --surface:          #414559;  /* chips, inputs */
+  --surface-hover:    #51576d;
+  --surface-active:   #626880;
+  --outline:          #51576d;  /* hairlines */
+  --subtext:          #b5bfe2;  /* second-rank text */
+  --muted:            #737994;  /* third-rank text */
+  --danger:           #e78284;
+  --warning:          #e5c890;
+}

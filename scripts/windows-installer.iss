@@ -1,4 +1,4 @@
-; refryt's Windows installer. Compiled by scripts/build-windows.sh via ISCC under Wine — see
+; moosik's Windows installer. Compiled by scripts/build-windows.sh via ISCC under Wine — see
 ; docs/BUILDING.md. Version and the staged input folder are passed in with /D, not hardcoded,
 ; so this stays in sync with whatever the Rust build actually produced.
 ;
@@ -27,7 +27,7 @@ AppPublisher=Moosik
 AppPublisherURL=https://github.com/AtotheY/moosik
 DefaultDirName={autopf}\Moosik
 DefaultGroupName=Moosik
-UninstallDisplayIcon={app}\refryt.exe
+UninstallDisplayIcon={app}\moosik.exe
 OutputDir=..\dist
 OutputBaseFilename={#OutputName}
 Compression=lzma2
@@ -50,7 +50,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#StageDir}\icons\*.ico"; DestDir: "{app}\icons"; Flags: ignoreversion
-Source: "{#StageDir}\refryt.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\moosik.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; The colour emoji font: Windows' own is COLR, which the emoji painter cannot read.
 Source: "{#StageDir}\NotoColorEmoji.ttf"; DestDir: "{app}"; Flags: ignoreversion
@@ -60,24 +60,28 @@ Source: "{#StageDir}\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
+; Existing pins and login entries may run the historical filename before Moosik
+; has its first chance to refresh them. Only upgraded installations need the alias.
+Source: "{#StageDir}\moosik.exe"; DestDir: "{app}"; DestName: "refryt.exe"; Check: FileExists(ExpandConstant('{app}\refryt.exe')); Flags: ignoreversion
+
 [Registry]
 Root: HKA; Subkey: "Software\Classes\moosik"; ValueType: string; ValueData: "URL:Moosik playback"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\moosik"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKA; Subkey: "Software\Classes\moosik\shell\open\command"; ValueType: string; ValueData: """{app}\refryt.exe"" --open-url ""%1"""
+Root: HKA; Subkey: "Software\Classes\moosik\shell\open\command"; ValueType: string; ValueData: """{app}\moosik.exe"" --open-url ""%1"""
 
 [Icons]
-Name: "{group}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"
-Name: "{autodesktop}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"; Tasks: desktopicon
+Name: "{group}\Moosik"; Filename: "{app}\moosik.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"
+Name: "{autodesktop}\Moosik"; Filename: "{app}\moosik.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"; Tasks: desktopicon
 Name: "{group}\Uninstall Moosik"; Filename: "{uninstallexe}"
 
 [Run]
 ; `runasoriginaluser`: the setup is elevated (Program Files), and without this the post-install
-; launch inherits that elevation. An elevated refryt is not just unnecessary — it breaks yt-dlp:
+; launch inherits that elevation. An elevated moosik is not just unnecessary — it breaks yt-dlp:
 ; its startup PATH scan for ffmpeg dies with `[WinError 448] ... untrusted mount point` the
 ; moment it meets a scoop-style junction, because Windows marks junctions made by a
 ; non-elevated process as untrusted for elevated ones. That read as "all resolvers failed" on
 ; the first launch after installing, and only that one.
-Filename: "{app}\refryt.exe"; Description: "Launch Moosik"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\moosik.exe"; Description: "Launch Moosik"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallDelete]
 ; Nothing under {app} to clean up beyond the files listed above — settings and the signed-in

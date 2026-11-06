@@ -4,15 +4,13 @@
 
 # Moosik
 
-A YouTube Music desktop player for macOS and Windows, with an editable queue and local listening stats.
+A YouTube Music desktop player for macOS, Windows, and Linux, with an editable queue and local listening stats.
 
 [Download for Apple Silicon Mac](https://moosik.dev/?platform=mac#download) · [Windows x64 and all downloads](https://github.com/AtotheY/moosik/releases/latest)
 
-Moosik is an independent fork of [Refryt](https://github.com/gridoe/refryt), by [gridoe](https://github.com/gridoe) and contributors. Its playback engine and original desktop interface come from their work.
-
 [Install](#install) · [Listening stats](docs/listening-stats.md) · [Queue](docs/queue.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
 
-> Early release. Windows x64 is experimental; sign-in and playback still need testing on real hardware.
+> Early release. Windows x64 and Ubuntu 24.04 x86-64 are experimental. Interactive sign-in and playback still need testing on real hardware.
 
 ## Screenshots
 
@@ -54,6 +52,7 @@ Download a package from the [latest release](https://github.com/AtotheY/moosik/r
 | --- | --- |
 | macOS, Apple Silicon | DMG installer and signed in-app updates. See the release for macOS requirements. |
 | Windows, x64 | Experimental setup EXE and portable ZIP. |
+| Ubuntu 24.04, x86-64 | Experimental [Debian package](docs/BUILDING.md#ubuntu-2404-x86-64) with a clean-install launch check. |
 
 On macOS, open the DMG and drag Moosik to Applications. First launch may require approval in **System Settings → Privacy & Security**. See [in-app updates](docs/client-updates.md) for signing and update details.
 
@@ -66,10 +65,8 @@ Install Rust 1.90 or newer and the platform dependencies in the [build guide](do
 ```sh
 git clone https://github.com/AtotheY/moosik.git
 cd moosik
-cargo run --locked --release -p refryt --bin refryt
+cargo run --locked --release -p moosik --bin moosik
 ```
-
-The crate and binary are named `refryt`. Some bundle identifiers and storage paths also use that name.
 
 ## Account and playlists
 
@@ -85,7 +82,7 @@ Keep session files, cookies, and raw account diagnostics private. Review logs an
 
 ## Credits and license
 
-- [Refryt contributors](https://github.com/gridoe/refryt/graphs/contributors): playback, API integration, and the original desktop interface.
+- [gridoe](https://github.com/gridoe) and the [original contributors](https://github.com/AtotheY/moosik/tree/12e899c4b941728680c42ba1a3841d92769cd5f2): playback, API integration, and the original desktop interface.
 - [Sonora](https://github.com/sonorahq/sonora) and [`ytmusic-rs`](https://github.com/sonorahq/ytmusic-rs): direct stream URL resolution.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp): fallback resolution.
 - [youtui](https://github.com/nick42d/youtui): `ytmapi-rs` and the `rusty_ytdl` fork used by the optional native resolver.
@@ -99,7 +96,7 @@ Keep session files, cookies, and raw account diagnostics private. Review logs an
   [Dracula](https://spec.draculatheme.com), [Rosé Pine](https://github.com/rose-pine/palette),
   [Everforest](https://github.com/sainnhe/everforest),
   [Solarized](https://ethanschoonover.com/solarized) and Spotify's own colours. Each file in
-  `crates/refryt/themes` names its source.
+  `crates/moosik/themes` names its source.
 
 Maintained by [AtotheY](https://github.com/AtotheY). Licensed under [GPL-3.0-or-later](LICENSE), including this fork's changes. Existing copyright notices and dependency licenses apply.
 

@@ -1,0 +1,25 @@
+/* Gruvbox Dark
+   Gruvbox: github.com/morhetz/gruvbox.
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: dark;
+
+  --base:             #282828;  /* the cards */
+  --text:             #ebdbb2;  /* body text */
+  --accent:           #fe8019;  /* play buttons, selection, links */
+  --on-accent:        #282828;  /* text and icons on the accent */
+
+  --gutter:           #1d2021;  /* the gap behind the cards */
+  --popup:            #1d2021;  /* menus and popups */
+  --surface:          #3c3836;  /* chips, inputs */
+  --surface-hover:    #504945;
+  --surface-active:   #665c54;
+  --outline:          #3c3836;  /* hairlines */
+  --subtext:          #d5c4a1;  /* second-rank text */
+  --muted:            #928374;  /* third-rank text */
+  --danger:           #fb4934;
+  --warning:          #fabd2f;
+}
