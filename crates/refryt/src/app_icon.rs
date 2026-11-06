@@ -142,10 +142,10 @@ impl AppIcon {
                 64,
                 64,
             )?));
-            self.refresh_pin();
             if let Err(error) = self.set_taskbar_group(window) {
                 tracing::warn!(%error, "could not apply the taskbar group icon");
             }
+            self.refresh_pin();
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
             egui::IconData {

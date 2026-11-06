@@ -37,7 +37,9 @@ function Install-App($dir) {
 function Find-Button {
   $nodes = $bar.FindAll($scope,$all)
   Write-Host ('Taskbar: ' + (($nodes | ForEach-Object {$_.Current.Name}) -join ' | '))
-  $nodes | Where-Object { $_.Current.Name -match 'Moosik|refryt' -and $_.Current.BoundingRectangle.Width -gt 0 } | Select-Object -First 1
+  $matchesForApp=@($nodes | Where-Object { $_.Current.Name -match 'Moosik|refryt' -and $_.Current.BoundingRectangle.Width -gt 0 })
+  if ($matchesForApp.Count -gt 1) {throw 'Explorer shows duplicate Moosik buttons'}
+  $matchesForApp | Select-Object -First 1
 }
 $dest=Join-Path $env:RUNNER_TEMP 'MoosikPinned'
 Install-App old
@@ -72,6 +74,7 @@ $app=Start-Process "$dest/refryt.exe" -PassThru
 Start-Sleep 12
 $icon=Join-Path $dest 'icons\amber.ico'
 Show-Pins
+if (!(Find-Button)) {throw 'No running Moosik taskbar button'}
 python scripts/tests/windows-taskbar-image.py $icon taskbar-running.png
 $running=$LASTEXITCODE
 Stop-Process -Id $app.Id
@@ -79,3 +82,16 @@ Start-Sleep 4
 python scripts/tests/windows-taskbar-image.py $icon taskbar-closed.png
 $closed=$LASTEXITCODE
 if ($running -or $closed) { throw "Amber on real upgraded pin: open=$running, closed=$closed (0=pass)" }
+# A later selection must also persist on the same real pin. Load the other
+# setting through the regular startup path and compare both shell states again.
+[IO.File]::WriteAllText((Join-Path $config 'settings.json'),'{"app_icon":"frost"}')
+$app=Start-Process "$dest/refryt.exe" -PassThru
+Start-Sleep 10
+$icon=Join-Path $dest 'icons\frost.ico'
+if (!(Find-Button)) {throw 'Moosik taskbar button missing after relaunch'}
+python scripts/tests/windows-taskbar-image.py $icon taskbar-frost-running.png
+if ($LASTEXITCODE) {throw 'Frost not shown on the running pin'}
+Stop-Process -Id $app.Id
+Start-Sleep 3
+python scripts/tests/windows-taskbar-image.py $icon taskbar-frost-closed.png
+if ($LASTEXITCODE) {throw 'Frost not shown on the closed pin'}

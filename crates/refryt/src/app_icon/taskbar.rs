@@ -22,7 +22,10 @@ use windows::{
             IPropertyStore, PSCoerceToCanonicalValue, SHGetPropertyStoreForWindow,
         },
         UI::Shell::SetCurrentProcessExplicitAppUserModelID,
-        UI::Shell::{IShellLinkW, SHCNE_UPDATEITEM, SHCNF_PATHW, SHChangeNotify, ShellLink},
+        UI::Shell::{
+            CSIDL_COMMON_PROGRAMS, IShellLinkW, SHCNE_ASSOCCHANGED, SHCNE_UPDATEITEM, SHCNF_FLUSH,
+            SHCNF_IDLIST, SHCNF_PATHW, SHChangeNotify, SHGetFolderPathW, ShellLink,
+        },
     },
     core::{BSTR, HSTRING, Interface},
 };
@@ -118,14 +121,46 @@ fn refresh(icon: AppIcon) -> anyhow::Result<()> {
         return Ok(());
     }
     let exe = exe.canonicalize()?;
+    let mut rewritten = Vec::new();
     for entry in std::fs::read_dir(pins)?.flatten() {
         let path = entry.path();
         if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
-            && let Err(error) = update_link(&path, &exe, &icon_file)
         {
-            tracing::debug!(%error, "could not read or refresh a taskbar shortcut");
+            match update_link(&path, &exe, &icon_file) {
+                Ok(true) => rewritten.push(path),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "could not read or refresh a taskbar shortcut")
+                }
+            }
+        }
+    }
+    if !rewritten.is_empty() {
+        // A real taskbar pin keeps its cached artwork even after the .lnk is saved.
+        // Invalidate first, then tell Explorer exactly which updated items to reread.
+        // Do this once per change, never on a launch/exit with an unchanged pin.
+        unsafe {
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, None, None);
+        }
+        let mut affected = vec![icon_file];
+        let mut programs = [0; 260];
+        if unsafe { SHGetFolderPathW(None, CSIDL_COMMON_PROGRAMS as i32, None, 0, &mut programs) }
+            .is_ok()
+        {
+            affected.push(path_from_buffer(&programs).join(r"Moosik\Moosik.lnk"));
+        }
+        for path in affected.into_iter().chain(rewritten) {
+            let path = HSTRING::from(path.as_os_str());
+            unsafe {
+                SHChangeNotify(
+                    SHCNE_UPDATEITEM,
+                    SHCNF_PATHW | SHCNF_FLUSH,
+                    Some(path.as_ptr().cast()),
+                    None,
+                );
+            }
         }
     }
     Ok(())
@@ -135,7 +170,7 @@ fn path_from_buffer(buf: &[u16]) -> PathBuf {
     OsString::from_wide(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(buf.len())]).into()
 }
 
-fn update_link(path: &Path, exe: &Path, icon: &Path) -> anyhow::Result<()> {
+fn update_link(path: &Path, exe: &Path, icon: &Path) -> anyhow::Result<bool> {
     let path = HSTRING::from(path.as_os_str());
     // The winit window thread has an initialized COM apartment. The ShellLink is local to
     // this call. Save only after verifying that the existing link targets this executable.
@@ -155,25 +190,19 @@ fn update_link(path: &Path, exe: &Path, icon: &Path) -> anyhow::Result<()> {
             || !target.is_absolute()
             || target.canonicalize().ok().as_deref() != Some(exe)
         {
-            return Ok(());
+            return Ok(false);
         }
         let mut index = 0;
         link.GetIconLocation(&mut buf, &mut index)?;
         let store: IPropertyStore = link.cast()?;
         let id = store.GetValue(&PKEY_AppUserModel_ID)?;
         if index == 0 && path_from_buffer(&buf) == icon && id.to_string() == APP_ID {
-            return Ok(());
+            return Ok(false);
         }
         link.SetIconLocation(&HSTRING::from(icon.as_os_str()), 0)?;
         set_string(&store, &PKEY_AppUserModel_ID, OsStr::new(APP_ID))?;
         store.Commit()?;
         file.Save(&path, true)?;
-        SHChangeNotify(
-            SHCNE_UPDATEITEM,
-            SHCNF_PATHW,
-            Some(path.as_ptr().cast()),
-            None,
-        );
     }
-    Ok(())
+    Ok(true)
 }
