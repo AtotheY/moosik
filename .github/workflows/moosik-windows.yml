@@ -4,6 +4,11 @@ on:
     branches: [codex/windows-distribution]
   workflow_call:
   workflow_dispatch:
+    inputs:
+      interactive_pin:
+        description: Exercise a real Explorer pin and inspect the taskbar artwork
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -146,7 +151,7 @@ jobs:
           path: ${{ runner.temp }}/taskbar.png
           if-no-files-found: ignore
 
-  pinned-upgrade:
+  shortcut-upgrade:
     needs: installer
     runs-on: windows-latest
     steps:
@@ -163,12 +168,19 @@ jobs:
           gh release download moosik-v0.1.20 -p '*-setup.exe' -D old
           $file = (Get-ChildItem old/*-setup.exe).FullName
           if ((Get-FileHash $file).Hash -ne '295812973cbe64642babbe8ad48b9e8edeb003cd5f317c132e22a9526ae58f5a') { throw 'Unexpected 0.1.20 installer' }
-          python -m pip install pillow
+      - name: Verify the old installer upgrades and its shortcut migrates
+        if: ${{ !inputs.interactive_pin }}
+        shell: powershell
+        run: ./scripts/tests/windows-shortcut-upgrade.ps1
+      - name: Install interactive test dependency
+        if: inputs.interactive_pin
+        run: python -m pip install pillow
       - name: Pin the old install in Explorer and verify the upgraded taskbar open and closed
+        if: inputs.interactive_pin
         shell: powershell
         run: ./scripts/tests/windows-pinned-upgrade.ps1
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && inputs.interactive_pin
         with:
           name: upgraded-taskbar
           path: taskbar-*.png

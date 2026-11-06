@@ -210,7 +210,10 @@ fn update_link(path: &Path, exe: &Path, icon: &Path) -> anyhow::Result<bool> {
                 .as_deref()
                 == exe.parent();
         if legacy_pin {
-            link.SetPath(&HSTRING::from(exe.as_os_str()))?;
+            // Preserve the shell's ordinary DOS path spelling. The canonical
+            // executable used for validation may have a verbatim Win32 prefix.
+            let new_target = target.with_file_name("moosik.exe");
+            link.SetPath(&HSTRING::from(new_target.as_os_str()))?;
         } else if !target.is_absolute() || target.canonicalize().ok().as_deref() != Some(exe) {
             return Ok(false);
         }

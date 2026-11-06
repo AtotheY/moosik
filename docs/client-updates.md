@@ -111,9 +111,9 @@ The release includes the initial-install DMG, the signed update ZIP, checksums, 
 The feed rejects mismatched versions/architectures or absent signatures. The current
 packaging job ships Apple silicon; its feed declares `arm64` and the minimum macOS
 version required by the actual bundled executables and playback libraries.
-Publication also requires the Windows installer launch and pinned-upgrade checks,
+Publication also requires Windows installer launch and shortcut migration from 0.1.20,
 and installation and rendering from the Linux .deb on clean Ubuntu. The versioned
-checksum manifest covers the Windows setup and ZIP and the Ubuntu package.
+checksum manifest covers the Windows setup and ZIP and the Ubuntu package. To test actual Explorer clicks and artwork on an interactive runner, dispatch the Windows workflow with `interactive_pin` enabled.
 
 The alternative packaging workflow runs on manual dispatch.
 
