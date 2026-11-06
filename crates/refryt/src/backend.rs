@@ -29,6 +29,12 @@ use crate::player;
 /// Something finished happening off-thread.
 #[derive(Debug)]
 pub enum Event {
+    FolderTracks {
+        request: u64,
+        epoch: u64,
+        generation: u64,
+        result: Result<Vec<Track>, String>,
+    },
     SearchDone {
         query: String,
         results: SearchResults,
@@ -187,10 +193,12 @@ pub enum Event {
         epoch: u64,
     },
     LibraryMore {
+        epoch: u64,
         section: crate::api::LibrarySection,
         page: crate::innertube::Page,
     },
     LibraryMoreFailed {
+        epoch: u64,
         section: crate::api::LibrarySection,
         error: String,
     },
@@ -1572,17 +1580,92 @@ impl Backend {
     }
 
     /// The next page of one library section.
-    pub fn fetch_library_more(&self, section: crate::api::LibrarySection, token: String) {
+    pub fn fetch_library_more(
+        &self,
+        section: crate::api::LibrarySection,
+        token: String,
+        epoch: u64,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.library_more(section, token).await {
-                Ok(page) => Event::LibraryMore { section, page },
+                Ok(page) => Event::LibraryMore {
+                    epoch,
+                    section,
+                    page,
+                },
                 Err(e) => Event::LibraryMoreFailed {
+                    epoch,
                     section,
                     error: format!("{e:#}"),
                 },
             };
             Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    pub(crate) fn folder_tracks(
+        &self,
+        ids: Vec<String>,
+        mut tracks: Vec<Track>,
+        rules: Vec<crate::local_playlists::SmartRule>,
+        request: u64,
+        epoch: u64,
+        generation: u64,
+    ) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result: anyhow::Result<Vec<Track>> = async {
+                if !rules.is_empty() {
+                    let smart =
+                        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Track>> {
+                            let db = rusqlite::Connection::open_with_flags(
+                                crate::listening::path()?,
+                                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                            )?;
+                            let report = crate::listening::report::build(
+                                &db,
+                                &crate::ui::history::all_time_query(),
+                            )?;
+                            Ok(rules.iter().flat_map(|rule| rule.tracks(&report)).collect())
+                        })
+                        .await??;
+                    tracks.extend(smart);
+                }
+                for id in ids {
+                    let playlist = api.playlist(&id).await?;
+                    tracks.extend(playlist.tracks.items);
+                    let mut next = playlist.tracks.next;
+                    let mut visited = std::collections::HashSet::new();
+                    while let Some(token) = next {
+                        anyhow::ensure!(
+                            visited.insert(token.clone()),
+                            "repeated playlist continuation"
+                        );
+                        let page = api.playlist_more(token).await?;
+                        tracks.extend(
+                            page.items
+                                .into_iter()
+                                .filter_map(|entry| entry.track().cloned()),
+                        );
+                        next = page.next;
+                    }
+                }
+                let mut seen = std::collections::HashSet::new();
+                tracks.retain(|track| seen.insert(track.video_id.clone()));
+                Ok(tracks)
+            }
+            .await;
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::FolderTracks {
+                    request,
+                    epoch,
+                    generation,
+                    result: result.map_err(|e| e.to_string()),
+                },
+            );
         });
     }
 

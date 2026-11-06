@@ -3205,9 +3205,24 @@ pub(crate) fn page_menu(
     response: &egui::Response,
     menu: PageMenu<'_>,
 ) -> Option<super::ui::RowAction> {
+    page_menu_with_layout(ui, palette, response, menu, None)
+}
+
+pub(crate) fn page_menu_with_layout(
+    ui: &mut Ui,
+    palette: &Palette,
+    response: &egui::Response,
+    menu: PageMenu<'_>,
+    layout: Option<(bool, bool)>,
+) -> Option<super::ui::RowAction> {
     use super::ui::RowAction;
     let mut popup = egui::Popup::new(
-        ui.id().with(("ytm-page-menu", menu.page_id)),
+        if menu.context_only {
+            response.id
+        } else {
+            ui.id()
+        }
+        .with(("ytm-page-menu", menu.page_id)),
         ui.ctx().clone(),
         response,
         ui.layer_id(),
@@ -3403,6 +3418,36 @@ pub(crate) fn page_menu(
                 mui.close();
             }
 
+            if let Some((pinned, filed)) = layout {
+                groups.start(mui, palette, true);
+                if menu_item(
+                    mui,
+                    palette,
+                    Icon::Bookmark,
+                    if pinned {
+                        "Unpin from sidebar"
+                    } else {
+                        "Pin to sidebar"
+                    },
+                    None,
+                )
+                .clicked()
+                {
+                    choice = Some(RowAction::PinPlaylist(menu.page_id.to_owned(), !pinned));
+                    mui.close();
+                }
+                if menu_item(mui, palette, Icon::Folder, "Move to folder", None).clicked() {
+                    choice = Some(RowAction::MovePlaylistToFolder(menu.page_id.to_owned()));
+                    mui.close();
+                }
+                if filed
+                    && menu_item(mui, palette, Icon::Library, "Move out of folder", None).clicked()
+                {
+                    choice = Some(RowAction::UnfilePlaylist(menu.page_id.to_owned()));
+                    mui.close();
+                }
+            }
+
             // Changing it.
             groups.start(mui, palette, menu.manage || menu.remove_from_library);
             if menu.manage {
@@ -3587,8 +3632,36 @@ pub fn art_card(
     // The card the listener last single-clicked in double-click-to-play mode. Purely visual.
     selected: bool,
 ) -> CardClick {
+    interactive_art_card(
+        ui, palette, width, texture, title, subtitle, shape, menu, playing, selected, false, true,
+    )
+}
+
+/// Library cards also support dragging and can suppress playback while selecting a batch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn interactive_art_card(
+    ui: &mut Ui,
+    palette: &Palette,
+    width: f32,
+    texture: Option<&egui::TextureHandle>,
+    title: &str,
+    subtitle: &str,
+    shape: ArtShape,
+    menu: Option<CardMenu<'_>>,
+    playing: bool,
+    selected: bool,
+    draggable: bool,
+    show_play: bool,
+) -> CardClick {
     let size = card_size(width, shape);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        size,
+        if draggable {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        },
+    );
     let mut play = false;
 
     if ui.is_rect_visible(rect) {
@@ -3620,7 +3693,7 @@ pub fn art_card(
         );
         paint_art(ui, palette, art, texture, shape);
         // Circles are people — an artist has no single thing to play, so no play button.
-        if shape != ArtShape::Circle {
+        if show_play && shape != ArtShape::Circle {
             // Loading, the corner button stays up whether hovered or not, ringed like the
             // player bar's — the card you pressed says it heard you.
             let loading = playing && track_loading(ui.ctx());
@@ -3702,12 +3775,19 @@ pub fn folder_card(
     palette: &Palette,
     width: f32,
     name: &str,
-    track_count: usize,
-    menu: PageMenu<'_>,
+    subtitle: &str,
+    menu: Option<PageMenu<'_>>,
 ) -> CardClick {
     let shape = ArtShape::Square;
     let size = card_size(width, shape);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        size,
+        if menu.is_some() {
+            Sense::click()
+        } else {
+            Sense::click_and_drag()
+        },
+    );
 
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::same(theme::RADIUS);
@@ -3741,16 +3821,15 @@ pub fn folder_card(
             theme::medium(13.0),
             palette.text,
         );
-        let subtitle = format!("{track_count} tracks");
         crate::emoji::paint_line(
             ui,
             art.left_bottom() + vec2(0.0, 28.0),
-            &truncate_to(ui, &subtitle, theme::regular(12.0), label_w),
+            &truncate_to(ui, subtitle, theme::regular(12.0), label_w),
             theme::regular(12.0),
             palette.secondary,
         );
     }
-    let action = page_menu(ui, palette, &response, menu);
+    let action = menu.and_then(|menu| page_menu(ui, palette, &response, menu));
     CardClick {
         response,
         play: false,
@@ -4106,6 +4185,77 @@ pub fn truncate_to<'t>(
 /// Text in the accent colour on a pill, used for primary actions.
 pub fn pill_button(ui: &mut Ui, palette: &Palette, label: &str) -> egui::Response {
     pill(ui, palette, label, PillStyle::Accent)
+}
+
+pub(crate) fn input_frame(p: &Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(p.glass(p.surface))
+        .corner_radius(theme::RADIUS)
+        .stroke(egui::Stroke::new(1.0, p.outline))
+        .inner_margin(egui::Margin::symmetric(12, 7))
+}
+
+pub(crate) fn text_input(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+) -> egui::Response {
+    input_frame(p)
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .frame(egui::Frame::NONE)
+                    .font(theme::regular(13.0))
+                    .hint_text(hint)
+                    .desired_width((width - 24.0).max(40.0)),
+            )
+        })
+        .inner
+}
+
+/// The same focused name field and actions for playlists and playlist folders.
+pub(crate) fn name_field(
+    ui: &mut Ui,
+    p: &Palette,
+    name: &mut String,
+    hint: &str,
+    focus: bool,
+) -> bool {
+    let field = text_input(ui, p, name, hint, ui.available_width());
+    if focus {
+        field.request_focus();
+    }
+    field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+pub(crate) fn name_actions(
+    ui: &mut Ui,
+    p: &Palette,
+    submit: &str,
+    valid: bool,
+    entered: bool,
+) -> (bool, bool) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        let submit = ui
+            .add_enabled_ui(valid, |ui| pill_button(ui, p, submit))
+            .inner
+            .clicked();
+        let cancel = outline_button(ui, p, "Cancel").clicked();
+        (valid && (submit || entered), cancel)
+    })
+    .inner
+}
+
+pub(crate) fn naming_modal(id: &'static str, p: &Palette) -> egui::Modal {
+    egui::Modal::new(egui::Id::new(id)).frame(
+        egui::Frame::new()
+            .fill(p.overlay)
+            .inner_margin(20)
+            .corner_radius(theme::RADIUS + 2),
+    )
 }
 
 /// An outlined pill, the quiet sibling of [`pill_button`] — the artist page's Subscribe

@@ -45,9 +45,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
 
         if app.rail_filter == RailFilter::Playlists && !app.signed_in() {
-            playlist_grid(app, ui);
+            super::organizer::grid(app, ui);
             if widgets::pill_button(ui, &app.palette, "New private playlist").clicked() {
-                app.new_private_playlist(vec![]);
+                app.new_private_playlist(vec![], app.organizer.current_folder().map(str::to_owned));
             }
             return;
         }
@@ -114,7 +114,7 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         && app.library.artists.is_empty()
         && app.library.albums.is_empty()
         && app.library.playlists.is_empty();
-    if empty {
+    if empty && app.rail_filter != RailFilter::Playlists {
         centered(
             app,
             ui,
@@ -147,13 +147,7 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
                 album_grid(app, ui);
             }
         }
-        RailFilter::Playlists => {
-            if app.library.playlists.is_empty() {
-                nothing_yet(app, ui, "No playlists yet.");
-            } else {
-                playlist_grid(app, ui);
-            }
-        }
+        RailFilter::Playlists => super::organizer::grid(app, ui),
         // `page()` never calls `content()` for `Local` — handled by `local_folder_browser`
         // before the auth check `content()` sits behind, since Local needs neither.
         RailFilter::Local => unreachable!("Local is intercepted in page() before content()"),
@@ -431,70 +425,6 @@ fn album_grid(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn playlist_grid(app: &mut App, ui: &mut egui::Ui) {
-    let mut clicked = None;
-    let mut played = None;
-    let mut last_visible = false;
-    ui.horizontal_wrapped(|ui| {
-        let card_w = crate::ui::grid_card_w(ui);
-        let count = app.library.playlists.len();
-        for (i, pl) in app.library.playlists.items.iter().enumerate() {
-            let visible = card_is_visible(ui, card_w, widgets::ArtShape::Square);
-            // The last card being on screen is what "scrolled to the end" means for a grid.
-            if visible && i + 1 == count {
-                last_visible = true;
-            }
-            let art = visible
-                .then(|| {
-                    art_texture(
-                        &mut app.images,
-                        &app.backend,
-                        ui.ctx(),
-                        pl.thumbnail.as_ref(),
-                        card_w - 16.0,
-                    )
-                })
-                .flatten();
-            // Name only. These are all your own playlists, so the line underneath was either
-            // your own account name or a track count — the same shape under all 25 cards, and
-            // nothing you pick a playlist by.
-            let card = widgets::art_card(
-                ui,
-                &app.palette,
-                card_w,
-                art,
-                &pl.title,
-                "",
-                widgets::ArtShape::Square,
-                None,
-                false,
-                false,
-            );
-            // The corner button plays the playlist; a click anywhere else opens it.
-            if card.play {
-                played = Some(i);
-            } else if card.response.clicked() {
-                clicked = Some(i);
-            }
-        }
-    });
-    if last_visible {
-        app.load_more_library(LibrarySection::Playlists);
-    }
-    if let Some(i) = played
-        && let Some(pl) = app.library.playlists.items.get(i)
-    {
-        let id = pl.id.clone();
-        app.play_playlist(id);
-    }
-    if let Some(i) = clicked
-        && let Some(pl) = app.library.playlists.items.get(i)
-    {
-        let id = pl.id.clone();
-        app.navigate(Route::Playlist(id));
-    }
-}
-
 /// The Local tab: a folder tree over `app.local_tracks`, browsed rather than paged — there's
 /// nothing to page, the whole scan already sits in memory.
 fn local_folder_browser(app: &mut App, ui: &mut egui::Ui) {
@@ -690,7 +620,14 @@ fn local_folder_grid(
                 save_as_new: Some(name.as_str()),
                 tracks_pending: None,
             };
-            let click = widgets::folder_card(ui, &app.palette, card_w, name, tracks.len(), menu);
+            let click = widgets::folder_card(
+                ui,
+                &app.palette,
+                card_w,
+                name,
+                &format!("{} tracks", tracks.len()),
+                Some(menu),
+            );
             if click.response.clicked() {
                 open = Some(name.clone());
             }

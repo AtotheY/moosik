@@ -14,12 +14,12 @@ use egui::{Rect, Sense, vec2};
 use crate::app::{App, Route};
 use crate::chrome;
 use crate::icons::Icon;
+use crate::settings::LibraryItem;
 use crate::theme;
 use crate::ui::{ROW_ART_PT, art_texture, virtual_rows};
 use crate::widgets::{self, ArtShape};
 
-#[derive(Clone)]
-struct PlaylistRailDrag(usize);
+use super::organizer::Drag;
 
 pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     // The card's own rect, taken before any panel claims space: the corner repaint at the end
@@ -65,6 +65,16 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     ] {
         let selected = app.current_route() == route;
         let response = widgets::nav_item(ui, &app.palette, icon, label, selected, rail);
+        if route == Route::Library
+            && let Some(action) = super::organizer::root_drop(
+                ui,
+                &app.palette,
+                &response,
+                &app.settings.playlist_layout,
+            )
+        {
+            super::organizer::apply(app, action);
+        }
         if route == Route::Queue
             && let Some(tracks) = super::song_drag::target(
                 ui,
@@ -131,204 +141,101 @@ fn audio_warning(app: &mut App, ui: &mut egui::Ui, rail: bool) {
 /// separation, which is what the divider was doing badly.
 fn playlists(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     ui.add_space(14.0);
-    if rail {
-        // No heading to carry: just the + , centred over the covers.
-        ui.vertical_centered(|ui| {
-            let plus = widgets::icon_button(ui, &app.palette, Icon::Plus, 18.0, false);
-            if widgets::tooltip_right(plus, "New playlist").clicked() {
-                toggle_new_playlist(app);
-            }
-        });
+    let p = app.palette;
+    let plus = if rail {
+        ui.vertical_centered(|ui| widgets::icon_button(ui, &p, Icon::Plus, 18.0, false))
+            .inner
     } else {
         ui.horizontal(|ui| {
-            // The + button's box, not the label's line, is the row's height — otherwise the
-            // button hangs below the label instead of centering against it.
             ui.set_min_height(32.0);
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new("Playlists")
                     .font(theme::semibold(13.0))
-                    .color(app.palette.secondary),
+                    .color(p.secondary),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::icon_button(ui, &app.palette, Icon::Plus, 18.0, false).clicked() {
-                    toggle_new_playlist(app);
-                }
-            });
-        });
+                widgets::icon_button(ui, &p, Icon::Plus, 18.0, false)
+            })
+            .inner
+        })
+        .inner
     }
+    .on_hover_text("Create a playlist or folder");
+    egui::Popup::menu(&plus)
+        .frame(widgets::menu_frame(ui, &p))
+        .width(206.0)
+        .show(|ui| {
+            if widgets::menu_item(ui, &p, Icon::ListMusic, "New playlist", None).clicked() {
+                app.new_private_playlist(vec![], None);
+                ui.close();
+            }
+            if widgets::menu_item(ui, &p, Icon::Folder, "New folder", None).clicked() {
+                app.organizer.new_folder(None);
+                ui.close();
+            }
+            if app.signed_in() {
+                widgets::menu_divider(ui, &p);
+                if widgets::menu_item(ui, &p, Icon::ListPlus, "New YouTube playlist", None)
+                    .clicked()
+                {
+                    app.new_playlist = Some(String::new());
+                    app.new_playlist_kind = crate::app::NewPlaylistKind::YouTube;
+                    ui.close();
+                }
+            }
+        });
     ui.add_space(4.0);
-    new_playlist_popup(app, ui);
     rail_list(app, ui, rail);
 }
 
-/// A toggle: the popup is a window, and the same press must be able to dismiss it.
-fn toggle_new_playlist(app: &mut App) {
-    let open = app.new_playlist.is_some();
-    app.new_playlist = if open { None } else { Some(String::new()) };
-    app.new_playlist_kind = crate::app::NewPlaylistKind::Private {
-        tracks: vec![],
-        rule: None,
-    };
-}
-
-/// The modal the **+** opens: the app dims behind a centered card — name field, Create,
-/// Cancel — rather than a form wedged into the rail. Enter or Create commits; Escape, Cancel or
-/// clicking the dim abandons.
-///
-/// One area paints both the dim and the card. Two layers would not hold: egui promotes a
-/// layer on pointer interaction, so a dim layer moved above the window the moment the
-/// pointer crossed it, dimming the card along with everything else. In one layer the paint
-/// order is the code order, and the modal stays modal.
-fn new_playlist_popup(app: &mut App, ui: &mut egui::Ui) {
-    let focus_key = egui::Id::new("private-playlist-initial-focus");
-    let Some(mut name) = app.new_playlist.clone() else {
-        ui.ctx().data_mut(|d| d.remove::<bool>(focus_key));
+pub(crate) fn new_playlist_popup(app: &mut App, ctx: &egui::Context) {
+    use crate::app::NewPlaylistKind;
+    let key = egui::Id::new("playlist-naming-open");
+    let Some(mut name) = app.new_playlist.take() else {
+        ctx.data_mut(|d| d.remove::<bool>(key));
         return;
     };
-    let Some(screen) = ui.ctx().input(|i| i.raw.screen_rect) else {
-        return;
+    let focus = ctx.data_mut(|d| d.get_temp::<bool>(key).is_none());
+    ctx.data_mut(|d| d.insert_temp(key, true));
+    let heading = match app.new_playlist_kind {
+        NewPlaylistKind::YouTube => "New YouTube playlist",
+        NewPlaylistKind::Private { rule: Some(_), .. } => "New smart playlist",
+        _ => "New playlist",
     };
-
-    let mut dismissed = false;
-    egui::Area::new(egui::Id::new("ytm-new-playlist-modal"))
-        .order(egui::Order::Middle)
-        .fixed_pos(screen.min)
-        .interactable(true)
-        .show(ui.ctx(), |ui| {
-            let (full, response) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
-            ui.painter()
-                .rect_filled(full, 0.0, egui::Color32::from_black_alpha(150));
-
-            // Centered, a hair above true centre so it clears the player bar.
-            let card = egui::Rect::from_center_size(
-                full.center() - egui::vec2(0.0, 12.0),
-                egui::vec2(360.0_f32.min(full.width() - 32.0), 240.0),
-            );
-            // Only a click outside the card dismisses — a click landing on a blank gap between
-            // fields inside the card (nothing there senses clicks) used to fall through to this
-            // backdrop and discard whatever name had already been typed.
-            if response.clicked()
-                && response
-                    .interact_pointer_pos()
-                    .is_some_and(|pos| !card.contains(pos))
-            {
-                dismissed = true;
-            }
-            let mut card_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(card)
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            {
-                let painter = card_ui.painter();
-                // The theme's soft shadow, stepped: three expanding translucent rects
-                // read as one blur at these alphas.
-                for (grow, alpha) in [(14.0, 24), (7.0, 40), (2.0, 60)] {
-                    painter.rect_filled(
-                        card.expand(grow),
-                        egui::CornerRadius::same(theme::RADIUS + 2 + grow as u8),
-                        egui::Color32::from_black_alpha(alpha),
-                    );
-                }
-                painter.rect_filled(
-                    card,
-                    egui::CornerRadius::same(theme::RADIUS + 2),
-                    app.palette.overlay,
-                );
-
-                let mut body = card_ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(card.shrink(16.0))
-                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                );
-                body.label(
-                    egui::RichText::new("New playlist")
-                        .font(theme::semibold(15.0))
-                        .color(app.palette.text),
-                );
-                body.add_space(8.0);
-                if !matches!(app.new_playlist_kind, crate::app::NewPlaylistKind::Local { .. }) {
-                    body.horizontal(|ui| {
-                        let private = matches!(app.new_playlist_kind, crate::app::NewPlaylistKind::Private { .. });
-                        if widgets::chip(ui, &app.palette, "Private", private).clicked() && !private {
-                            app.new_playlist_kind = crate::app::NewPlaylistKind::Private { tracks: vec![], rule: None };
-                        }
-                        let seeded = matches!(&app.new_playlist_kind, crate::app::NewPlaylistKind::Private { tracks, rule } if !tracks.is_empty() || rule.is_some());
-                        if !seeded && app.signed_in() && widgets::chip(ui, &app.palette, "YouTube", !private).clicked() && private {
-                            app.new_playlist_kind = crate::app::NewPlaylistKind::YouTube;
-                        }
-                    });
-                    body.add_space(8.0);
-                    if let crate::app::NewPlaylistKind::Private { tracks, rule } = &mut app.new_playlist_kind {
-                        body.label(egui::RichText::new("Only in Moosik · saved on this Mac").font(theme::regular(12.0)).color(app.palette.secondary));
-                        if tracks.is_empty() {
-                            let labels = ["Hand-picked songs", "Forgotten favorites", "Five-star songs", "Recent discoveries"];
-                            let selected = rule.map(|r| crate::local_playlists::SmartRule::ALL.iter().position(|x| *x == r).unwrap_or(0) + 1).unwrap_or(0);
-                            if let Some(i) = widgets::text_dropdown(&mut body, &app.palette, egui::Id::new("private-rule"), labels[selected], &labels) {
-                                *rule = i.checked_sub(1).map(|i| crate::local_playlists::SmartRule::ALL[i]);
-                                if name.is_empty() && let Some(r) = rule { name = r.title().into(); }
-                            }
-                        }
-                    } else {
-                        body.label(egui::RichText::new("Creates a playlist on your YouTube account").font(theme::regular(12.0)).color(app.palette.secondary));
-                    }
-                }
-                body.add_space(8.0);
-                let field = egui::TextEdit::singleline(&mut name)
-                    .id(egui::Id::new("ytm-new-playlist"))
-                    .hint_text(egui::RichText::new("Playlist name").color(app.palette.dim))
-                    .desired_width(f32::INFINITY)
-                    .font(theme::regular(13.0));
-                let response = body.add(field);
-                if !ui.ctx().data(|d| d.get_temp::<bool>(focus_key).unwrap_or(false)) {
-                    response.request_focus();
-                    ui.ctx().data_mut(|d| d.insert_temp(focus_key, true));
-                }
-                let commit =
-                    response.lost_focus() && body.input(|i| i.key_pressed(egui::Key::Enter));
-                let cancel = body.input(|i| i.key_pressed(egui::Key::Escape));
-
-                body.add_space(8.0);
-                let mut create = commit;
-                let mut close = cancel || dismissed;
-                // A fixed-height row: a bare right-to-left layout takes the window's
-                // whole remaining height and centers the buttons in a card two hundred
-                // points too tall.
-                body.allocate_ui(egui::vec2(body.available_width(), 30.0), |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if widgets::chip(ui, &app.palette, "Create", true).clicked() {
-                            create = true;
-                        }
-                        if widgets::chip(ui, &app.palette, "Cancel", false).clicked() {
-                            close = true;
-                        }
-                    });
-                });
-
-                if create && !name.trim().is_empty() {
-                    let title = name.trim().to_owned();
-                    if let crate::app::NewPlaylistKind::Private { tracks, rule } = &app.new_playlist_kind {
-                        let (tracks, rule) = (tracks.clone(), *rule);
-                        if app.create_private_playlist(title, tracks, rule) { app.new_playlist = None; }
-                        else { app.new_playlist = Some(name); }
-                        return;
-                    }
-                    match std::mem::take(&mut app.new_playlist_kind) {
-                        crate::app::NewPlaylistKind::YouTube => app.create_playlist(title),
-                        crate::app::NewPlaylistKind::Private { .. } => unreachable!(),
-                        crate::app::NewPlaylistKind::Local { track_paths } => {
-                            app.create_local_playlist(title, track_paths)
-                        }
-                    }
-                    app.new_playlist = None;
-                } else if close {
-                    app.new_playlist = None;
-                } else {
+    let p = app.palette;
+    let modal = widgets::naming_modal("playlist-name", &p).show(ctx, |ui| {
+        ui.set_width((ctx.content_rect().width() - 72.0).clamp(160.0, 320.0));
+        ui.label(
+            egui::RichText::new(heading)
+                .font(theme::semibold(18.0))
+                .color(p.text),
+        );
+        ui.add_space(10.0);
+        let entered = widgets::name_field(ui, &p, &mut name, "Playlist name", focus);
+        widgets::name_actions(ui, &p, "Create", !name.trim().is_empty(), entered)
+    });
+    let (submit, cancel) = modal.inner;
+    if submit {
+        let title = name.trim().to_owned();
+        match &app.new_playlist_kind {
+            NewPlaylistKind::Private {
+                tracks,
+                rule,
+                folder,
+            } => {
+                if !app.create_private_playlist(title, tracks.clone(), *rule, folder.clone()) {
                     app.new_playlist = Some(name);
                 }
             }
-        });
+            NewPlaylistKind::YouTube => app.create_playlist(title),
+            NewPlaylistKind::Local { track_paths } => {
+                app.create_local_playlist(title, track_paths.clone())
+            }
+        }
+    } else if !cancel && !modal.should_close() {
+        app.new_playlist = Some(name);
+    }
 }
 
 /// One entry of the rail: cover, title, and what it is.
@@ -337,39 +244,126 @@ struct RailRow<'a> {
     title: &'a str,
     detail: String,
     thumbnail: Option<&'a std::sync::Arc<str>>,
-    shape: ArtShape,
+    folder: Option<bool>,
+    depth: usize,
+    pinned: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum RailEntry {
+    Playlist(usize),
+    Child(usize, usize),
+    Folder(String, usize),
+}
+
+/// Pinning changes position, while filing changes location. A pin remains a
+/// shortcut to a filed playlist. Folders are visible even before their first member.
+fn rail_entries<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    layout: &crate::settings::PlaylistLayout,
+) -> (Vec<RailEntry>, usize) {
+    let ranks = layout.ranks();
+    let mut children = std::collections::HashMap::<Option<String>, Vec<(usize, RailEntry)>>::new();
+    let membership: std::collections::HashMap<_, _> = layout
+        .folders
+        .iter()
+        .flat_map(|(parent, ids)| ids.iter().map(move |id| (id.as_str(), parent.as_str())))
+        .collect();
+    let mut entries = Vec::new();
+    for id in layout.ordered_folders() {
+        let rank = ranks
+            .get(&LibraryItem::Folder(id.clone()))
+            .copied()
+            .unwrap_or(usize::MAX);
+        children
+            .entry(layout.parent(id).map(str::to_owned))
+            .or_default()
+            .push((rank, RailEntry::Folder(id.clone(), 0)));
+    }
+    for (i, id) in ids.enumerate() {
+        let parent = membership.get(id).copied();
+        let rank = ranks.get(&LibraryItem::Playlist(id.to_owned())).copied();
+        if layout.pins.contains(id) {
+            entries.push(RailEntry::Playlist(i));
+            if parent.is_none() && rank.is_none() {
+                continue;
+            }
+        }
+        children
+            .entry(parent.map(str::to_owned))
+            .or_default()
+            .push((rank.unwrap_or(usize::MAX), RailEntry::Playlist(i)));
+    }
+    for group in children.values_mut() {
+        group.sort_by_key(|(rank, _)| *rank);
+    }
+    let pinned_count = entries.len();
+    let mut stack: Vec<_> = children
+        .remove(&None)
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .map(|(_, row)| (row, 0))
+        .collect();
+    while let Some((row, depth)) = stack.pop() {
+        match row {
+            RailEntry::Folder(id, _) => {
+                if layout.expanded_folders.contains(&id)
+                    && let Some(group) = children.remove(&Some(id.clone()))
+                {
+                    stack.extend(group.into_iter().rev().map(|(_, row)| (row, depth + 1)));
+                }
+                entries.push(RailEntry::Folder(id, depth));
+            }
+            RailEntry::Playlist(i) if depth > 0 => entries.push(RailEntry::Child(i, depth)),
+            row => entries.push(row),
+        }
+    }
+    (entries, pinned_count)
 }
 
 fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
-    let count = app.library.playlists.len();
-    if count == 0 {
-        // No sentence fits in the icon rail, and an empty one says enough by being empty.
-        if rail {
-            return;
-        }
-        ui.add_space(6.0);
-        // In line with the "Playlists" heading above it, which sits 6 pt in.
-        ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("No playlists")
-                    .font(theme::regular(12.0))
-                    .color(app.palette.dim),
-            );
-        });
-        return;
+    let (entries, pinned_count) = rail_entries(
+        app.library.playlists.iter().map(|pl| pl.id.as_str()),
+        &app.settings.playlist_layout,
+    );
+    let count = entries.len();
+    let layout = &app.settings.playlist_layout;
+    let expected_children: usize = entries
+        .iter()
+        .filter_map(|e| match e {
+            RailEntry::Folder(id, _) if layout.expanded_folders.contains(id) => {
+                Some(layout.folders[id].len())
+            }
+            _ => None,
+        })
+        .sum();
+    let missing_children = entries
+        .iter()
+        .filter(|e| matches!(e, RailEntry::Child(..)))
+        .count()
+        < expected_children;
+    let missing_pins = pinned_count < app.settings.playlist_layout.pins.len();
+    if count == 0 && !app.organizer.page_failed {
+        app.load_more_library(crate::api::LibrarySection::Playlists);
     }
-
     let selected_id = match app.current_route() {
         Route::Playlist(id) => Some(id),
         _ => None,
     };
+    let selected_folder = (app.current_route() == Route::Library
+        && app.rail_filter == crate::app::RailFilter::Playlists)
+        .then(|| app.organizer.current_folder())
+        .flatten()
+        .map(str::to_owned);
+    let mut folder_action = None;
     let signed_in = app.signed_in();
     let mut clicked = None;
     let mut reorder = None;
     let mut menu_action = None;
     let mut dropped = None;
     let from = widgets::painted_so_far(ui);
+    let viewport_height = ui.available_height();
     let output = egui::ScrollArea::vertical()
         .id_salt("rail")
         .auto_shrink([false, false])
@@ -390,7 +384,44 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
             } else {
                 theme::RAIL_ROW_HEIGHT
             };
-            virtual_rows(ui, row_height, count, |ui, i| {
+            let layout = &app.settings.playlist_layout;
+            let start_y = ui.cursor().top();
+            if count == 0 && !rail {
+                ui.weak("No playlists here");
+            }
+            let visible = virtual_rows(ui, row_height, count, |ui, i| {
+                let depth = match &entries[i] {
+                    RailEntry::Child(_, d) | RailEntry::Folder(_, d) => *d,
+                    _ => 0,
+                };
+                let shortcut = i < pinned_count;
+                let child = matches!(entries[i], RailEntry::Child(..));
+                let i = match &entries[i] {
+                    RailEntry::Playlist(index) | RailEntry::Child(index, _) => *index,
+                    RailEntry::Folder(name, _) => {
+                        let row = RailRow {
+                            id: name,
+                            title: layout.title(name),
+                            detail: layout.description(name),
+                            thumbnail: None,
+                            folder: Some(layout.expanded_folders.contains(name)),
+                            depth,
+                            pinned: false,
+                        };
+                        let selected = selected_folder.as_ref() == Some(name);
+                        let response = if rail {
+                            rail_row_compact(ui, palette, &row, None, selected)
+                        } else {
+                            rail_row(ui, palette, &row, None, selected)
+                        };
+                        if let Some(action) = super::organizer::folder_interaction(
+                            ui, palette, &response, name, layout, true,
+                        ) {
+                            folder_action = Some(action);
+                        }
+                        return;
+                    }
+                };
                 let p = &library.playlists.items[i];
                 let row = RailRow {
                     id: &p.id,
@@ -399,7 +430,9 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                     // when it is someone else's list, and how much is in it when it is yours.
                     detail: p.detail(),
                     thumbnail: p.thumbnail.as_ref(),
-                    shape: ArtShape::Square,
+                    folder: None,
+                    depth,
+                    pinned: app.settings.playlist_layout.pins.contains(&p.id),
                 };
                 let art = art_texture(images, backend, ui.ctx(), row.thumbnail, ROW_ART_PT);
                 let selected = selected_id.as_deref() == Some(row.id);
@@ -422,40 +455,49 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 {
                     dropped = Some((p.id.clone(), tracks));
                 }
-                // Drag a playlist to reorder the rail. The payload is this row's index; the
-                // drop lands on whichever row is under the pointer when the button is released.
-                if response.drag_started() {
-                    egui::DragAndDrop::set_payload(ui.ctx(), PlaylistRailDrag(i));
-                }
-                if egui::DragAndDrop::has_payload_of_type::<PlaylistRailDrag>(ui.ctx())
-                    && response.contains_pointer()
+                super::organizer::remember_source(
+                    ui,
+                    response.rect,
+                    LibraryItem::Playlist(p.id.clone()),
+                    false,
+                );
+                if response.drag_started()
+                    || (response.is_pointer_button_down_on()
+                        && ui.input(|i| i.pointer.primary_pressed()))
                 {
-                    if ui.ctx().input(|inp| inp.pointer.any_released()) {
-                        if let Some(from) =
-                            egui::DragAndDrop::take_payload::<PlaylistRailDrag>(ui.ctx())
-                        {
-                            reorder = Some((from.0, i));
-                        }
+                    egui::DragAndDrop::set_payload(
+                        ui.ctx(),
+                        Drag(std::collections::BTreeSet::from([p.id.clone()])),
+                    );
+                }
+                if !shortcut {
+                    if let (_, Some(insert)) = super::organizer::insertion_drop(
+                        ui,
+                        palette,
+                        response.rect,
+                        LibraryItem::Playlist(p.id.clone()),
+                        layout,
+                        true,
+                        false,
+                    ) {
+                        folder_action = Some(insert);
+                    }
+                } else if let Some(drag) = response.dnd_hover_payload::<Drag>()
+                    && drag.0.len() == 1
+                    && let Some(id) = drag.0.first()
+                    && id != &p.id
+                    && layout.pins.contains(id)
+                    && let Some(from) = library.playlists.iter().position(|pl| &pl.id == id)
+                {
+                    let y = if i < from {
+                        response.rect.top()
                     } else {
-                        // Show where it would land: `remove(from)` then `insert(i, _)` puts the
-                        // dragged row immediately *after* `i` when dragging downward (removing
-                        // from earlier in the list shifts `i` itself left by one first), but
-                        // immediately *before* `i` when dragging upward (nothing before `from`
-                        // moves, so the insert lands right where `i` used to start). The line
-                        // has to flip edges to match, or an upward drag lands one row off from
-                        // what it showed.
-                        let from = egui::DragAndDrop::payload::<PlaylistRailDrag>(ui.ctx());
-                        let dragging_up = from.is_some_and(|from| i < from.0);
-                        let y = if dragging_up {
-                            response.rect.top()
-                        } else {
-                            response.rect.bottom()
-                        };
-                        ui.painter().hline(
-                            egui::Rangef::new(response.rect.left(), response.rect.right()),
-                            y,
-                            egui::Stroke::new(2.0, palette.accent),
-                        );
+                        response.rect.bottom()
+                    };
+                    ui.painter()
+                        .hline(response.rect.x_range(), y, (2.0, palette.accent));
+                    if response.dnd_release_payload::<Drag>().is_some() {
+                        reorder = Some((from, i));
                     }
                 }
                 if response.clicked() {
@@ -486,7 +528,7 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 });
                 let tracks: &[crate::model::Track] =
                     cached.map(|pl| pl.tracks.items.as_slice()).unwrap_or(&[]);
-                if let Some(action) = widgets::page_menu(
+                if let Some(action) = widgets::page_menu_with_layout(
                     ui,
                     palette,
                     &response,
@@ -517,11 +559,52 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                         // complete, and an item picked before they land waits for them.
                         tracks_pending: cached.is_none().then_some(crate::ui::PageKind::Playlist),
                     },
+                    Some((row.pinned, child || layout.is_filed(&p.id))),
                 ) {
                     menu_action = Some(action);
                 }
             });
+            // The tail is part of the scrolling content, even at an exact fit. Short
+            // libraries get a hit target all the way down to the player.
+            let tail_h = (viewport_height - (ui.cursor().top() - start_y)).max(row_height * 1.6);
+            let (_, tail) =
+                ui.allocate_exact_size(vec2(ui.available_width(), tail_h), Sense::click());
+            if let Some(action) = super::organizer::root_drop(ui, palette, &tail, layout) {
+                folder_action = Some(action);
+            } else if tail.clicked() {
+                folder_action = Some(super::organizer::Action::Folder(None));
+            }
+            egui::Popup::context_menu(&tail)
+                .frame(widgets::menu_frame(ui, palette))
+                .show(|ui| {
+                    if widgets::menu_item(ui, palette, Icon::Folder, "New folder", None).clicked() {
+                        folder_action = Some(super::organizer::Action::NewFolder(None));
+                        ui.close();
+                    }
+                });
+            if super::organizer::library_drag(ui.ctx())
+                && ui.input(|i| i.pointer.is_decidedly_dragging())
+                && let Some(pos) = ui
+                    .input(|i| i.pointer.interact_pos())
+                    .filter(|p| ui.clip_rect().contains(*p))
+            {
+                let clip = ui.clip_rect();
+                let delta = (32.0 - (pos.y - clip.top())).max(0.0)
+                    - (32.0 - (clip.bottom() - pos.y)).max(0.0);
+                if delta != 0.0 {
+                    ui.scroll_with_delta(vec2(0.0, delta * 0.35));
+                    ui.ctx().request_repaint();
+                }
+            }
+            visible
         });
+    if (missing_pins || missing_children || output.inner.end == count) && !app.organizer.page_failed
+    {
+        app.load_more_library(crate::api::LibrarySection::Playlists);
+    }
+    if let Some(action) = folder_action {
+        super::organizer::apply(app, action);
+    }
     widgets::fade_scroll_edges(ui, from, &output, widgets::scroll_fade(&app.settings));
     if let Some((id, tracks)) = dropped {
         app.drop_tracks_on_playlist(&id, tracks);
@@ -534,6 +617,41 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     }
     if let Some(route) = clicked {
         app.navigate(route);
+    }
+}
+
+fn disclosure(ui: &egui::Ui, p: &theme::Palette, center: egui::Pos2, open: bool) {
+    let icon = if open {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
+    icon.image(p.secondary, 14.0)
+        .paint_at(ui, Rect::from_center_size(center, vec2(14.0, 14.0)));
+}
+
+fn rail_art(
+    ui: &egui::Ui,
+    palette: &theme::Palette,
+    rect: Rect,
+    row: &RailRow<'_>,
+    art: Option<&egui::TextureHandle>,
+) {
+    if row.folder.is_some() {
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS, palette.glass(palette.surface));
+        Icon::Folder
+            .image(palette.secondary, 22.0)
+            .paint_at(ui, Rect::from_center_size(rect.center(), vec2(22.0, 22.0)));
+    } else {
+        widgets::paint_art(ui, palette, rect, art, ArtShape::Square);
+        if row.pinned {
+            let center = rect.left_top() + vec2(7.0, 7.0);
+            ui.painter().circle_filled(center, 7.0, palette.accent);
+            Icon::Bookmark
+                .image(palette.on_accent, 9.0)
+                .paint_at(ui, Rect::from_center_size(center, vec2(9.0, 9.0)));
+        }
     }
 }
 
@@ -565,7 +683,17 @@ fn rail_row_compact(
             rect.center(),
             vec2(theme::RAIL_ART_SIZE, theme::RAIL_ART_SIZE),
         );
-        widgets::paint_art(ui, palette, art_rect, art, row.shape);
+        let art_rect = if row.depth > 0 {
+            art_rect.shrink(5.0).translate(vec2(3.0, 0.0))
+        } else {
+            art_rect
+        };
+        rail_art(ui, palette, art_rect, row, art);
+        if let Some(open) = row.folder {
+            let c = art_rect.right_bottom() - vec2(6.0, 6.0);
+            ui.painter().circle_filled(c, 7.0, palette.surface);
+            disclosure(ui, palette, c, open);
+        }
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -607,11 +735,35 @@ fn rail_row(
                 .rect_filled(rect, egui::CornerRadius::same(theme::RADIUS), fill);
         }
 
+        let indent = (row.depth as f32 * 18.0).min((rect.width() - 128.0).max(0.0));
+        let inset = indent + if row.folder.is_some() { 22.0 } else { 6.0 };
+        let size = if row.depth > 0 {
+            34.0
+        } else if row.folder.is_some() {
+            32.0
+        } else {
+            theme::RAIL_ART_SIZE
+        };
+        if let Some(open) = row.folder {
+            disclosure(
+                ui,
+                palette,
+                rect.left_center() + vec2(10.0 + indent, 0.0),
+                open,
+            );
+        }
+        if row.depth > 0 {
+            ui.painter().vline(
+                rect.left() + indent - 8.0,
+                rect.y_range(),
+                (1.0, palette.surface_active),
+            );
+        }
         let art_rect = Rect::from_center_size(
-            rect.left_center() + vec2(6.0 + theme::RAIL_ART_SIZE / 2.0, 0.0),
-            vec2(theme::RAIL_ART_SIZE, theme::RAIL_ART_SIZE),
+            rect.left_center() + vec2(inset + size / 2.0, 0.0),
+            vec2(size, size),
         );
-        widgets::paint_art(ui, palette, art_rect, art, row.shape);
+        rail_art(ui, palette, art_rect, row, art);
 
         let x = art_rect.right() + 10.0;
         let w = (rect.right() - 8.0 - x).max(0.0);
@@ -645,6 +797,125 @@ fn rail_row(
 #[cfg(test)]
 mod tests {
     use super::rail_tooltip;
+
+    #[test]
+    fn pins_lead_and_both_folders_and_unpinned_playlists_remain_reachable() {
+        use super::{RailEntry::*, rail_entries};
+        use crate::settings::PlaylistLayout;
+        let mut layout = PlaylistLayout::default();
+        layout.pins.insert("pin".into());
+        layout.folders.insert("Empty".into(), Default::default());
+        layout
+            .folders
+            .insert("Filed".into(), ["pin".into(), "filed".into()].into());
+        let (entries, count) =
+            rail_entries(["ordinary", "filed", "pin", "another"].into_iter(), &layout);
+        assert_eq!(count, 1);
+        assert_eq!(
+            entries,
+            vec![
+                Playlist(2),
+                Folder("Empty".into(), 0),
+                Folder("Filed".into(), 0),
+                Playlist(0),
+                Playlist(3)
+            ]
+        );
+        let (entries, _) = rail_entries(std::iter::empty(), &layout);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn expanded_folders_follow_saved_order_and_unfiling_keeps_the_playlist() {
+        use super::{RailEntry::*, rail_entries};
+        use crate::settings::PlaylistLayout;
+        let mut layout = PlaylistLayout::default();
+        layout.move_to(&["one".into(), "two".into()].into(), Some("First"));
+        layout.move_to(&Default::default(), Some("Second"));
+        layout.pins.insert("one".into());
+        layout.expanded_folders.insert("First".into());
+        layout.insert_beside(
+            &[crate::settings::LibraryItem::Folder("Second".into())],
+            crate::settings::LibraryItem::Folder("First".into()),
+            false,
+            &[],
+        );
+        let entries = |l: &PlaylistLayout| rail_entries(["two", "one"].into_iter(), l).0;
+        assert_eq!(
+            entries(&layout),
+            vec![
+                Playlist(1),
+                Folder("Second".into(), 0),
+                Folder("First".into(), 0),
+                Child(0, 1),
+                Child(1, 1)
+            ]
+        );
+        layout.move_to(&["two".into()].into(), None);
+        let saved: PlaylistLayout =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(
+            entries(&saved),
+            vec![
+                Playlist(1),
+                Folder("Second".into(), 0),
+                Folder("First".into(), 0),
+                Child(1, 1),
+                Playlist(0)
+            ]
+        );
+        layout.expanded_folders.clear();
+        assert!(!entries(&layout).contains(&Child(1, 1)));
+        layout.insert_beside(
+            &[crate::settings::LibraryItem::Folder("Second".into())],
+            crate::settings::LibraryItem::Folder("First".into()),
+            true,
+            &[],
+        );
+        assert_eq!(layout.ordered_folders(), ["First", "Second"]);
+    }
+
+    #[test]
+    fn a_filed_playlist_dropped_between_folders_keeps_that_exact_slot() {
+        use super::{LibraryItem, RailEntry::*, rail_entries};
+        use crate::settings::PlaylistLayout;
+        let mut layout = PlaylistLayout::default();
+        layout.move_to(&["mix".to_owned()].into(), Some("B"));
+        layout.move_to(&Default::default(), Some("A"));
+        let item = LibraryItem::Playlist("mix".into());
+        layout.insert_beside(
+            std::slice::from_ref(&item),
+            LibraryItem::Folder("B".into()),
+            false,
+            &["mix".into()],
+        );
+        let saved: PlaylistLayout =
+            serde_json::from_value(serde_json::to_value(layout).unwrap()).unwrap();
+        assert!(saved.folders["B"].is_empty());
+        assert_eq!(
+            rail_entries(["mix"].into_iter(), &saved).0,
+            [Folder("A".into(), 0), Playlist(0), Folder("B".into(), 0)]
+        );
+        let mut nested = saved;
+        let parent = nested.create_folder("Parent", None);
+        nested.reparent("A", Some(&parent));
+        nested.reparent("B", Some(&parent));
+        nested.insert_beside(
+            &[item],
+            LibraryItem::Folder("A".into()),
+            true,
+            &["mix".into()],
+        );
+        assert_eq!(
+            rail_entries(["mix"].into_iter(), &nested).0,
+            [
+                Folder(parent, 0),
+                Folder("A".into(), 1),
+                Child(0, 1),
+                Folder("B".into(), 1)
+            ]
+        );
+    }
 
     /// What the icon rail says on hover: the title, and under it what the playlist is when there
     /// is something to say; a bare title, not a title and an empty line, when there is not.

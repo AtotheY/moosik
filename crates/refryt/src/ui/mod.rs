@@ -17,6 +17,7 @@ pub mod listening;
 pub mod lyrics;
 pub mod mood;
 pub mod moods;
+pub(crate) mod organizer;
 pub mod paste_cookies;
 pub mod player_bar;
 pub mod playlist;
@@ -382,6 +383,9 @@ pub(crate) enum ListClick {
 /// track itself for the queue, the linked ids for navigation. Owned, so it crosses the borrow
 /// of the list it came from and every page forwards it with one line.
 pub(crate) enum RowAction {
+    PinPlaylist(String, bool),
+    MovePlaylistToFolder(String),
+    UnfilePlaylist(String),
     SavePrivate {
         playlist_id: String,
         tracks: Vec<Track>,

@@ -189,7 +189,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                         .map(|i| app.q.tracks()[i].clone()),
                 )
                 .collect();
-            app.new_private_playlist(tracks);
+            app.new_private_playlist(tracks, None);
         }
         ui.add_space(12.0);
         now_playing(app, ui, true);
