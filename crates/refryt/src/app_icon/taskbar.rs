@@ -114,15 +114,28 @@ fn refresh(icon: AppIcon) -> anyhow::Result<()> {
     }
     let dirs =
         directories::BaseDirs::new().ok_or_else(|| anyhow::anyhow!("missing user profile"))?;
+    // The installed Start-menu shortcut is also an icon source for a running,
+    // unpinned app. Its icon path expands per user, so no shared file needs
+    // writes or elevation when someone chooses different artwork.
+    let launcher_icon = dirs.data_local_dir().join(r"Moosik\Taskbar\current.ico");
+    let artwork = std::fs::read(&icon_file)?;
+    let launcher_changed =
+        std::fs::read(&launcher_icon).ok().as_deref() != Some(artwork.as_slice());
+    if launcher_changed {
+        std::fs::create_dir_all(launcher_icon.parent().unwrap())?;
+        crate::persist::write_atomic(&launcher_icon, &artwork)?;
+    }
     let pins = dirs
         .data_dir()
         .join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-    if !pins.is_dir() {
-        return Ok(());
-    }
     let exe = exe.canonicalize()?;
     let mut rewritten = Vec::new();
-    for entry in std::fs::read_dir(pins)?.flatten() {
+    let entries = match std::fs::read_dir(pins) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries.into_iter().flatten().flatten() {
         let path = entry.path();
         if path
             .extension()
@@ -137,14 +150,14 @@ fn refresh(icon: AppIcon) -> anyhow::Result<()> {
             }
         }
     }
-    if !rewritten.is_empty() {
+    if launcher_changed || !rewritten.is_empty() {
         // A real taskbar pin keeps its cached artwork even after the .lnk is saved.
         // Invalidate first, then tell Explorer exactly which updated items to reread.
         // Do this once per change, never on a launch/exit with an unchanged pin.
         unsafe {
             SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSH, None, None);
         }
-        let mut affected = vec![icon_file];
+        let mut affected = vec![icon_file, launcher_icon];
         let mut programs = [0; 260];
         if unsafe { SHGetFolderPathW(None, CSIDL_COMMON_PROGRAMS as i32, None, 0, &mut programs) }
             .is_ok()

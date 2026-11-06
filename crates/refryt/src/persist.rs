@@ -1,6 +1,4 @@
-//! One atomic-write helper, shared by every small on-disk JSON store (settings, downloads
-//! index, playback state, local playlists, the crash report) so none of them can leave a
-//! truncated file behind if the process dies mid-write.
+//! Atomic replacement for local settings, other JSON stores, and per-user launcher artwork.
 
 use std::io;
 use std::path::Path;
@@ -15,9 +13,9 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// Writes `bytes` to `path` atomically: to a sibling temp file, then renamed into place. The
 /// rename is all-or-nothing on the same filesystem, so a crash or power loss mid-write can never
 /// leave `path` holding a truncated, unparsable file — the previous version survives instead.
-pub fn write_json_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension(format!(
-        "json.{}.{}.tmp",
+        "{}.{}.tmp",
         std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
@@ -33,6 +31,8 @@ pub fn write_json_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         }
     }
 }
+
+pub use write_atomic as write_json_atomic;
 
 #[cfg(test)]
 mod tests {

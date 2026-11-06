@@ -59,8 +59,8 @@ Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop
-Name: "{autodesktop}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; Tasks: desktopicon
+Name: "{group}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"
+Name: "{autodesktop}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"; Tasks: desktopicon
 Name: "{group}\Uninstall Moosik"; Filename: "{uninstallexe}"
 
 [Run]

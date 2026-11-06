@@ -38,6 +38,12 @@ foreach ($key in $expected.Keys) {
 }
 $shell = New-Object -ComObject Shell.Application
 $shortcuts = @((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Moosik\Moosik.lnk'))
+$launcherIcon = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Moosik\Taskbar\current.ico'
+$launcher = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcuts[0])
+$location = [Environment]::ExpandEnvironmentVariables($launcher.IconLocation)
+if ($location -ne "$launcherIcon,0" -or (Get-FileHash $launcherIcon).Hash -ne (Get-FileHash $Icon).Hash) {
+    throw "The installed launcher does not point to the selected per-user artwork: $location"
+}
 if ($Pin) { $shortcuts += $Pin }
 foreach ($shortcut in $shortcuts) {
     $folder = $shell.Namespace((Split-Path $shortcut))
