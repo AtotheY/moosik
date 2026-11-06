@@ -2,13 +2,11 @@
   <img src="assets/icons/app/moosik-256.png" width="100" alt="Moosik Ceramic Eclipse app icon">
 </p>
 
-# Moosik — a YouTube Music desktop client for serious listeners
+# Moosik — YouTube Music desktop player for Mac and Windows
 
-**YouTube's music. A listener's app.**
+[**Download for Apple Silicon Mac**](https://moosik.dev/?platform=mac#download) · [Windows x64 installer and all downloads](https://github.com/AtotheY/moosik/releases/latest)
 
-Moosik is an open-source YouTube Music client with a native desktop interface, detailed listening stats, custom recaps, and a growing set of tools for people who care about their music library. Love YouTube Music's selection, but want a different UI? That's what we're building.
-
-Our ambition is to make everyday listening feel better than Spotify: effortless queues, thoughtful library organization, and a listening history you can actually explore. This is an early project, and that ambition guides the roadmap.
+Keep your YouTube Music library and playlists in an open-source desktop player. Search songs you played in Moosik by title or artist, find yesterday’s listens by date, and move several upcoming tracks together. Save the current queue as a private playlist on your computer. [Follow the listening history guide](https://moosik.dev/guides/listening-history/).
 
 **Built on [Refryt](https://github.com/gridoe/refryt), created by [gridoe](https://github.com/gridoe) and contributors.** Moosik is an independent fork; most of its playback engine and original desktop interface come from their work. The original history and GPL license are preserved.
 
@@ -18,7 +16,7 @@ Our ambition is to make everyday listening feel better than Spotify: effortless 
 
 ## A few ways to make it yours
 
-Four views, four themes. Real captures of the Moosik source preview on macOS, with signed-out browsing and synthetic listening stats.
+Four views, four themes. Screenshots of Moosik on macOS, with signed-out browsing and synthetic listening stats.
 
 <table>
   <tr>
@@ -53,13 +51,15 @@ Browse Home, albums, artists, search, and your library in a native Rust/egui int
 
 Refryt already provides the core listening experience, editable YouTube playlists, local-file playlists, themes, and desktop integrations. Moosik builds on that foundation with listener-focused stats and interface improvements.
 
+[Show your YouTube Music activity on Discord](https://moosik.dev/guides/youtube-music-discord/).
+
 ### Make it feel like yours
 
 Choose from the inherited theme collection, artwork-inspired headers, resizable sidebars, and transparency controls. Moosik adds ten Eclipse icon finishes, with Ceramic as the default; the live icon picker is implemented on macOS.
 
 ## Get started
 
-**Current version: `0.1.18`. Download from [moosik.dev](https://moosik.dev) or [GitHub Releases](https://github.com/AtotheY/moosik/releases/latest).**
+Get the [latest published installers](https://github.com/AtotheY/moosik/releases/latest) or [choose your platform on moosik.dev](https://moosik.dev/#download).
 
 | Platform | Moosik status |
 | --- | --- |
@@ -86,12 +86,7 @@ Download the DMG from [Moosik releases](https://github.com/AtotheY/moosik/releas
 
 ## What we're building next
 
-- **More drag and drop:** queue reordering is available now; dragging songs between Library and playlists is next.
-- **Private music organization:** client-only playlists of streamed YouTube tracks, clearly separated from YouTube account playlists.
-- **Deeper discovery in your own history:** richer comparisons, filters, and ways to revisit music you loved.
-- **More platforms:** validate and package Windows and Linux builds.
-
-These are planned improvements, not shipped features. [The roadmap](docs/ROADMAP.md) explains the current boundaries and what would make each step complete.
+Private playlists and song transfers shipped in [0.1.16](https://github.com/AtotheY/moosik/releases/tag/moosik-v0.1.16). Next steps include richer playlist editing, selection across paged grids, and more platform testing. [Read the roadmap](docs/ROADMAP.md).
 
 ## Questions
 
@@ -105,7 +100,7 @@ It is an alternative **desktop interface for YouTube Music**, aimed at listeners
 
 ### Will playlists appear on my YouTube account?
 
-**YouTube playlist edits sync to YouTube.** Their visibility follows the playlist's YouTube settings; Moosik does not make them private automatically. Existing local playlists are for local audio files. Private client-only playlists of streamed YouTube songs are on the roadmap.
+**YouTube playlist edits sync to YouTube.** Their visibility follows the playlist's YouTube settings; Moosik does not make them private automatically. Choose **Save privately** to keep streamed songs and local files in a playlist on this computer. You can also open **Queue → Save as private playlist** to keep the current song and upcoming sequence.
 
 ### Does it include my old YouTube Music listening history?
 
