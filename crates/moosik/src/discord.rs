@@ -467,6 +467,19 @@ mod tests {
         assert!(json["assets"].get("large_image").is_none());
     }
 
+    #[test]
+    fn a_blank_title_shows_the_artist_once() {
+        for title in ["", "   "] {
+            let track = Presence {
+                title: title.into(),
+                ..presence()
+            };
+            let json = serde_json::to_value(track.activity()).unwrap();
+            assert_eq!(json["details"], "Rick Astley");
+            assert!(json.get("state").is_none());
+        }
+    }
+
     /// The two text fields are capped, and an empty one is left out entirely rather than sent as
     /// a blank line.
     #[test]
