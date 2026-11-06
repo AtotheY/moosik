@@ -1,6 +1,8 @@
 //! Bundled icon finishes. Settings store only a stable enum, never an arbitrary file path.
 #[cfg(target_os = "windows")]
 mod taskbar;
+#[cfg(target_os = "windows")]
+pub use taskbar::init_process_identity;
 
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -141,6 +143,9 @@ impl AppIcon {
                 64,
             )?));
             self.refresh_pin();
+            if let Err(error) = self.set_taskbar_group(window) {
+                tracing::warn!(%error, "could not apply the taskbar group icon");
+            }
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
             egui::IconData {

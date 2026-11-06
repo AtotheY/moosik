@@ -115,7 +115,7 @@ tray-icon = { version = "0.25.0", default-features = false }
 # GNU target links the loader dynamically, so `WebView2Loader.dll` ships next to the exe the same
 # way `libmpv-2.dll` already does.
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
-windows = { version = "=0.62.2", features = ["Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }
+windows = { version = "=0.62.2", features = ["Win32_Storage_FileSystem", "Win32_Storage_EnhancedStorage", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem"] }
 wry = "0.57"
 tao = "0.37"
 # `-System_Registry`/`-Security` are `autostart`'s per-user `Run` key; `-UI_Shell` /

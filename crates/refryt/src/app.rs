@@ -1885,7 +1885,12 @@ impl Drop for App {
             self.listening.observe(player.listening_sample());
         }
         #[cfg(target_os = "windows")]
-        self.settings.app_icon.refresh_pin(); // Also catch a pin created during this session.
+        {
+            self.settings.app_icon.refresh_pin(); // Also catch a pin created during this session.
+            if let Some(window) = self.icon_window.upgrade() {
+                crate::app_icon::AppIcon::clear_taskbar_group(&window);
+            }
+        }
         self.listening.finish("app_closed");
         tracing::info!("app: dropping");
         self.video = None;

@@ -15,6 +15,10 @@ fn main() -> eframe::Result {
     // The Discord crate's one warning is "Discord isn't running", repeated on every retry while
     // Rich Presence is on: a third of a long log, saying nothing.
     refryt::init_tracing("warn,refryt=info,discord_rich_presence=error");
+    #[cfg(target_os = "windows")]
+    if let Err(error) = refryt::app_icon::init_process_identity() {
+        tracing::warn!(%error, "could not set the Windows taskbar identity");
+    }
     // Record a panic before the abort so the next launch can offer it.
     refryt::crash::install_hook();
 

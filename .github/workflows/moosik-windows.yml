@@ -87,6 +87,8 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install pillow
       - uses: actions/download-artifact@v4
         with:
           name: moosik-windows
@@ -142,6 +144,15 @@ jobs:
           if ([WindowIcon]::SendMessage($app.MainWindowHandle, 0x007F, [IntPtr]1, [IntPtr]0) -eq [IntPtr]::Zero) {
             throw "Running window has no taskbar icon (WM_GETICON / ICON_BIG)"
           }
+          ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon -Pin $pin
+          python scripts/tests/windows-taskbar-image.py $icon "$env:RUNNER_TEMP/taskbar.png"
+          if ($LASTEXITCODE -ne 0) { throw 'Taskbar artwork did not match the selected finish' }
           Stop-Process -Id $app.Id
           $uninstall = Start-Process "$dest/unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-taskbar-preview
+          path: ${{ runner.temp }}/taskbar.png
+          if-no-files-found: ignore
