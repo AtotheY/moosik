@@ -262,6 +262,7 @@ fn rediscover(app: &mut App, ui: &mut egui::Ui, report: &crate::listening::Repor
         if widgets::chip(ui, &p, "Keep as smart playlist", false).clicked() {
             app.new_playlist = Some(rule.title().into());
             app.new_playlist_kind = crate::app::NewPlaylistKind::Private {
+                folder: None,
                 tracks: vec![],
                 rule: Some(rule),
             };

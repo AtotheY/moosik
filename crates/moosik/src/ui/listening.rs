@@ -45,6 +45,8 @@ pub struct View {
     tags: String,
     rating: i32,
     help: bool,
+    pub(crate) share: bool,
+    share_feedback: Option<&'static str>,
     group: Option<(Tab, String, String)>,
 }
 fn midnight(date: NaiveDate) -> Option<i64> {
@@ -163,6 +165,13 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 app.listening_view.source = source_ids[i].into();
                 refresh = true;
             }
+            if widgets::outline_button(ui, &p, "Share my week").clicked() {
+                app.listening_view.period = Period::Week;
+                app.listening_view.source.clear();
+                app.listening_view.tab = Tab::Recap;
+                app.listening_view.share_feedback = None;
+                app.listening_view.share = true;
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let more = widgets::icon_button(ui, &p, Icon::Ellipsis, 20.0, false)
                     .on_hover_text("Export and more");
@@ -183,13 +192,13 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
-                input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
+                widgets::text_input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
                 ui.label(
                     RichText::new("to")
                         .font(theme::regular(12.0))
                         .color(p.secondary),
                 );
-                input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
+                widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
             });
         }
         ui.add_space(16.0);
@@ -232,6 +241,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         if report.query != query {
             widgets::skeleton_rows(ui, &p, 4);
         } else if report.attempts == 0 && report.listen_ms == 0.0 {
+            app.listening_view.share = false;
             empty(
                 ui,
                 &p,
@@ -293,21 +303,6 @@ fn dropdown(
             }
         });
     choice
-}
-fn input(ui: &mut egui::Ui, p: &theme::Palette, text: &mut String, hint: &str, width: f32) {
-    egui::Frame::new()
-        .fill(p.glass(p.surface))
-        .corner_radius(theme::RADIUS)
-        .inner_margin(egui::Margin::symmetric(12, 7))
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(text)
-                    .frame(egui::Frame::NONE)
-                    .font(theme::regular(13.0))
-                    .hint_text(hint)
-                    .desired_width((width - 24.0).max(40.0)),
-            );
-        });
 }
 fn utility_menu(app: &mut App, ui: &mut egui::Ui, response: &egui::Response, refresh: &mut bool) {
     let p = app.palette;
@@ -1043,7 +1038,7 @@ fn songs(app: &mut App, ui: &mut egui::Ui, r: &Report) {
     }
     ui.horizontal(|ui| {
         let width = (ui.available_width() - 48.0).clamp(100.0, 330.0);
-        input(
+        widgets::text_input(
             ui,
             &p,
             &mut app.listening_view.search,
@@ -1313,7 +1308,7 @@ fn editor(app: &mut App, ctx: &egui::Context) {
                     );
                     ui.add_space(20.0);
                     small(ui, &p, "Genres");
-                    input(
+                    widgets::text_input(
                         ui,
                         &p,
                         &mut app.listening_view.genres,
@@ -1322,7 +1317,7 @@ fn editor(app: &mut App, ctx: &egui::Context) {
                     );
                     ui.add_space(10.0);
                     small(ui, &p, "Tags & moods");
-                    input(
+                    widgets::text_input(
                         ui,
                         &p,
                         &mut app.listening_view.tags,
@@ -1510,11 +1505,17 @@ fn recap(app: &mut App, ui: &mut egui::Ui, r: &Report) {
             });
         });
     ui.add_space(16.0);
-    if widgets::pill_button(ui, &p, "Export recap")
-        .on_hover_text("Save an editable Markdown recap for this date range")
-        .clicked()
-    {
-        export_file(app, Export::Recap);
+    ui.horizontal_wrapped(|ui| {
+        if widgets::pill_button(ui, &p, "Share recap").clicked() {
+            app.listening_view.share_feedback = None;
+            app.listening_view.share = true;
+        }
+        if widgets::outline_button(ui, &p, "Export Markdown").clicked() {
+            export_file(app, Export::Recap);
+        }
+    });
+    if app.listening_view.share {
+        share_recap(app, ui.ctx(), r);
     }
     if ui.available_width() > 720.0 {
         columns(ui, 2, |cols| {
@@ -1627,6 +1628,172 @@ fn full_date(ms: i64) -> String {
                 .to_string()
         })
         .unwrap_or_default()
+}
+
+/// Only the opaque, previewed card is copied. Carry the crop in the capture request so
+/// resizing or moving the window before the asynchronous pixel reply cannot change it.
+struct CardCapture {
+    rect: Rect,
+    scale: f32,
+    screen: egui::Vec2,
+}
+
+fn share_recap(app: &mut App, ctx: &egui::Context, r: &Report) {
+    let p = app.palette;
+    let copied = ctx.input(|i| {
+        i.events.iter().find_map(|e| {
+            let egui::Event::Screenshot {
+                user_data, image, ..
+            } = e
+            else {
+                return None;
+            };
+            let crop = user_data.data.as_ref()?.downcast_ref::<CardCapture>()?;
+            let bounds = Rect::from_min_size(
+                egui::Pos2::ZERO,
+                vec2(image.width() as f32, image.height() as f32) / crop.scale,
+            );
+            if (bounds.size() - crop.screen).length() > 2.0 || !bounds.contains_rect(crop.rect) {
+                return Some(None);
+            }
+            Some(Some(image.region(&crop.rect, Some(crop.scale))))
+        })
+    });
+    if let Some(image) = copied {
+        if let Some(image) = image {
+            ctx.copy_image(image);
+            app.listening_view.share_feedback = Some("Image copied");
+        } else {
+            app.listening_view.share_feedback = Some("Window resized. Try again.");
+        }
+    }
+    let rows: Vec<_> = r
+        .tracks
+        .iter()
+        .filter(|row| row.listen_ms > 0.0)
+        .take(5)
+        .collect();
+    let links: Vec<_> = rows
+        .iter()
+        .filter(|row| moosik_resolve::VideoId::new(&row.id).is_ok())
+        .map(|row| {
+            format!(
+                "{} — {}\nhttps://moosik.dev/#play/{}",
+                row.name, row.subtitle, row.id
+            )
+        })
+        .collect();
+    let mut close = false;
+    let modal = egui::Modal::new("share-listening-card".into())
+        .frame(modal_frame(&p))
+        .show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 70.0).clamp(190.0, 365.0));
+            let compact = ctx.content_rect().height() < 540.0;
+            let row_h = if compact { 31.0 } else { 42.0 };
+            let card = egui::Frame::new()
+                .fill(p.panel)
+                .inner_margin(16)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("Moosik")
+                                .font(theme::bold(15.0))
+                                .color(p.accent_text()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&r.query.label)
+                                        .font(theme::medium(12.0))
+                                        .color(p.secondary),
+                                )
+                                .truncate(),
+                            );
+                        });
+                    });
+                    ui.add_space(if compact { 4.0 } else { 12.0 });
+                    ui.label(
+                        RichText::new(clock(r.listen_ms))
+                            .font(theme::bold(34.0))
+                            .color(p.text),
+                    );
+                    small(
+                        ui,
+                        &p,
+                        format!("listening · {}", count(r.new_tracks, "new song")),
+                    );
+                    if let Some(artist) = &r.discovered_artist {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("Discovered {artist}"))
+                                    .font(theme::medium(13.0))
+                                    .color(p.accent_text()),
+                            )
+                            .truncate(),
+                        );
+                    }
+                    ui.add_space(10.0);
+                    for (i, row) in rows.iter().enumerate() {
+                        let (rect, _) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                        let size = row_h - 3.0;
+                        let cover = Rect::from_min_size(rect.min, vec2(size, size));
+                        art(app, ui, cover, row.artwork.as_deref());
+                        let x = cover.right() + 10.0;
+                        let line = Rect::from_min_max(
+                            pos2(x, rect.top()),
+                            pos2(rect.right() - 18.0, rect.center().y),
+                        );
+                        clipped(ui, &row.name, line, theme::semibold(14.0), p.text);
+                        clipped(
+                            ui,
+                            &row.subtitle,
+                            line.translate(vec2(0.0, row_h / 2.0)),
+                            theme::regular(12.0),
+                            p.secondary,
+                        );
+                        ui.painter().text(
+                            rect.right_center(),
+                            Align2::RIGHT_CENTER,
+                            (i + 1).to_string(),
+                            theme::medium(12.0),
+                            p.dim,
+                        );
+                    }
+                })
+                .response
+                .rect;
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                if widgets::pill_button(ui, &p, "Copy image").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                        CardCapture {
+                            rect: card,
+                            scale: ctx.pixels_per_point(),
+                            screen: ctx.viewport_rect().size(),
+                        },
+                    )));
+                }
+                if !links.is_empty() && widgets::outline_button(ui, &p, "Copy song links").clicked()
+                {
+                    ctx.copy_text(links.join("\n\n"));
+                    app.listening_view.share_feedback = Some("Song links copied");
+                }
+                if widgets::icon_button(ui, &p, Icon::X, 16.0, false)
+                    .on_hover_text("Close")
+                    .clicked()
+                {
+                    close = true;
+                }
+            });
+            if let Some(message) = app.listening_view.share_feedback {
+                small(ui, &p, message);
+            }
+        });
+    if close || modal.should_close() {
+        app.listening_view.share = false;
+    }
 }
 
 #[cfg(test)]

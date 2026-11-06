@@ -33,6 +33,7 @@ macOS screenshots with signed-out browsing and synthetic listening stats. Click 
 - Use keyboard shortcuts, synced lyrics, and the fullscreen player.
 - Select and drag several songs in the [queue](docs/queue.md), remove upcoming tracks, and undo edits.
 - Edit YouTube playlists or save songs and local files in private playlists on your computer. Save the current queue with **Queue → Save as private playlist**.
+- Pin favorite playlists or drag them into nested folders. **Shuffle folder** mixes songs from every playlist and subfolder into one queue, skipping duplicates.
 - Choose themes, resize sidebars, and adjust transparency. On macOS, pick from ten Eclipse app icons.
 - Show your song with Discord Rich Presence and [invite friends to listen along](https://moosik.dev/blog/youtube-music-discord/).
 
@@ -40,7 +41,7 @@ macOS screenshots with signed-out browsing and synthetic listening stats. Click 
 
 Moosik records playback from this installation in a local SQLite database. Search past listens by title or artist, filter by date, and see listening time by song, artist, album, or your own genre tags. Stats include skips, completed listens, streaks, and listening patterns. Paused and buffering time are excluded.
 
-Add personal ratings and mood tags, or make a recap for a date range. Export song stats as CSV, listening history as JSON, a database backup, or a recap as Markdown. These records, labels, and ratings stay on your computer unless you share them.
+Add personal ratings and mood tags. Pick a date range and share your recap as an image or copy links to your top songs. Export song stats as CSV, listening history as JSON, a database backup, or a recap as Markdown. These records, labels, and ratings stay on your computer unless you share them.
 
 [Listening history guide](https://moosik.dev/guides/listening-history/) · [Stat definitions and limitations](docs/listening-stats.md)
 

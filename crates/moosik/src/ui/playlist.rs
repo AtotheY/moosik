@@ -270,6 +270,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
     // is 5000 rows on Liked Music. Only the outcomes cross back out to act on `app`.
     let (out, menu_action, write, rail_ref, in_library, menu_description, is_expanding) = {
         let crate::app::App {
+            settings,
             palette,
             images,
             backend,
@@ -381,7 +382,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             .is_none()
             .then(|| {
                 out.dots.as_ref().and_then(|dots| {
-                    widgets::page_menu(
+                    widgets::page_menu_with_layout(
                         ui,
                         &p,
                         dots,
@@ -402,6 +403,16 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             save_as_new: None,
                             tracks_pending: None,
                         },
+                        library
+                            .playlists
+                            .iter()
+                            .any(|entry| entry.id == pl.id)
+                            .then(|| {
+                                (
+                                    settings.playlist_layout.pins.contains(&pl.id),
+                                    settings.playlist_layout.is_filed(&pl.id),
+                                )
+                            }),
                     )
                 })
             })
@@ -604,101 +615,47 @@ fn edit_modal(app: &mut App, ui: &mut egui::Ui) {
     let Some(mut editor) = app.playlist_edit.take() else {
         return;
     };
-    let Some(screen) = ui.ctx().input(|i| i.raw.screen_rect) else {
-        app.playlist_edit = Some(editor);
-        return;
-    };
     let p = app.palette;
-    let (mut save, mut cancel, mut dismissed) = (false, false, false);
-    egui::Area::new(egui::Id::new("ytm-edit-playlist-modal"))
-        .order(egui::Order::Middle)
-        .fixed_pos(screen.min)
-        .interactable(true)
-        .show(ui.ctx(), |ui| {
-            let (full, response) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
-            ui.painter()
-                .rect_filled(full, 0.0, egui::Color32::from_black_alpha(150));
-            let card = egui::Rect::from_center_size(
-                full.center() - egui::vec2(0.0, 12.0),
-                egui::vec2(360.0, 244.0),
-            );
-            // Only a click outside the card dismisses — a click in a blank gap between fields
-            // inside the card used to fall through to this backdrop and discard the edit.
-            if response.clicked()
-                && response
-                    .interact_pointer_pos()
-                    .is_some_and(|pos| !card.contains(pos))
-            {
-                dismissed = true;
-            }
-            let painter = ui.painter();
-            for (grow, alpha) in [(14.0, 24), (7.0, 40), (2.0, 60)] {
-                painter.rect_filled(
-                    card.expand(grow),
-                    egui::CornerRadius::same(crate::theme::RADIUS + 2 + grow as u8),
-                    egui::Color32::from_black_alpha(alpha),
+    let local = app.local_playlists.iter().any(|pl| pl.id == editor.id);
+    let modal = widgets::naming_modal("edit-playlist", &p).show(ui.ctx(), |ui| {
+        ui.set_width((ui.ctx().content_rect().width() - 72.0).clamp(160.0, 320.0));
+        ui.label(
+            egui::RichText::new(if local {
+                "Rename playlist"
+            } else {
+                "Edit playlist"
+            })
+            .font(crate::theme::semibold(18.0))
+            .color(p.text),
+        );
+        ui.add_space(10.0);
+        let entered = widgets::name_field(
+            ui,
+            &p,
+            &mut editor.title,
+            "Playlist name",
+            std::mem::take(&mut editor.focus),
+        );
+        if !local {
+            ui.add_space(8.0);
+            widgets::input_frame(&p).show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut editor.description)
+                        .frame(egui::Frame::NONE)
+                        .desired_width(ui.available_width())
+                        .desired_rows(3)
+                        .hint_text("Description")
+                        .font(crate::theme::regular(13.0)),
                 );
-            }
-            painter.rect_filled(
-                card,
-                egui::CornerRadius::same(crate::theme::RADIUS + 2),
-                p.overlay,
-            );
-
-            let mut body = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(card.shrink(16.0))
-                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
-            );
-            body.label(
-                egui::RichText::new("Edit playlist")
-                    .font(crate::theme::semibold(15.0))
-                    .color(p.text),
-            );
-            body.add_space(8.0);
-            body.label(
-                egui::RichText::new("Title")
-                    .font(crate::theme::regular(11.0))
-                    .color(p.dim),
-            );
-            body.add(
-                egui::TextEdit::singleline(&mut editor.title)
-                    .id(egui::Id::new("ytm-edit-playlist-title"))
-                    .hint_text(egui::RichText::new("Playlist name").color(p.dim))
-                    .desired_width(f32::INFINITY)
-                    .font(crate::theme::regular(13.0)),
-            );
-            body.add_space(8.0);
-            body.label(
-                egui::RichText::new("Description")
-                    .font(crate::theme::regular(11.0))
-                    .color(p.dim),
-            );
-            body.add(
-                egui::TextEdit::multiline(&mut editor.description)
-                    .id(egui::Id::new("ytm-edit-playlist-description"))
-                    .hint_text(egui::RichText::new("Add a description").color(p.dim))
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .font(crate::theme::regular(13.0)),
-            );
-            body.add_space(10.0);
-            body.allocate_ui(egui::vec2(body.available_width(), 30.0), |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if widgets::chip(ui, &p, "Save", true).clicked() {
-                        save = true;
-                    }
-                    if widgets::chip(ui, &p, "Cancel", false).clicked() {
-                        cancel = true;
-                    }
-                });
             });
-            cancel = cancel || body.input(|i| i.key_pressed(egui::Key::Escape));
-        });
+        }
+        widgets::name_actions(ui, &p, "Save", !editor.title.trim().is_empty(), entered)
+    });
+    let (save, cancel) = modal.inner;
     if save {
         app.playlist_edit = Some(editor);
         app.save_playlist_editor();
-    } else if !(cancel || dismissed) {
+    } else if !cancel && !modal.should_close() {
         app.playlist_edit = Some(editor);
     }
 }

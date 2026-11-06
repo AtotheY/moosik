@@ -251,6 +251,7 @@ impl App {
     }
 
     pub(super) fn open_shared_link(&mut self, link: crate::links::Link) {
+        self.note_playback_choice();
         self.together.song_request = None;
         match link {
             crate::links::Link::Play(id) => {

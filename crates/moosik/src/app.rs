@@ -466,6 +466,7 @@ pub(crate) enum NewPlaylistKind {
     #[default]
     YouTube,
     Private {
+        folder: Option<String>,
         tracks: Vec<Track>,
         rule: Option<crate::local_playlists::SmartRule>,
     },
@@ -478,6 +479,7 @@ pub(crate) enum NewPlaylistKind {
 
 /// The playlist rename modal's live fields.
 pub(crate) struct PlaylistEditor {
+    pub focus: bool,
     pub id: String,
     pub title: String,
     pub description: String,
@@ -1705,6 +1707,8 @@ pub struct App {
     pub(crate) album_cache: std::collections::HashMap<String, crate::model::Album>,
     /// Which library section the Library page shows.
     pub(crate) rail_filter: RailFilter,
+    playback_choice: u64,
+    pub(crate) organizer: crate::ui::organizer::View,
     /// The name being typed into the rail's new-playlist field, while it is open.
     pub(crate) new_playlist: Option<String>,
     /// What that same field commits to once confirmed — a real YouTube playlist by default, or
@@ -2216,6 +2220,8 @@ impl App {
             rail_cache: std::collections::HashMap::new(),
             album_cache: std::collections::HashMap::new(),
             rail_filter: RailFilter::default(),
+            playback_choice: 0,
+            organizer: Default::default(),
             new_playlist: None,
             new_playlist_kind: NewPlaylistKind::default(),
             explore: None,
@@ -2445,6 +2451,7 @@ impl App {
     /// A brand channel has its own library, playlists and home feed; keeping the old ones on
     /// screen after a switch would be showing one account's data under another's name.
     pub(crate) fn forget_account_data(&mut self) {
+        self.organizer = Default::default();
         self.account_epoch += 1;
         // Asked again for whichever channel comes next; until it answers, no downloads.
         self.premium = false;
@@ -3233,7 +3240,7 @@ impl App {
                             self.play_index(current);
                         }
                     } else {
-                        self.skip(1);
+                        self.advance_queue();
                     }
                 }
                 IdleEnd::Retry(delay) => {
@@ -3544,6 +3551,7 @@ impl App {
 
     /// Pause or resume, or start the queue if nothing has played yet.
     pub(crate) fn toggle_playback(&mut self) {
+        self.note_playback_choice();
         match (&self.player, self.playback_started) {
             (Some(pl), true) => pl.toggle_pause(),
             (Some(_), false) if !self.q.is_empty() => {
@@ -3734,12 +3742,14 @@ impl App {
     /// see `Event::CardTracksReady`'s own doc comment for why this is a separate fetch from
     /// `load_album`'s.
     pub(crate) fn play_album(&mut self, id: String) {
+        self.note_playback_choice();
         self.pending_card_play = Some(id.clone());
         self.backend.play_album(id);
     }
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
+        self.note_playback_choice();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
                 self.navigate(Route::Playlist(id.clone()));
@@ -4577,7 +4587,8 @@ impl App {
             crate::api::LibrarySection::Albums => self.library.albums.loading = true,
             crate::api::LibrarySection::Playlists => self.library.playlists.loading = true,
         }
-        self.backend.fetch_library_more(section, token);
+        self.backend
+            .fetch_library_more(section, token, self.account_epoch);
     }
 
     /// A load the page on screen is waiting for — what its skeletons stand in for. Not the song
@@ -5198,6 +5209,27 @@ impl App {
                     }
                 }
 
+                Event::FolderTracks {
+                    request,
+                    epoch,
+                    tracks,
+                    incomplete,
+                } => {
+                    if request == self.playback_choice && epoch == self.account_epoch {
+                        let empty = tracks.is_empty();
+                        if !empty {
+                            self.shuffle_play(tracks);
+                        }
+                        if !incomplete.is_empty() {
+                            self.toast_error(&format!(
+                                "Couldn’t fully load: {}",
+                                incomplete.join(", ")
+                            ));
+                        } else if empty {
+                            self.toast("This folder has no available songs");
+                        }
+                    }
+                }
                 Event::PlaylistLoaded { id, playlist } if self.playlist_is_for(&id) => {
                     self.playlist_loading = false;
                     // Keep it for the rail's context menu too.
@@ -5297,6 +5329,7 @@ impl App {
                 // switched away from is dropped rather than repopulating cleared state.
                 Event::LibraryLoaded { library, epoch } if epoch == self.account_epoch => {
                     self.library_loading = false;
+                    self.organizer.page_failed = false;
                     self.library = library;
                     self.library_loaded = true;
                     self.resync_local_playlists();
@@ -5341,7 +5374,11 @@ impl App {
                 }
                 Event::LikedScanDone { .. } => {}
                 // A further page of one section, appended in order.
-                Event::LibraryMore { section, page } => {
+                Event::LibraryMore {
+                    epoch,
+                    section,
+                    page,
+                } if epoch == self.account_epoch => {
                     let next = page.next;
                     match section {
                         crate::api::LibrarySection::Songs => self.library.songs.extend(
@@ -5413,17 +5450,23 @@ impl App {
                     self.library.playlists.loading = false;
                 }
                 Event::SidebarPlaylistsFailed { .. } => {}
-                Event::LibraryMoreFailed { section, error } => {
+                Event::LibraryMoreFailed {
+                    epoch,
+                    section,
+                    error,
+                } if epoch == self.account_epoch => {
                     tracing::warn!(?section, %error, "could not load another library page");
                     match section {
                         crate::api::LibrarySection::Songs => self.library.songs.loading = false,
                         crate::api::LibrarySection::Artists => self.library.artists.loading = false,
                         crate::api::LibrarySection::Albums => self.library.albums.loading = false,
                         crate::api::LibrarySection::Playlists => {
+                            self.organizer.page_failed = true;
                             self.library.playlists.loading = false
                         }
                     }
                 }
+                Event::LibraryMore { .. } | Event::LibraryMoreFailed { .. } => {}
                 Event::LibraryFailed { error, epoch } if epoch == self.account_epoch => {
                     self.library_loading = false;
                     self.library_error = Some(error);
@@ -6193,6 +6236,7 @@ impl App {
         if index >= tracks.len() {
             return;
         }
+        self.note_playback_choice();
         // The clicked row is already the loaded track *and* this is the queue it is in:
         // pause/resume it, the same convention an album/playlist header's own Play button
         // follows, rather than restarting it from the top. The whole-list comparison matters:
@@ -6264,6 +6308,7 @@ impl App {
     /// up next first (`PlayQueue::bring_up_next`), so the songs between it and the playing one
     /// still play, after it; off, it is a plain jump to that place in the queue.
     pub(crate) fn play_from_queue(&mut self, index: usize) {
+        self.note_playback_choice();
         if self.settings.queue_click_keeps_order && self.q.current() != Some(index) {
             // Clicked to play, so it is the listener's choice now: a radio song moved in among
             // their own must not end Repeat All's loop early (see `PlayQueue::tail_start`).
@@ -6365,10 +6410,15 @@ impl App {
     }
 
     pub(crate) fn skip(&mut self, delta: isize) {
+        self.note_playback_choice();
         if delta < 0 {
             self.previous();
             return;
         }
+        self.advance_queue();
+    }
+
+    fn advance_queue(&mut self) {
         let next = self
             .q
             .next(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
@@ -6742,12 +6792,14 @@ impl App {
                 self.toast(&format!("Won't recommend {name}"));
             }
             RowAction::StartMix(id) => {
+                self.note_playback_choice();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
                 self.upnext_open = true;
                 self.backend.start_mix(id);
             }
             RowAction::StartMixPlaylist(id) => {
+                self.note_playback_choice();
                 self.upnext_open = true;
                 self.backend.start_playlist_mix(id);
             }
@@ -6805,7 +6857,7 @@ impl App {
                 playlist_id,
                 tracks,
             } => self.add_private_tracks(&playlist_id, &tracks),
-            RowAction::NewPrivate(tracks) => self.new_private_playlist(tracks),
+            RowAction::NewPrivate(tracks) => self.new_private_playlist(tracks, None),
             RowAction::SaveToPlaylist {
                 playlist_id,
                 video_id,
@@ -6875,6 +6927,9 @@ impl App {
                 kind,
                 then,
             } => {
+                if matches!(then, ui::PageThen::StartMix | ui::PageThen::Shuffle) {
+                    self.note_playback_choice();
+                }
                 if self.page_tracks(&page_id).is_some() {
                     // The fetch landed while the menu was open.
                     self.page_then(&page_id, then);
@@ -6973,6 +7028,9 @@ impl App {
             RowAction::PageInfo => {
                 // The text lives on the page; the page sets `page_info` when forwarding.
             }
+            RowAction::PinPlaylist(id, pin) => crate::ui::organizer::pin_one(self, id, pin),
+            RowAction::UnfilePlaylist(id) => crate::ui::organizer::unfile_one(self, id),
+            RowAction::MovePlaylistToFolder(id) => self.organizer.move_one(id),
             RowAction::EditPlaylist(id) => self.begin_edit_playlist(id),
             RowAction::DeletePlaylist(id) => self.request_delete_playlist(id),
             RowAction::UnsavePlaylist(id) => self.backend.unsave_playlist(id),
@@ -7069,6 +7127,52 @@ impl App {
             self.prefetch_next();
             self.save_playback();
         }
+    }
+
+    // Stream loads have their own generation, including automatic advances and retries.
+    // A folder request survives those but yields to a newer listener choice.
+    fn note_playback_choice(&mut self) {
+        self.playback_choice = self.playback_choice.wrapping_add(1);
+    }
+
+    pub(crate) fn shuffle_folder(&mut self, name: &str) {
+        let layout = &self.settings.playlist_layout;
+        let ids: std::collections::BTreeSet<_> = layout
+            .folders
+            .iter()
+            .filter(|(folder, _)| layout.ancestors(folder).any(|id| id == name))
+            .flat_map(|(_, members)| members)
+            .collect();
+        let mut local = Vec::new();
+        let mut rules = Vec::new();
+        let mut remote = Vec::new();
+        for id in ids {
+            if let Some(lp) = self.local_playlists.iter().find(|lp| lp.id == *id) {
+                if let Some(rule) = lp.rule {
+                    rules.push((lp.title.clone(), rule));
+                } else {
+                    local.extend(self.local_playlist_as_playlist(lp).tracks.items);
+                }
+            } else if self.signed_in() && !id.starts_with("private:") && !id.starts_with("local:") {
+                let title = self
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map_or_else(|| id.clone(), |p| p.title.clone());
+                remote.push((id.clone(), title));
+            }
+        }
+        self.note_playback_choice();
+        self.pending_card_play = None;
+        self.backend.folder_tracks(
+            remote,
+            local,
+            rules,
+            self.playback_choice,
+            self.account_epoch,
+        );
+        self.toast("Preparing folder shuffle…");
     }
 
     /// Play `tracks` in random order. Fisher–Yates over a time-seeded LCG — no rand dependency
@@ -7182,6 +7286,7 @@ impl App {
 
     /// Start whatever YouTube handed over as something to play — an artist's shuffle or mix.
     pub(crate) fn play_target(&mut self, seed: String, target: crate::model::WatchTarget) {
+        self.note_playback_choice();
         self.upnext_open = true;
         self.backend.play_target(seed, target);
     }
@@ -7302,9 +7407,13 @@ impl App {
         self.toast(&format!("Created “{title}”"));
     }
 
-    pub(crate) fn new_private_playlist(&mut self, tracks: Vec<Track>) {
+    pub(crate) fn new_private_playlist(&mut self, tracks: Vec<Track>, folder: Option<String>) {
         self.new_playlist = Some(String::new());
-        self.new_playlist_kind = NewPlaylistKind::Private { tracks, rule: None };
+        self.new_playlist_kind = NewPlaylistKind::Private {
+            tracks,
+            rule: None,
+            folder,
+        };
     }
 
     pub(crate) fn persist_private_lists(
@@ -7330,6 +7439,7 @@ impl App {
         title: String,
         tracks: Vec<Track>,
         rule: Option<crate::local_playlists::SmartRule>,
+        folder: Option<String>,
     ) -> bool {
         let mut lp = crate::local_playlists::LocalPlaylist {
             id: crate::local_playlists::new_id().replacen("local:", "private:", 1),
@@ -7346,8 +7456,12 @@ impl App {
             if let Some(from) = self.library.playlists.items.iter().position(|p| p.id == id) {
                 self.move_playlist(from, 1.min(self.library.playlists.len().saturating_sub(1)));
             }
-            self.navigate(Route::Playlist(id));
-            self.toast("Private playlist created");
+            self.navigate(Route::Playlist(id.clone()));
+            if let Some(folder) = folder {
+                crate::ui::organizer::file_created(self, id, folder);
+            } else {
+                self.toast("Private playlist created");
+            }
             return true;
         }
         false
@@ -7465,6 +7579,7 @@ impl App {
             return;
         };
         self.playlist_edit = Some(PlaylistEditor {
+            focus: true,
             id: pl.id.clone(),
             title: pl.title.clone(),
             description: pl.description.clone().unwrap_or_default(),
@@ -7603,6 +7718,11 @@ impl App {
     fn drop_playlist(&mut self, id: &str) {
         self.library.playlists.items.retain(|p| p.id != id);
         self.settings.playlist_order.retain(|pid| pid != id);
+        self.settings.playlist_layout.forget_playlist(id);
+        self.settings.playlist_layout.pins.remove(id);
+        for members in self.settings.playlist_layout.folders.values_mut() {
+            members.remove(id);
+        }
         if let Err(e) = crate::settings::save(&self.settings) {
             tracing::warn!(error = %format!("{e:#}"), "could not save the playlist order");
         }
@@ -7699,7 +7819,7 @@ impl App {
     }
 
     /// Show a confirmation bubble above the player bar for a few seconds.
-    fn toast(&mut self, text: &str) {
+    pub(crate) fn toast(&mut self, text: &str) {
         self.toast = Some(Toast {
             text: text.to_owned(),
             until: Instant::now() + TOAST_DURATION,
@@ -7711,7 +7831,7 @@ impl App {
     ///
     /// Every write can be refused — a stale token, a playlist that is not yours, no session —
     /// and each of those used to be a log line the user never saw, while every success spoke up.
-    fn toast_error(&mut self, text: &str) {
+    pub(crate) fn toast_error(&mut self, text: &str) {
         self.toast = Some(Toast {
             text: text.to_owned(),
             // Longer than a confirmation: an error is the one toast worth reading to the end,
@@ -8350,6 +8470,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui::organizer::begin_drag_frame(ui.ctx(), &self.organizer);
         let ctx = ui.ctx().clone();
         self.stats.begin_frame();
         self.handle_keys(&ctx);
@@ -8749,6 +8870,8 @@ impl eframe::App for App {
         // The playlist management modals, over everything and on every route.
         ui::song_drag::finish(ui.ctx(), &self.palette);
         ui::playlist::modals(self, ui);
+        ui::sidebar::new_playlist_popup(self, &ctx);
+        ui::organizer::dialog(self, &ctx);
         ui::help::modal(self, ui);
         ui::home_order::modal(self, ui);
         ui::paste_cookies::modal(self, ui);
@@ -8795,6 +8918,7 @@ impl eframe::App for App {
             .as_ref()
             .map(|t| t.until.saturating_duration_since(Instant::now()));
         match remaining {
+            Some(_) if self.current_route() == Route::Listening && self.listening_view.share => {}
             Some(left) if !left.is_zero() => {
                 let (text, error) = self
                     .toast

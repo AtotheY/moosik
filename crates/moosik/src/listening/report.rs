@@ -79,6 +79,8 @@ pub struct Report {
     pub skips: u64,
     pub completed: u64,
     pub new_tracks: usize,
+    #[serde(default)]
+    pub discovered_artist: Option<String>,
     pub tracks: Vec<Row>,
     pub artists: Vec<Group>,
     pub albums: Vec<Group>,
@@ -204,7 +206,7 @@ fn groups(map: HashMap<String, (Group, HashSet<String>)>) -> Vec<Group> {
     rows
 }
 const FACTOR: &str = "max(0,min(g.end_ms,?2)-max(g.start_ms,?1))*1.0/max(1,g.end_ms-g.start_ms)";
-pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
+pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
     let mut report = Report {
         query: q.clone(),
         generated_ms: now_ms(),
@@ -220,6 +222,7 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
         skips: 0,
         completed: 0,
         new_tracks: 0,
+        discovered_artist: None,
         tracks: vec![],
         artists: vec![],
         albums: vec![],
@@ -418,6 +421,30 @@ pub(super) fn build(db: &Connection, q: &Query) -> Result<Report> {
             .then(a.name.cmp(&b.name))
     });
     report.artists = groups(artists);
+    // A discovery is the highest-ranked artist with no observed listening before the
+    // selected period. Look back across sources even if the report itself is filtered.
+    if q.from > 0 && !report.artists.is_empty() {
+        let mut stmt = db.prepare(
+            "SELECT DISTINCT s.metadata FROM sessions s
+            WHERE s.started_ms < ?1 AND EXISTS (SELECT 1 FROM segments g
+            WHERE g.session_id = s.id AND g.listen_ms > 0 AND g.start_ms < ?1)",
+        )?;
+        let mut heard = HashSet::new();
+        for json in stmt.query_map([q.from], |row| row.get::<_, String>(0))? {
+            let metadata: Metadata = serde_json::from_str(&json?)?;
+            heard.extend(
+                metadata
+                    .artists
+                    .into_iter()
+                    .map(|(name, id)| id.unwrap_or_else(|| name.to_lowercase())),
+            );
+        }
+        report.discovered_artist = report
+            .artists
+            .iter()
+            .find(|a| a.listen_ms > 0.0 && !heard.contains(&a.id))
+            .map(|a| a.name.clone());
+    }
     report.albums = groups(albums);
     report.genres = groups(genres);
     report.sources = groups(sources);

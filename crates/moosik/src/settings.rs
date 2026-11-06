@@ -233,6 +233,9 @@ impl Quality {
     }
 }
 
+mod playlist_layout;
+pub use playlist_layout::{LibraryItem, PlaylistLayout};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -298,6 +301,7 @@ pub struct Settings {
     /// The rail's playlist order, by id, as the user dragged it. Ids YouTube no longer returns
     /// are ignored; new ones keep YouTube's order after the ones that are named.
     pub playlist_order: Vec<String>,
+    pub playlist_layout: PlaylistLayout,
     /// Launch on login: an XDG autostart entry on Linux, a LaunchAgent on macOS and the per-user
     /// `Run` key on Windows (see the `autostart` module).
     pub start_on_boot: bool,
@@ -357,6 +361,7 @@ impl Default for Settings {
             scrobble: true,
             account_page_id: None,
             playlist_order: Vec::new(),
+            playlist_layout: Default::default(),
             start_on_boot: false,
             hide_tray_on_close: false,
             discord_rich_presence: false,
