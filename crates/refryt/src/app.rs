@@ -1707,7 +1707,7 @@ pub struct App {
     pub(crate) album_cache: std::collections::HashMap<String, crate::model::Album>,
     /// Which library section the Library page shows.
     pub(crate) rail_filter: RailFilter,
-    folder_shuffle_request: u64,
+    playback_choice: u64,
     pub(crate) organizer: crate::ui::organizer::View,
     /// The name being typed into the rail's new-playlist field, while it is open.
     pub(crate) new_playlist: Option<String>,
@@ -2220,7 +2220,7 @@ impl App {
             rail_cache: std::collections::HashMap::new(),
             album_cache: std::collections::HashMap::new(),
             rail_filter: RailFilter::default(),
-            folder_shuffle_request: 0,
+            playback_choice: 0,
             organizer: Default::default(),
             new_playlist: None,
             new_playlist_kind: NewPlaylistKind::default(),
@@ -3240,7 +3240,7 @@ impl App {
                             self.play_index(current);
                         }
                     } else {
-                        self.skip(1);
+                        self.advance_queue();
                     }
                 }
                 IdleEnd::Retry(delay) => {
@@ -3551,6 +3551,7 @@ impl App {
 
     /// Pause or resume, or start the queue if nothing has played yet.
     pub(crate) fn toggle_playback(&mut self) {
+        self.note_playback_choice();
         match (&self.player, self.playback_started) {
             (Some(pl), true) => pl.toggle_pause(),
             (Some(_), false) if !self.q.is_empty() => {
@@ -3741,12 +3742,14 @@ impl App {
     /// see `Event::CardTracksReady`'s own doc comment for why this is a separate fetch from
     /// `load_album`'s.
     pub(crate) fn play_album(&mut self, id: String) {
+        self.note_playback_choice();
         self.pending_card_play = Some(id.clone());
         self.backend.play_album(id);
     }
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
+        self.note_playback_choice();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
                 self.navigate(Route::Playlist(id.clone()));
@@ -5209,22 +5212,21 @@ impl App {
                 Event::FolderTracks {
                     request,
                     epoch,
-                    generation,
-                    result,
+                    tracks,
+                    incomplete,
                 } => {
-                    if request == self.folder_shuffle_request
-                        && epoch == self.account_epoch
-                        && generation == self.play_generation
-                    {
-                        match result {
-                            Ok(tracks) if tracks.is_empty() => {
-                                self.toast("This folder has no available songs")
-                            }
-                            Ok(tracks) => self.shuffle_play(tracks),
-                            Err(error) => {
-                                tracing::warn!(%error, "loading folder tracks");
-                                self.toast_error("Couldn't load the folder. Try again.");
-                            }
+                    if request == self.playback_choice && epoch == self.account_epoch {
+                        let empty = tracks.is_empty();
+                        if !empty {
+                            self.shuffle_play(tracks);
+                        }
+                        if !incomplete.is_empty() {
+                            self.toast_error(&format!(
+                                "Couldn’t fully load: {}",
+                                incomplete.join(", ")
+                            ));
+                        } else if empty {
+                            self.toast("This folder has no available songs");
                         }
                     }
                 }
@@ -6234,6 +6236,7 @@ impl App {
         if index >= tracks.len() {
             return;
         }
+        self.note_playback_choice();
         // The clicked row is already the loaded track *and* this is the queue it is in:
         // pause/resume it, the same convention an album/playlist header's own Play button
         // follows, rather than restarting it from the top. The whole-list comparison matters:
@@ -6305,6 +6308,7 @@ impl App {
     /// up next first (`PlayQueue::bring_up_next`), so the songs between it and the playing one
     /// still play, after it; off, it is a plain jump to that place in the queue.
     pub(crate) fn play_from_queue(&mut self, index: usize) {
+        self.note_playback_choice();
         if self.settings.queue_click_keeps_order && self.q.current() != Some(index) {
             // Clicked to play, so it is the listener's choice now: a radio song moved in among
             // their own must not end Repeat All's loop early (see `PlayQueue::tail_start`).
@@ -6406,10 +6410,15 @@ impl App {
     }
 
     pub(crate) fn skip(&mut self, delta: isize) {
+        self.note_playback_choice();
         if delta < 0 {
             self.previous();
             return;
         }
+        self.advance_queue();
+    }
+
+    fn advance_queue(&mut self) {
         let next = self
             .q
             .next(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
@@ -6783,12 +6792,14 @@ impl App {
                 self.toast(&format!("Won't recommend {name}"));
             }
             RowAction::StartMix(id) => {
+                self.note_playback_choice();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
                 self.upnext_open = true;
                 self.backend.start_mix(id);
             }
             RowAction::StartMixPlaylist(id) => {
+                self.note_playback_choice();
                 self.upnext_open = true;
                 self.backend.start_playlist_mix(id);
             }
@@ -6916,6 +6927,9 @@ impl App {
                 kind,
                 then,
             } => {
+                if matches!(then, ui::PageThen::StartMix | ui::PageThen::Shuffle) {
+                    self.note_playback_choice();
+                }
                 if self.page_tracks(&page_id).is_some() {
                     // The fetch landed while the menu was open.
                     self.page_then(&page_id, then);
@@ -7115,6 +7129,12 @@ impl App {
         }
     }
 
+    // Stream loads have their own generation, including automatic advances and retries.
+    // A folder request survives those but yields to a newer listener choice.
+    fn note_playback_choice(&mut self) {
+        self.playback_choice = self.playback_choice.wrapping_add(1);
+    }
+
     pub(crate) fn shuffle_folder(&mut self, name: &str) {
         let layout = &self.settings.playlist_layout;
         let ids: std::collections::BTreeSet<_> = layout
@@ -7129,22 +7149,28 @@ impl App {
         for id in ids {
             if let Some(lp) = self.local_playlists.iter().find(|lp| lp.id == *id) {
                 if let Some(rule) = lp.rule {
-                    rules.push(rule);
+                    rules.push((lp.title.clone(), rule));
                 } else {
                     local.extend(self.local_playlist_as_playlist(lp).tracks.items);
                 }
             } else if self.signed_in() && !id.starts_with("private:") && !id.starts_with("local:") {
-                remote.push(id.clone());
+                let title = self
+                    .library
+                    .playlists
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map_or_else(|| id.clone(), |p| p.title.clone());
+                remote.push((id.clone(), title));
             }
         }
-        self.folder_shuffle_request = self.folder_shuffle_request.wrapping_add(1);
+        self.note_playback_choice();
+        self.pending_card_play = None;
         self.backend.folder_tracks(
             remote,
             local,
             rules,
-            self.folder_shuffle_request,
+            self.playback_choice,
             self.account_epoch,
-            self.play_generation,
         );
         self.toast("Preparing folder shuffle…");
     }
@@ -7260,6 +7286,7 @@ impl App {
 
     /// Start whatever YouTube handed over as something to play — an artist's shuffle or mix.
     pub(crate) fn play_target(&mut self, seed: String, target: crate::model::WatchTarget) {
+        self.note_playback_choice();
         self.upnext_open = true;
         self.backend.play_target(seed, target);
     }

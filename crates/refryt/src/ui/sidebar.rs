@@ -465,10 +465,7 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                     || (response.is_pointer_button_down_on()
                         && ui.input(|i| i.pointer.primary_pressed()))
                 {
-                    egui::DragAndDrop::set_payload(
-                        ui.ctx(),
-                        Drag(std::collections::BTreeSet::from([p.id.clone()])),
-                    );
+                    egui::DragAndDrop::set_payload(ui.ctx(), Drag(vec![p.id.clone()]));
                 }
                 if !shortcut {
                     if let (_, Some(insert)) = super::organizer::insertion_drop(

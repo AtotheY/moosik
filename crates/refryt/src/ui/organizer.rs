@@ -13,6 +13,7 @@ pub(crate) struct View {
     query: String,
     selecting: bool,
     selected: BTreeSet<String>,
+    selected_display_order: Vec<String>,
     anchor: Option<String>,
     dialog: Option<Dialog>,
 }
@@ -29,7 +30,23 @@ enum Dialog {
 }
 
 #[derive(Clone)]
-pub(super) struct Drag(pub(super) BTreeSet<String>);
+pub(super) struct Drag(pub(super) Vec<String>);
+
+impl Drag {
+    fn from_grid(id: &str, selected: &BTreeSet<String>, display_order: &[&str]) -> Self {
+        if selected.contains(id) {
+            Self(
+                display_order
+                    .iter()
+                    .filter(|id| selected.contains(**id))
+                    .map(|id| (*id).to_owned())
+                    .collect(),
+            )
+        } else {
+            Self(vec![id.to_owned()])
+        }
+    }
+}
 
 pub(super) enum Action {
     Open(String),
@@ -83,6 +100,7 @@ impl View {
     fn finish_selection(&mut self) {
         self.selecting = false;
         self.selected.clear();
+        self.selected_display_order.clear();
         self.anchor = None;
     }
 
@@ -285,9 +303,9 @@ pub(crate) fn begin_drag_frame(ctx: &egui::Context, view: &View) {
             LibraryItem::Folder(id) => egui::DragAndDrop::set_payload(ctx, FolderDrag(id)),
             LibraryItem::Playlist(id) => {
                 let ids = if src.grid && view.selected.contains(&id) {
-                    view.selected.clone()
+                    view.selected_display_order.clone()
                 } else {
-                    [id].into()
+                    vec![id]
                 };
                 egui::DragAndDrop::set_payload(ctx, Drag(ids));
             }
@@ -400,7 +418,7 @@ fn drop_inside(
         if drag.0.iter().all(|id| layout.playlist_parent(id) == parent) {
             return None;
         }
-        Action::Move(drag.0.clone(), parent.map(str::to_owned))
+        Action::Move(drag.0.iter().cloned().collect(), parent.map(str::to_owned))
     };
     ui.painter().rect_stroke(
         response.rect.shrink(1.0),
@@ -799,7 +817,10 @@ pub(crate) fn grid(app: &mut App, ui: &mut egui::Ui) {
                 || (card.response.is_pointer_button_down_on()
                     && ui.input(|i| i.pointer.primary_pressed()))
             {
-                egui::DragAndDrop::set_payload(ui.ctx(), Drag(targets()));
+                egui::DragAndDrop::set_payload(
+                    ui.ctx(),
+                    Drag::from_grid(&pl.id, &view.selected, &visible_ids),
+                );
             }
             if let (_, Some(insert)) =
                 insertion_drop(ui, &p, card.response.rect, item, layout, false, false)
@@ -842,6 +863,13 @@ pub(crate) fn grid(app: &mut App, ui: &mut egui::Ui) {
                 });
         }
     });
+    // Mouse-down may be processed before the grid paints again. Keep the same
+    // ordered selection for that fast path as for a normal drag-start event.
+    view.selected_display_order = visible_ids
+        .iter()
+        .filter(|id| view.selected.contains(**id))
+        .map(|id| (*id).to_owned())
+        .collect();
     let paging = app.library.playlists.next.is_some() || app.library.playlists.loading;
     if visible.is_empty() && folders.is_empty() {
         let msg = if paging {
@@ -983,6 +1011,16 @@ pub(crate) fn dialog(app: &mut App, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dragging_a_selection_uses_grid_order() {
+        let selected = ["z".to_owned(), "a".to_owned()].into();
+        assert_eq!(
+            Drag::from_grid("a", &selected, &["z", "c", "a"]).0,
+            ["z", "a"]
+        );
+        assert_eq!(Drag::from_grid("c", &selected, &["z", "c", "a"]).0, ["c"]);
+    }
+
     #[test]
     fn a_batch_can_move_between_folders_without_losing_pins() {
         let mut layout = PlaylistLayout::default();

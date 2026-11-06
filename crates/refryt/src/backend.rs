@@ -26,14 +26,53 @@ use crate::model::{
 };
 use crate::player;
 
+/// Commit each successful page to the queue before asking for the next one.
+async fn collect_folder_pages<T, FirstPage, NextPage>(
+    playlists: Vec<(String, String)>,
+    tracks: &mut Vec<T>,
+    first: impl Fn(String) -> FirstPage,
+    more: impl Fn(String) -> NextPage,
+) -> Vec<String>
+where
+    FirstPage: Future<Output = anyhow::Result<crate::model::Paged<T>>>,
+    NextPage: Future<Output = anyhow::Result<crate::model::Paged<T>>>,
+{
+    let mut incomplete = Vec::new();
+    for (id, title) in playlists {
+        let mut page = first(id.clone()).await;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            match page {
+                Ok(batch) => {
+                    tracks.extend(batch.items);
+                    let Some(token) = batch.next else {
+                        break;
+                    };
+                    page = if visited.insert(token.clone()) {
+                        more(token).await
+                    } else {
+                        Err(anyhow::anyhow!("repeated playlist continuation"))
+                    };
+                }
+                Err(error) => {
+                    warn!(%id,%error,"could not finish loading folder playlist");
+                    incomplete.push(title);
+                    break;
+                }
+            }
+        }
+    }
+    incomplete
+}
+
 /// Something finished happening off-thread.
 #[derive(Debug)]
 pub enum Event {
     FolderTracks {
         request: u64,
         epoch: u64,
-        generation: u64,
-        result: Result<Vec<Track>, String>,
+        tracks: Vec<Track>,
+        incomplete: Vec<String>,
     },
     SearchDone {
         query: String,
@@ -1606,64 +1645,68 @@ impl Backend {
 
     pub(crate) fn folder_tracks(
         &self,
-        ids: Vec<String>,
+        playlists: Vec<(String, String)>,
         mut tracks: Vec<Track>,
-        rules: Vec<crate::local_playlists::SmartRule>,
+        rules: Vec<(String, crate::local_playlists::SmartRule)>,
         request: u64,
         epoch: u64,
-        generation: u64,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let result: anyhow::Result<Vec<Track>> = async {
-                if !rules.is_empty() {
-                    let smart =
-                        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Track>> {
-                            let db = rusqlite::Connection::open_with_flags(
-                                crate::listening::path()?,
-                                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                            )?;
-                            let report = crate::listening::report::build(
-                                &db,
-                                &crate::ui::history::all_time_query(),
-                            )?;
-                            Ok(rules.iter().flat_map(|rule| rule.tracks(&report)).collect())
-                        })
-                        .await??;
-                    tracks.extend(smart);
-                }
-                for id in ids {
-                    let playlist = api.playlist(&id).await?;
-                    tracks.extend(playlist.tracks.items);
-                    let mut next = playlist.tracks.next;
-                    let mut visited = std::collections::HashSet::new();
-                    while let Some(token) = next {
-                        anyhow::ensure!(
-                            visited.insert(token.clone()),
-                            "repeated playlist continuation"
-                        );
-                        let page = api.playlist_more(token).await?;
-                        tracks.extend(
-                            page.items
-                                .into_iter()
-                                .filter_map(|entry| entry.track().cloned()),
-                        );
-                        next = page.next;
+            let mut incomplete = Vec::new();
+            if !rules.is_empty() {
+                let (titles, rules): (Vec<_>, Vec<_>) = rules.into_iter().unzip();
+                let smart = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Track>> {
+                    let db = rusqlite::Connection::open_with_flags(
+                        crate::listening::path()?,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )?;
+                    let report = crate::listening::report::build(
+                        &db,
+                        &crate::ui::history::all_time_query(),
+                    )?;
+                    Ok(rules.iter().flat_map(|rule| rule.tracks(&report)).collect())
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r);
+                match smart {
+                    Ok(songs) => tracks.extend(songs),
+                    Err(error) => {
+                        warn!(%error, "loading folder smart playlists");
+                        incomplete.extend(titles);
                     }
                 }
-                let mut seen = std::collections::HashSet::new();
-                tracks.retain(|track| seen.insert(track.video_id.clone()));
-                Ok(tracks)
             }
-            .await;
+            let api = &api;
+            incomplete.extend(
+                collect_folder_pages(
+                    playlists,
+                    &mut tracks,
+                    |id| async move { Ok(api.playlist(&id).await?.tracks) },
+                    |token| async move {
+                        let page = api.playlist_more(token).await?;
+                        Ok(crate::model::Paged::new(
+                            page.items
+                                .into_iter()
+                                .filter_map(|e| e.track().cloned())
+                                .collect(),
+                            page.next,
+                        ))
+                    },
+                )
+                .await,
+            );
+            let mut seen = std::collections::HashSet::new();
+            tracks.retain(|t| seen.insert(t.video_id.clone()));
             Self::emit(
                 &tx,
                 &ctx,
                 Event::FolderTracks {
                     request,
                     epoch,
-                    generation,
-                    result: result.map_err(|e| e.to_string()),
+                    tracks,
+                    incomplete,
                 },
             );
         });
@@ -3015,5 +3058,34 @@ mod tests {
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::collect_folder_pages;
+    use crate::model::Paged;
+
+    #[tokio::test]
+    async fn unavailable_playlists_and_pages_preserve_every_successful_track() {
+        let lists = ["deleted", "partial", "good"]
+            .map(|s| (s.to_owned(), s.to_owned()))
+            .to_vec();
+        let mut tracks = vec!["private"];
+        let incomplete = collect_folder_pages(
+            lists,
+            &mut tracks,
+            |id: String| async move {
+                match id.as_str() {
+                    "partial" => Ok(Paged::new(vec!["first page"], Some("broken".into()))),
+                    "good" => Ok(Paged::new(vec!["last playlist"], None)),
+                    _ => anyhow::bail!("unavailable"),
+                }
+            },
+            |_| async { anyhow::bail!("bad continuation") },
+        )
+        .await;
+        assert_eq!(tracks, ["private", "first page", "last playlist"]);
+        assert_eq!(incomplete, ["deleted", "partial"]);
     }
 }
