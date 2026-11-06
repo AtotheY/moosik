@@ -2,12 +2,11 @@
 # Build dist/Moosik.app, a zip of it, and a drag-to-Applications disk image
 # (dist/moosik-<version>-macos-<arch>.zip and .dmg).
 #
-# The bundle holds the release binary, an adaptive icon (see below), libmpv and its whole dylib
+# The bundle holds the release binary, the Moosik icon, libmpv and its whole dylib
 # tail copied into Contents/Frameworks, and a standalone yt-dlp next to the executable (where
 # `backend::yt_dlp_program` looks first). Nothing outside macOS itself is needed at run time.
 #
-# Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode 26 for
-# actool (the icon) and the command line tools for iconutil, sips, codesign and hdiutil.
+# Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode command line tools, codesign and hdiutil.
 # Local builds reuse the identity configured by setup-macos-signing.sh. Without one,
 # packaging falls back to ad-hoc signing; a copy downloaded elsewhere needs the quarantine
 # flag cleared (`xattr -cr Moosik.app`) or a real Developer ID signature.
