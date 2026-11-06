@@ -36,7 +36,7 @@ macOS screenshots with signed-out browsing and synthetic listening stats. Click 
 - Select and drag several songs in the [queue](docs/queue.md), remove upcoming tracks, and undo edits.
 - Edit YouTube playlists or save songs and local files in private playlists on your computer. Save the current queue with **Queue → Save as private playlist**.
 - Choose themes, resize sidebars, and adjust transparency. On macOS, pick from ten Eclipse app icons.
-- [Share your listening activity on Discord](https://moosik.dev/guides/youtube-music-discord/).
+- Show your song with Discord Rich Presence and [invite friends to listen along](https://moosik.dev/blog/youtube-music-discord/).
 
 ## Listening history
 
