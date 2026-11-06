@@ -75,9 +75,21 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     }
     if app.update.notice
         && let Some(release) = &app.update.available
-        && crate::ui::update::indicator(&mut right, &p, &release.version)
     {
-        app.show_update();
+        let tip = if let Some(percent) = app.update.progress {
+            format!("Downloading Moosik {} · {percent:.0}%", release.version)
+        } else if release.installable() {
+            format!("Update to Moosik {} and restart", release.version)
+        } else {
+            format!("Moosik {} is available", release.version)
+        };
+        if crate::ui::update::indicator(&mut right, &p, &tip, app.update.progress) {
+            if release.installable() {
+                app.install_update();
+            } else {
+                app.show_update();
+            }
+        }
     }
     // Whatever the right group took, plus a gap so the search never touches it.
     let reserved = (rect.right() - right.min_rect().left()).max(0.0) + RIGHT_GAP;

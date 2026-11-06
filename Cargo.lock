@@ -4926,7 +4926,7 @@ dependencies = [
 
 [[package]]
 name = "refryt"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -4974,7 +4974,9 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-plasma",
+ "windows",
  "windows-sys 0.52.0",
+ "winit",
  "wry",
  "ytmapi-rs",
  "zbus",
@@ -4982,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "refryt-resolve"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "async-trait",

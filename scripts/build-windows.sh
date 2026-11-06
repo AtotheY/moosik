@@ -105,6 +105,19 @@ pkg="$work/Moosik"
 mkdir -p "$pkg"
 
 cp "target/$target/release/refryt.exe" "$pkg/"
+# Explorer reads the pinned shortcut icon even after Moosik exits.
+python3 - "$pkg" <<'PYICONS'
+from pathlib import Path
+from PIL import Image
+import sys
+dest = Path(sys.argv[1]) / "icons"
+dest.mkdir()
+for source in Path("assets/branding/moosik/eclipse/variants").glob("*.png"):
+    if source.stem.endswith("-master"):
+        continue
+    with Image.open(source) as image:
+        image.save(dest / (source.stem + ".ico"), sizes=[(n,n) for n in (16,24,32,48,64,128,256)])
+PYICONS
 cp "$mpv_dev/libmpv-2.dll" "$pkg/"
 
 # Colour emoji: Windows' own font, Segoe UI Emoji, is COLR — the emoji painter reads PNG strikes

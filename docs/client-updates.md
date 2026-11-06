@@ -4,11 +4,12 @@ Moosik uses GitHub Releases to distribute client updates. An Apple Developer
 membership or App Store listing is **not required**. On macOS, Sparkle 2 handles
 checking, verifying the archive, installation, permissions, and relaunch.
 
-A scheduled check leaves a small download icon with an accent dot beside History
-and the account button. Clicking it opens the native update window. Users install
-and relaunch there instead of finding a download on GitHub. There is also
-**Moosik → Check for Updates…** and **Settings → About → Updates**. Automatic
-checking can be disabled. Downloads/installations require a user choice by default.
+A lit download button beside History appears when an update is available. Windows setup
+installs check GitHub at launch and every 15 minutes while running. One click downloads the
+installer, verifies its checksum and restarts Moosik. Portable builds offer the release page.
+On macOS, Sparkle can prepare the signed update in the background and the button restarts
+into it. Sparkle handles authorization and any updates that need its native dialog.
+Manual checks are available in **Settings → About → Updates**.
 
 Before the first release is published, a manual check shows “Updates aren’t
 published yet.” Missing feeds are distinct from “up to date”; offline, rate-limit,

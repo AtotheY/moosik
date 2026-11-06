@@ -1020,8 +1020,17 @@ fn premium_badge(ui: &mut egui::Ui, palette: &crate::theme::Palette) {
 
 /// Native icon choice; textures are decoded once and retained in egui's context cache.
 fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
+    let chosen = icon_grid(ui, &app.palette, app.settings.app_icon);
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| s.app_icon = chosen);
+}
+
+fn icon_grid(
+    ui: &mut egui::Ui,
+    palette: &crate::theme::Palette,
+    mut chosen: crate::app_icon::AppIcon,
+) -> crate::app_icon::AppIcon {
     use crate::app_icon::AppIcon;
-    let mut chosen = app.settings.app_icon;
     ui.label(egui::RichText::new("App icon").size(18.0).strong());
     ui.label("A different finish. The same Moosik.");
     ui.add_space(12.0);
@@ -1067,7 +1076,11 @@ fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
                                 " "
                             })
                             .size(11.0)
-                            .color(app.palette.accent),
+                            .color(if selected {
+                                palette.accent
+                            } else {
+                                palette.secondary
+                            }),
                         );
                     });
                 });
@@ -1076,8 +1089,7 @@ fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(10.0);
     }
     ui.add_space(8.0);
-    let ctx = ui.ctx().clone();
-    app.update_settings(&ctx, |s| s.app_icon = chosen);
+    chosen
 }
 
 #[cfg(test)]

@@ -1836,6 +1836,8 @@ pub struct App {
     activation: crate::activation::Activation,
     /// macOS: the system's window buttons, kept in the shell's top-left corner. A no-op
     /// elsewhere.
+    #[cfg(target_os = "windows")]
+    icon_window: std::sync::Weak<winit::window::Window>,
     traffic_lights: crate::chrome::TrafficLights,
     /// Whether the sidebar was drawn folded to the icon rail last frame, for placing the traffic
     /// lights over it.
@@ -1882,6 +1884,8 @@ impl Drop for App {
         {
             self.listening.observe(player.listening_sample());
         }
+        #[cfg(target_os = "windows")]
+        self.settings.app_icon.refresh_pin(); // Also catch a pin created during this session.
         self.listening.finish("app_closed");
         tracing::info!("app: dropping");
         self.video = None;
@@ -1982,7 +1986,11 @@ impl App {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::instance::attach(&cc.egui_ctx);
         let mut settings = crate::settings::load();
-        if let Err(e) = settings.app_icon.apply(&cc.egui_ctx) {
+        if let Err(e) = settings.app_icon.apply(
+            &cc.egui_ctx,
+            #[cfg(target_os = "windows")]
+            cc.winit_window().map(Arc::as_ref),
+        ) {
             tracing::warn!(error = %e, "could not apply saved app icon");
         }
         // The themes folder is written on the very first run, then read — before anything that
@@ -2262,6 +2270,8 @@ impl App {
             blur,
             #[cfg(target_os = "linux")]
             activation,
+            #[cfg(target_os = "windows")]
+            icon_window: cc.winit_window().map(Arc::downgrade).unwrap_or_default(),
             traffic_lights,
             sidebar_rail,
             traffic_lights_shown: false,
@@ -2313,12 +2323,11 @@ impl App {
             }
         }
         if !app.update.native
-            && app.settings.check_for_updates
             && !startup_timing
             && app.screenshot.is_none()
             && app.stats_after.is_none()
         {
-            app.check_for_update(false);
+            app.update.next_check = Some(Instant::now());
         }
         if let Some(after) = tray_test {
             app.spawn_tray_test(after);
@@ -2513,8 +2522,17 @@ impl App {
         if self.settings == before {
             return;
         }
+        if self.settings.check_for_updates != before.check_for_updates
+            && self.update.next_check.is_some()
+        {
+            self.update.next_check = Some(Instant::now());
+        }
         if self.settings.app_icon != before.app_icon {
-            if let Err(e) = self.settings.app_icon.apply(ctx) {
+            if let Err(e) = self.settings.app_icon.apply(
+                ctx,
+                #[cfg(target_os = "windows")]
+                self.icon_window.upgrade().as_deref(),
+            ) {
                 self.settings.app_icon = before.app_icon;
                 self.toast(&format!("Could not change app icon: {e}"));
             } else {
@@ -2638,6 +2656,9 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         if release.native {
+            if crate::update::macos::install_prepared() {
+                return;
+            }
             self.check_for_update(true);
             return;
         }
@@ -8208,6 +8229,20 @@ impl eframe::App for App {
     /// minimized window played its song out and stopped there, and answered no media key.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
+        if self.settings.check_for_updates
+            && let Some(next) = self.update.next_check
+        {
+            let now = Instant::now();
+            if now >= next {
+                self.update.next_check = Some(now + Duration::from_secs(15 * 60));
+                if !self.update.open && self.update.progress.is_none() {
+                    self.check_for_update(false);
+                }
+            }
+            if let Some(next) = self.update.next_check {
+                ctx.request_repaint_after(next.saturating_duration_since(now));
+            }
+        }
         self.probe_while_offline(ctx);
         self.poll_tray(ctx);
         #[cfg(target_os = "macos")]

@@ -20,6 +20,8 @@ pub(crate) struct State {
     pub(crate) open: bool,
     /// A check is in flight.
     pub(crate) checking: bool,
+    /// Only set for interactive builds using the GitHub checker. Sparkle schedules its own.
+    pub(crate) next_check: Option<std::time::Instant>,
     /// A check found nothing newer, which About says until the next one.
     pub(crate) up_to_date: bool,
     /// The release feed has not been published yet.
@@ -186,14 +188,42 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// A quiet top-bar reminder; shares the existing icon button's hit area and focus behavior.
-pub(crate) fn indicator(ui: &mut egui::Ui, p: &theme::Palette, version: &str) -> bool {
-    let response = widgets::icon_button(ui, p, crate::icons::Icon::Download, 18.0, true)
-        .on_hover_text(format!("Moosik {version} is available · Update"));
-    ui.painter().circle_filled(
-        response.rect.right_top() + egui::vec2(-4.0, 4.0),
-        3.0,
-        p.accent,
+/// A lit download glyph beside History. During a download the rim fills clockwise.
+pub(crate) fn indicator(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    tip: &str,
+    progress: Option<f32>,
+) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, progress.is_none(), tip)
+    });
+    let center = rect.center();
+    let lit = widgets::lit(ui, &response);
+    let painter = ui.painter();
+    painter.circle_filled(center, 14.0, p.accent.gamma_multiply(0.08));
+    painter.circle_filled(center, 12.0, p.accent.gamma_multiply(0.15 + lit * 0.10));
+    crate::icons::Icon::Download.image(p.accent, 16.0).paint_at(
+        ui,
+        egui::Rect::from_center_size(center, egui::vec2(16.0, 16.0)),
     );
-    response.clicked()
+    if let Some(percent) = progress {
+        let sweep = std::f32::consts::TAU * percent.clamp(0.0, 100.0) / 100.0;
+        let arc = (0..=32)
+            .map(|i| {
+                center
+                    + 13.0
+                        * egui::Vec2::angled(sweep * i as f32 / 32.0 - std::f32::consts::FRAC_PI_2)
+            })
+            .collect();
+        painter.add(egui::Shape::line(arc, egui::Stroke::new(2.0, p.accent)));
+    }
+    let response = response.on_hover_text(tip);
+    if progress.is_some() {
+        return false;
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }

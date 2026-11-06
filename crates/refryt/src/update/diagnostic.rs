@@ -48,7 +48,13 @@ impl eframe::App for Probe {
         ui.horizontal(|ui| {
             ui.heading(format!("Moosik updater · {}", self.version));
             if let Some(version) = &self.available
-                && crate::ui::update::indicator(ui, &p, version)
+                && crate::ui::update::indicator(
+                    ui,
+                    &p,
+                    &format!("Update to {version} and restart"),
+                    None,
+                )
+                && !macos::install_prepared()
             {
                 macos::check();
             }

@@ -47,6 +47,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
+Source: "{#StageDir}\icons\*.ico"; DestDir: "{app}\icons"; Flags: ignoreversion
 Source: "{#StageDir}\refryt.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\libmpv-2.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; The colour emoji font: Windows' own is COLR, which the emoji painter cannot read.

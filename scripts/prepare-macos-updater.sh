@@ -41,11 +41,11 @@ if key and len(base64.b64decode(key,validate=True))!=32:
 if public and not key:
     raise SystemExit('Missing Sparkle public key: run scripts/setup-update-signing.sh first')
 with path.open('rb') as f: info=plistlib.load(f)
-for k in ['SUFeedURL','SUPublicEDKey','SUEnableAutomaticChecks','SUAutomaticallyUpdate','SUVerifyUpdateBeforeExtraction','SUEnableSystemProfiling']:
+for k in ['SUFeedURL','SUPublicEDKey','SUEnableAutomaticChecks','SUAutomaticallyUpdate','SUScheduledCheckInterval','SUVerifyUpdateBeforeExtraction','SUEnableSystemProfiling']:
     info.pop(k,None)
 if key:
     info.update(SUFeedURL=feed,SUPublicEDKey=key,SUEnableAutomaticChecks=True,
-        SUAutomaticallyUpdate=False,SUVerifyUpdateBeforeExtraction=True,SUEnableSystemProfiling=False)
+        SUAutomaticallyUpdate=True,SUScheduledCheckInterval=900,SUVerifyUpdateBeforeExtraction=True,SUEnableSystemProfiling=False)
 else:
     print('Sparkle bundled; automatic installation awaits the release signing public key.')
 # Every public release bumps the SemVer; Sparkle compares this numeric bundle version.

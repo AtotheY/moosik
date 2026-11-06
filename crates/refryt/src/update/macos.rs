@@ -33,6 +33,7 @@ struct Native {
 }
 thread_local! {
     static NATIVE: RefCell<Option<Native>> = const { RefCell::new(None) };
+    static PREPARED: RefCell<Option<RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
     static RELAUNCH: RefCell<Option<RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
 }
 fn emit(event: Event) {
@@ -58,8 +59,31 @@ fn found(item: &AnyObject) {
     let version: Retained<NSString> = unsafe { msg_send![item, displayVersionString] };
     emit(Event::Available(version.to_string()));
 }
-extern "C" fn valid(_: &AnyObject, _: Sel, _: &AnyObject, item: &AnyObject) {
+extern "C" fn valid(_: &AnyObject, _: Sel, updater: &AnyObject, item: &AnyObject) {
+    let downloading: Bool = unsafe { msg_send![updater, automaticallyDownloadsUpdates] };
+    if !downloading.as_bool() {
+        found(item);
+    }
+}
+extern "C" fn prepared(
+    _: &AnyObject,
+    _: Sel,
+    _: &AnyObject,
+    item: &AnyObject,
+    install: &Block<dyn Fn()>,
+) -> Bool {
+    PREPARED.with(|slot| *slot.borrow_mut() = Some(install.copy()));
     found(item);
+    Bool::YES
+}
+/// Sparkle supplies this block once it has verified and staged a background update.
+pub(crate) fn install_prepared() -> bool {
+    let handler = PREPARED.with(|slot| slot.borrow().clone());
+    if let Some(handler) = handler {
+        handler.call(());
+        return true;
+    }
+    false
 }
 extern "C" fn showing(_: &AnyObject, _: Sel, _: Bool, item: &AnyObject, _: &AnyObject) {
     found(item);
@@ -72,6 +96,7 @@ extern "C" fn failed(_: &AnyObject, _: Sel, _: &AnyObject, error: &NSError) {
     emit(Event::Failed(error.localizedDescription().to_string()));
 }
 extern "C" fn finished(_: &AnyObject, _: Sel, _: &AnyObject, _: isize, _: *const NSError) {
+    PREPARED.with(|slot| slot.borrow_mut().take());
     emit(Event::Finished);
 }
 extern "C" fn postpone(
@@ -142,6 +167,10 @@ fn delegate_class() -> &'static AnyClass {
                 finished as extern "C" fn(_, _, _, _, _),
             );
             class.add_method(
+                sel!(updater:willInstallUpdateOnQuit:immediateInstallationBlock:),
+                prepared as extern "C" fn(_, _, _, _, _) -> _,
+            );
+            class.add_method(
                 sel!(updater:shouldPostponeRelaunchForUpdate:untilInvokingBlock:),
                 postpone as extern "C" fn(_, _, _, _, _) -> _,
             );
@@ -203,6 +232,12 @@ pub(crate) fn start(ctx: &egui::Context, legacy_automatic: bool) -> Result<bool>
         ));
     }
     let _ = CONTEXT.set(ctx.clone());
+    let automatic: Bool = unsafe { msg_send![&*updater, automaticallyChecksForUpdates] };
+    if automatic.as_bool() {
+        unsafe {
+            let _: () = msg_send![&*updater, checkForUpdatesInBackground];
+        }
+    }
     NATIVE.with(|n| {
         *n.borrow_mut() = Some(Native {
             _framework: framework,

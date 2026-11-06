@@ -1,4 +1,7 @@
 //! Bundled icon finishes. Settings store only a stable enum, never an arbitrary file path.
+#[cfg(target_os = "windows")]
+mod taskbar;
+
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
@@ -106,7 +109,11 @@ impl AppIcon {
         Some(texture)
     }
     /// Called on the UI thread at launch and when the user chooses a finish.
-    pub fn apply(self, ctx: &egui::Context) -> anyhow::Result<()> {
+    pub fn apply(
+        self,
+        ctx: &egui::Context,
+        #[cfg(target_os = "windows")] window: Option<&winit::window::Window>,
+    ) -> anyhow::Result<()> {
         let img = self.image()?;
         #[cfg(target_os = "macos")]
         {
@@ -122,6 +129,18 @@ impl AppIcon {
             unsafe {
                 NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon));
             }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(window) = window {
+            use winit::platform::windows::WindowExtWindows;
+            let large =
+                image::imageops::resize(&img, 64, 64, image::imageops::FilterType::Lanczos3);
+            window.set_taskbar_icon(Some(winit::window::Icon::from_rgba(
+                large.into_raw(),
+                64,
+                64,
+            )?));
+            self.refresh_pin();
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
             egui::IconData {
