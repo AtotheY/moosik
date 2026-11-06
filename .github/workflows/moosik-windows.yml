@@ -106,20 +106,12 @@ jobs:
           }
           & "$dest/yt-dlp.exe" --version
           if ($LASTEXITCODE -ne 0) { throw 'yt-dlp failed' }
-          $env:APPDATA = Join-Path $env:RUNNER_TEMP 'moosik-test-profile'
-          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'moosik-test-local'
-          New-Item -ItemType Directory -Force $env:APPDATA,$env:LOCALAPPDATA | Out-Null
-          # On this disposable runner, seed a saved finish and an existing pin from the old install.
+          # A clean unpinned install. The pinned-upgrade job pins through Explorer;
+          # dropping a .lnk straight into the pin folder does not create a real pin.
           $roaming = [Environment]::GetFolderPath('ApplicationData')
           $config = Join-Path $roaming 'refryt\config'
-          $pins = Join-Path $roaming 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
-          New-Item -Type Directory -Force $config,$pins | Out-Null
+          New-Item -Type Directory -Force $config | Out-Null
           '{"app_icon":"amber"}' | Set-Content (Join-Path $config 'settings.json') -Encoding utf8NoBOM
-          $shell = New-Object -ComObject WScript.Shell
-          $pin = Join-Path $pins 'Moosik smoke.lnk'
-          $link = $shell.CreateShortcut($pin)
-          $link.TargetPath = Join-Path $dest 'refryt.exe'
-          $link.Save()
           $app = Start-Process "$dest/refryt.exe" -PassThru -RedirectStandardError "$env:RUNNER_TEMP/moosik-stderr.txt"
           Start-Sleep -Seconds 20
           $app.Refresh()
@@ -130,9 +122,6 @@ jobs:
           if ($app.MainWindowHandle -eq 0) { Stop-Process -Id $app.Id; throw 'No application window appeared' }
           Write-Output "Moosik window opened: $($app.MainWindowTitle)"
           $icon = Join-Path $dest 'icons\amber.ico'
-          if (!(Test-Path $icon) -or ($shell.CreateShortcut($pin).IconLocation -ne "$icon,0")) {
-            throw "Saved finish was not applied to the pinned taskbar shortcut"
-          }
           Add-Type -TypeDefinition @'
           using System;
           using System.Runtime.InteropServices;
@@ -144,7 +133,7 @@ jobs:
           if ([WindowIcon]::SendMessage($app.MainWindowHandle, 0x007F, [IntPtr]1, [IntPtr]0) -eq [IntPtr]::Zero) {
             throw "Running window has no taskbar icon (WM_GETICON / ICON_BIG)"
           }
-          ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon -Pin $pin
+          ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon
           python scripts/tests/windows-taskbar-image.py $icon "$env:RUNNER_TEMP/taskbar.png"
           if ($LASTEXITCODE -ne 0) { throw 'Taskbar artwork did not match the selected finish' }
           Stop-Process -Id $app.Id

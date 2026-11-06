@@ -74,6 +74,10 @@ $app=Start-Process "$dest/refryt.exe" -PassThru
 Start-Sleep 12
 $icon=Join-Path $dest 'icons\amber.ico'
 Show-Pins
+$pin=(Get-ChildItem $profilePins -Filter 'Moosik*.lnk' | Select-Object -First 1).FullName
+if (!$pin -or $keys.CreateShortcut($pin).IconLocation -ne "$icon,0") {throw 'Legacy pin was not migrated'}
+$app.Refresh()
+& "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -Exe (Join-Path $dest 'refryt.exe') -Icon $icon -Pin $pin
 if (!(Find-Button)) {throw 'No running Moosik taskbar button'}
 python scripts/tests/windows-taskbar-image.py $icon taskbar-running.png
 $running=$LASTEXITCODE

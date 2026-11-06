@@ -37,7 +37,9 @@ foreach ($key in $expected.Keys) {
     if ($actual -ne $expected[$key]) { throw "Taskbar property $key was '$actual', expected '$($expected[$key])'" }
 }
 $shell = New-Object -ComObject Shell.Application
-foreach ($shortcut in @($Pin, (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Moosik\Moosik.lnk'))) {
+$shortcuts = @((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Moosik\Moosik.lnk'))
+if ($Pin) { $shortcuts += $Pin }
+foreach ($shortcut in $shortcuts) {
     $folder = $shell.Namespace((Split-Path $shortcut))
     $item = $folder.ParseName((Split-Path -Leaf $shortcut))
     if ($null -eq $item -or $item.ExtendedProperty('System.AppUserModel.ID') -ne 'Moosik.Desktop') {
