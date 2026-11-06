@@ -4,6 +4,8 @@
 //! (Back / Forward in the titlebar). This file holds the state and the wiring: what the route
 //! currently is, what has been fetched for it, and how playback advances.
 
+mod together;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1852,6 +1854,7 @@ pub struct App {
     /// The Discord Rich Presence worker, while the setting is on and an application id is set.
     /// Dropping it tells the worker to clear the presence and stop.
     discord: Option<crate::discord::Discord>,
+    together: together::Together,
     /// What was last handed to Discord — the track's id, whether it was playing, and its title —
     /// so the presence is only resent when something material changes rather than every frame.
     presence_key: Option<(Option<String>, bool, String)>,
@@ -2283,6 +2286,7 @@ impl App {
             traffic_lights_shown: false,
             media,
             discord: None,
+            together: Default::default(),
             presence_key: None,
             media_key: None,
             presence_position: 0.0,
@@ -3037,6 +3041,7 @@ impl App {
         };
         discord.set(crate::discord::Presence {
             youtube_id: id.clone(),
+            room: self.room_id().map(str::to_owned),
             title: track.title.clone(),
             artist: track
                 .artists
@@ -3058,6 +3063,9 @@ impl App {
     /// Start or stop the Discord worker to match the setting. Called on a Settings change and
     /// once at launch. The application id is fixed, so the toggle is the whole decision.
     pub(crate) fn sync_discord(&mut self) {
+        if !self.settings.discord_rich_presence && self.hosting() {
+            self.leave_room();
+        }
         self.discord = if self.settings.discord_rich_presence {
             Some(crate::discord::Discord::spawn())
         } else {
@@ -3074,6 +3082,10 @@ impl App {
         let Some(store) = crate::playback::load() else {
             return;
         };
+        self.apply_playback_store(store);
+    }
+
+    fn apply_playback_store(&mut self, store: crate::playback::Store) {
         // The volume first: it is kept with no queue as well, so a volume set before anything
         // was ever queued (a fresh install) survives a relaunch.
         if store.volume > 0.5 {
@@ -3108,6 +3120,9 @@ impl App {
     /// The queue and transport, as the on-disk store shape. Written with an empty queue too, for
     /// the volume, including after the listener clears an idle queue.
     fn playback_store(&self) -> Option<crate::playback::Store> {
+        if let Some(store) = &self.together.backup {
+            return Some(store.clone());
+        }
         let position = self.saved_position();
         Some(crate::playback::Store {
             version: 1,
@@ -3210,6 +3225,7 @@ impl App {
             self.playback_started = false;
             match self.stall.on_idle(Instant::now()) {
                 // Repeat One replays the track that just ended; anything else advances normally.
+                IdleEnd::Ended if self.following() => self.listening.finish("ended"),
                 IdleEnd::Ended => {
                     self.listening.finish("ended");
                     if self.repeat == RepeatMode::One {
@@ -3256,7 +3272,7 @@ impl App {
         // soon as it starts, so the tail is there from the beginning; an open river is
         // extended at the low-water mark. Nothing is fetched while the setting is off, nor under
         // Repeat All, which loops the chosen tracks instead (YouTube Music does the same).
-        if !self.radio_loading {
+        if !self.following() && !self.radio_loading {
             // Not before anything has played this session: a restored queue waits for play.
             let wants = self.settings.autoplay
                 && self.repeat != RepeatMode::All
@@ -3287,6 +3303,7 @@ impl App {
 
         // Hand the OS widget the current transport. After the advance/autoplay above, so a track
         // that just changed is what the OS shows.
+        self.poll_together();
         self.publish_media();
         // Same snapshot, said to Discord.
         self.publish_presence();
@@ -8265,8 +8282,12 @@ impl eframe::App for App {
         // A second plain launch asked the running instance to show itself (see `instance`).
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if crate::instance::poll() {
+            crate::links::refresh();
             tracing::info!("second launch: showing the window");
             self.show_window(ctx);
+        }
+        while let Some(link) = crate::links::take() {
+            self.open_shared_link(link);
         }
         // Only an explicit --resume launch requests this. Normal launches remain paused;
         // native OS media commands continue to control whichever player macOS selects.

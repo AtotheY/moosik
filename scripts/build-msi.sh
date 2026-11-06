@@ -81,6 +81,12 @@ cat > "$work/refryt.wxs" <<EOF
           <Component Id="App" Guid="CBFAAC8B-7037-4B9E-8A93-44F64E6CF35A" Win64="yes">
             <File Id="refryt.exe" Name="refryt.exe" Source="$stage/refryt.exe" KeyPath="yes" />
           </Component>
+          <Component Id="PlaybackProtocol" Guid="479C0EC0-146B-43DC-A1B7-8C8F50E72925" Win64="yes">
+            <RegistryValue Root="HKLM" Key="Software\Classes\moosik" Type="string" Value="URL:Moosik playback" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\moosik" Name="URL Protocol" Type="string" Value="" />
+            <RegistryValue Root="HKLM" Key="Software\Classes\moosik\shell\open\command" Type="string"
+                           Value="&quot;[#refryt.exe]&quot; --open-url &quot;%1&quot;" KeyPath="yes" />
+          </Component>
           <Component Id="Mpv" Guid="2FA232FE-34FA-4F1C-9336-0FBE7027ED28" Win64="yes">
             <File Id="libmpv.dll" Name="libmpv-2.dll" Source="$stage/libmpv-2.dll" KeyPath="yes" />
           </Component>
@@ -108,6 +114,7 @@ cat > "$work/refryt.wxs" <<EOF
 
     <Feature Id="Complete" Level="1">
       <ComponentRef Id="App" />
+      <ComponentRef Id="PlaybackProtocol" />
       <ComponentRef Id="Mpv" />
       <ComponentRef Id="WebView2" />
       <ComponentRef Id="YtDlp" />

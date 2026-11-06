@@ -28,6 +28,7 @@ if [ -f "$stage/Contents/Resources/Assets.car" ]; then
     mv "$stage/Contents/Resources/Assets.car" "$root/.ark-build/upstream-icon-catalog-$(date +%s).car"
 fi
 "$root/scripts/prepare-macos-media-helper.sh" "$stage"
+plutil -replace CFBundleURLTypes -json "$(cat "$root/packaging/macos/url-types.json")" "$stage/Contents/Info.plist"
 "$root/scripts/prepare-macos-updater.sh" "$stage"
 "$root/scripts/sign-macos.sh" "$stage"
 printf 'Built %s (%s)\n' "$stage" "$version"

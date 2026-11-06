@@ -708,6 +708,8 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
     // Discord Rich Presence. Nothing to configure: the app connects as its own Discord
     // application (the id is fixed in `crate::discord`), so the toggle is the whole setting.
     let mut discord = app.settings.discord_rich_presence;
+    let mut hosting = app.hosting();
+    let mut leave = false;
     widgets::setting_group(ui, &p, Some("Integrations"), |ui, g| {
         toggle_row(
             g,
@@ -718,6 +720,26 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
             "Shows what you're playing on Discord.",
             &mut discord,
         );
+        if app.following() {
+            g.row(
+                ui,
+                "Listen along",
+                "Following the host’s playback.",
+                |ui| {
+                    leave = widgets::outline_button(ui, &p, "Leave").clicked();
+                },
+            );
+        } else if discord {
+            toggle_row(
+                g,
+                ui,
+                &p,
+                "host-listen-along",
+                "Host Listen along",
+                "Let friends on Discord follow your playback for this session.",
+                &mut hosting,
+            );
+        }
     });
 
     let ctx = ui.ctx().clone();
@@ -729,6 +751,11 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
         s.hide_tray_on_close = hide_tray;
         s.discord_rich_presence = discord;
     });
+    if leave || (app.hosting() && !hosting) {
+        app.leave_room();
+    } else if discord && hosting && !app.hosting() {
+        app.start_hosting();
+    }
 }
 
 #[cfg(target_os = "macos")]

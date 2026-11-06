@@ -1,0 +1,30 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRelay } from './server.mjs';
+
+test('two listeners follow play, seek, pause, skip, unavailable tracks and expiry', async t => {
+  let clock = 1000;
+  const relay = createRelay({ now: () => clock });
+  await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => relay.close(resolve)));
+  const base = 'http://127.0.0.1:' + relay.address().port + '/rooms';
+  const { id, key } = await (await fetch(base, { method: 'POST' })).json();
+  const url = base + '/' + id;
+  const write = state => fetch(url, { method: 'PUT', headers: { Authorization: 'Bearer ' + key }, body: JSON.stringify(state) });
+  const read = async () => (await fetch(url)).json();
+  assert.equal((await fetch(url, { method: 'PUT' })).status, 403);
+  assert.equal((await write({ id: '/etc/passwd' })).status, 400);
+  const song = { id: 'dQw4w9WgXcQ', title: 'Song', artist: 'Artist', playing: true, position: 4 };
+  assert.equal((await write(song)).status, 204);
+  clock += 3000;
+  assert.deepEqual(await Promise.all([read(), read()]), [7, 7].map(position => ({ ...song, position })));
+  await write({ ...song, position: 20, playing: false });
+  clock += 1000;
+  assert.equal((await read()).position, 20);
+  await write({ ...song, id: 'aaaaaaaaaaa', position: 0 });
+  assert.equal((await read()).id, 'aaaaaaaaaaa');
+  await write(null);
+  assert.equal(await read(), null);
+  clock += 46000;
+  assert.equal((await fetch(url)).status, 404);
+});

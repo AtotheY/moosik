@@ -40,6 +40,8 @@ DisableProgramGroupPage=yes
 ; SmartScreen the first few times anyone runs it — a known, disclosed limitation, not a bug.
 SetupIconFile=..\assets\icons\app\moosik.ico
 
+ChangesAssociations=yes
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
@@ -57,6 +59,11 @@ Source: "{#StageDir}\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 Source: "{#StageDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
+
+[Registry]
+Root: HKA; Subkey: "Software\Classes\moosik"; ValueType: string; ValueData: "URL:Moosik playback"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\moosik"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\moosik\shell\open\command"; ValueType: string; ValueData: """{app}\refryt.exe"" --open-url ""%1"""
 
 [Icons]
 Name: "{group}\Moosik"; Filename: "{app}\refryt.exe"; AppUserModelID: Moosik.Desktop; IconFilename: "%LOCALAPPDATA%\Moosik\Taskbar\current.ico"

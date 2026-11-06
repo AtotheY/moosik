@@ -34,6 +34,13 @@ fn main() -> eframe::Result {
     // Launch straight into a search, and optionally start playing its first hit. Handy on its
     // own for a keyboard-first app, and the only way to exercise the whole chain without a mouse.
     let args: Vec<String> = std::env::args().collect();
+    let link_launch = match refryt::links::accept_cli(&args[1..]) {
+        Ok(found) => found,
+        Err(error) => {
+            tracing::warn!(%error, "could not open playback link");
+            return Ok(());
+        }
+    };
     let search = args
         .iter()
         .position(|a| a == "--search")
@@ -166,7 +173,7 @@ fn main() -> eframe::Result {
     // which is not a user clicking the app again, so it runs unguarded. See `instance`'s own
     // module doc.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-    {
+    let primary = {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let resume = args.iter().any(|a| a == "--resume");
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -175,7 +182,7 @@ fn main() -> eframe::Result {
             .iter()
             .skip(1)
             .all(|a| a == refryt::autostart::ARG || (resume && a == "--resume"));
-        if plain {
+        if plain || link_launch {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let claim = if resume {
                 refryt::instance::claim_resume()
@@ -188,6 +195,14 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
         }
+        plain || link_launch
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    let primary = link_launch;
+
+    #[cfg(target_os = "macos")]
+    if primary && in_app_bundle() {
+        refryt::links::macos::install();
     }
 
     let mut viewport = egui::ViewportBuilder::default()
@@ -295,35 +310,35 @@ fn main() -> eframe::Result {
         "refryt",
         native_options,
         Box::new(move |cc| {
-            Ok(Box::new(
-                app::App::new(
-                    cc,
-                    app::Options {
-                        decorated,
-                        startup_timing,
-                        search: search.clone(),
-                        autoplay,
-                        stats,
-                        stats_after,
-                        screenshot: screenshot.clone(),
-                        page: page.clone(),
-                        autoscroll,
-                        autoscroll_max,
-                        queue,
-                        lyrics,
-                        now_playing,
-                        scheme,
-                        opacity,
-                        no_blur,
-                        no_autoplay,
-                        tray_test,
-                        autostart,
-                    },
-                )
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    format!("{e:#}").into()
-                })?,
-            ))
+            let app = app::App::new(
+                cc,
+                app::Options {
+                    decorated,
+                    startup_timing,
+                    search: search.clone(),
+                    autoplay,
+                    stats,
+                    stats_after,
+                    screenshot: screenshot.clone(),
+                    page: page.clone(),
+                    autoscroll,
+                    autoscroll_max,
+                    queue,
+                    lyrics,
+                    now_playing,
+                    scheme,
+                    opacity,
+                    no_blur,
+                    no_autoplay,
+                    tray_test,
+                    autostart,
+                },
+            )
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+            if primary {
+                refryt::links::attach(&cc.egui_ctx);
+            }
+            Ok(Box::new(app))
         }),
     );
     // The app itself was dropped inside `run_native` (eframe destroys it on `LoopExiting`), so

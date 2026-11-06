@@ -55,8 +55,9 @@ pub const DEFAULT_CLIENT_ID: &str = "1550438057642168411";
 pub struct Presence {
     /// The video id, for the watch button. `None` for a local file, which has no page to open.
     pub youtube_id: Option<String>,
+    pub room: Option<String>,
     pub title: String,
-    /// The credited artists, already joined. Empty hides the line.
+    /// The credited artists, already joined.
     pub artist: String,
     pub album: Option<String>,
     /// The cover URL the model carries, used as a fallback when there is no video id.
@@ -74,38 +75,61 @@ impl Presence {
     fn activity(&self) -> Activity<'_> {
         let mut activity = Activity::new()
             .activity_type(ActivityType::Listening)
-            // Overrides the Discord application's own name, so the card reads "Listening to
-            // YouTube Music via Moosik" instead of "Listening to refryt". The app is still the
-            // one doing the listening; `refryt` is just not much of a name to broadcast.
-            .name("YouTube Music via Moosik")
-            // And the member list's one-liner is the artist, while the card itself still leads
-            // with the song's title.
-            .status_display_type(StatusDisplayType::State);
-        if let Some(details) = field(&self.title) {
+            .name("YouTube Music via Moosik.dev")
+            .status_display_type(StatusDisplayType::Details);
+        // Discord also uses details for the compact member-list status.
+        let title = self.title.trim();
+        let artist = self.artist.trim();
+        let line = match (title.is_empty(), artist.is_empty()) {
+            (false, false) => format!("{title} - {artist}"),
+            (true, _) => artist.to_owned(),
+            _ => title.to_owned(),
+        };
+        if let Some(details) = field(&line) {
             activity = activity.details(details);
         }
-        if let Some(state) = field(&self.artist) {
+        if let Some(state) = self.album.as_deref().and_then(field) {
             activity = activity.state(state);
         }
         // Only while playing: a paused track has no end, and a bar that kept running would lie.
         if let Some(end) = self.end_unix {
             activity = activity.timestamps(Timestamps::new().end(end.saturating_mul(1000)));
         }
+        let badge = if self.playing {
+            "https://moosik.dev/assets/discord/playing.gif"
+        } else {
+            "https://moosik.dev/assets/discord/paused.png"
+        };
+        let mut assets = Assets::new().small_image(badge).small_text("Moosik.dev");
         if let Some(image) = cover_url(
             self.youtube_id.as_deref(),
             self.thumbnail.as_deref(),
             self.wide,
         ) {
-            let mut assets = Assets::new().large_image(image);
+            assets = assets.large_image(image);
             if let Some(text) = field(&self.title) {
                 assets = assets.large_text(text);
             }
-            activity = activity.assets(assets);
         }
-        if let Some(id) = self.youtube_id.as_deref() {
-            activity = activity.buttons(vec![Button::new("Play on YouTube Music", watch_url(id))]);
+        activity = activity.assets(assets);
+        let mut buttons = Vec::new();
+        if let Some(id) = self.youtube_id.as_deref()
+            && refryt_resolve::VideoId::new(id).is_ok()
+        {
+            buttons.push(Button::new(
+                "Play song",
+                format!("https://moosik.dev/#play/{id}"),
+            ));
         }
-        activity
+        if let Some(room) = &self.room {
+            buttons.push(Button::new(
+                "Listen along",
+                format!("https://moosik.dev/#join/{room}"),
+            ));
+        } else {
+            buttons.push(Button::new("Try Moosik.dev", "https://moosik.dev"));
+        }
+        activity.buttons(buttons)
     }
 }
 
@@ -145,10 +169,6 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
     let id = youtube_id?;
     let still = if wide { "hq720" } else { "hqdefault" };
     Some(format!("https://i.ytimg.com/vi/{id}/{still}.jpg"))
-}
-
-fn watch_url(video_id: &str) -> String {
-    format!("https://music.youtube.com/watch?v={video_id}")
 }
 
 /// A live integration: the channel to its worker thread. Dropping this stops the worker (and
@@ -220,7 +240,7 @@ fn run(rx: mpsc::Receiver<Cmd>) {
                 dirty = true;
             }
             Ok(Cmd::Set(presence)) => {
-                if presence.playing {
+                if presence.playing || presence.room.is_some() {
                     paused_since = None;
                 } else {
                     // Armed once per pause, not once per update: a seek while paused must not
@@ -298,6 +318,7 @@ mod tests {
     fn presence() -> Presence {
         Presence {
             youtube_id: Some("dQw4w9WgXcQ".into()),
+            room: None,
             title: "Never Gonna Give You Up".into(),
             artist: "Rick Astley".into(),
             album: Some("Whenever You Need Somebody".into()),
@@ -308,20 +329,15 @@ mod tests {
         }
     }
 
-    /// The activity is built from the presence field for field: listening, the song as details,
-    /// the artist as state, the video's own thumbnail, and a watch button. Serializing it back out
-    /// is the only way to read the crate's write-only builder.
+    /// Check the serialized payload sent to Discord through its write-only builder.
     #[test]
     fn a_playing_track_becomes_the_expected_activity() {
         let json = serde_json::to_value(presence().activity()).unwrap();
         assert_eq!(json["type"], 2, "Listening");
-        assert_eq!(json["name"], "YouTube Music via Moosik");
-        assert_eq!(json["details"], "Never Gonna Give You Up");
-        assert_eq!(json["state"], "Rick Astley");
-        assert_eq!(
-            json["status_display_type"], 1,
-            "the artist, not the app or the song"
-        );
+        assert_eq!(json["name"], "YouTube Music via Moosik.dev");
+        assert_eq!(json["details"], "Never Gonna Give You Up - Rick Astley");
+        assert_eq!(json["state"], "Whenever You Need Somebody");
+        assert_eq!(json["status_display_type"], 2, "show title and artist");
         assert_eq!(json["timestamps"]["end"], 1_700_000_000_000i64);
         // The model's square cover, rewritten to the size Discord draws — not the `i.ytimg`
         // still, whose art-track letterboxing survives Discord's centre crop as bars.
@@ -331,8 +347,32 @@ mod tests {
         );
         assert_eq!(json["assets"]["large_text"], "Never Gonna Give You Up");
         assert_eq!(
-            json["buttons"][0]["url"],
-            "https://music.youtube.com/watch?v=dQw4w9WgXcQ"
+            json["buttons"],
+            serde_json::json!([
+                {"label": "Play song", "url": "https://moosik.dev/#play/dQw4w9WgXcQ"},
+                {"label": "Try Moosik.dev", "url": "https://moosik.dev"}
+            ])
+        );
+    }
+
+    #[test]
+    fn a_host_exposes_only_the_read_only_invite_and_the_song_button() {
+        let room = "a".repeat(32);
+        let host = Presence {
+            room: Some(room.clone()),
+            ..presence()
+        };
+        let json = serde_json::to_value(host.activity()).unwrap();
+        assert_eq!(json["buttons"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["buttons"][1],
+            serde_json::json!({
+                "label": "Listen along", "url": format!("https://moosik.dev/#join/{room}")
+            })
+        );
+        assert_eq!(
+            json["assets"]["small_image"],
+            "https://moosik.dev/assets/discord/playing.gif"
         );
     }
 
@@ -347,7 +387,11 @@ mod tests {
         };
         let json = serde_json::to_value(paused.activity()).unwrap();
         assert!(json.get("timestamps").is_none());
-        assert_eq!(json["details"], "Never Gonna Give You Up");
+        assert_eq!(
+            json["assets"]["small_image"],
+            "https://moosik.dev/assets/discord/paused.png"
+        );
+        assert_eq!(json["details"], "Never Gonna Give You Up - Rick Astley");
     }
 
     /// When the model carries no cover, or one too long for Discord's proxy, the short still
@@ -422,7 +466,10 @@ mod tests {
             ..presence()
         };
         let json = serde_json::to_value(local.activity()).unwrap();
-        assert!(json.get("buttons").is_none());
+        assert_eq!(
+            json["buttons"],
+            serde_json::json!([{"label": "Try Moosik.dev", "url": "https://moosik.dev"}])
+        );
         assert_eq!(
             json["assets"]["large_image"],
             "https://example.test/cover.jpg"
@@ -435,7 +482,7 @@ mod tests {
             ..presence()
         };
         let json = serde_json::to_value(long.activity()).unwrap();
-        assert!(json.get("assets").is_none());
+        assert!(json["assets"].get("large_image").is_none());
     }
 
     /// The two text fields are capped, and an empty one is left out entirely rather than sent as
@@ -445,6 +492,7 @@ mod tests {
         let long = Presence {
             title: "t".repeat(TEXT_LIMIT + 40),
             artist: "   ".into(),
+            album: None,
             ..presence()
         };
         let json = serde_json::to_value(long.activity()).unwrap();

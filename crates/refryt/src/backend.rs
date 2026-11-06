@@ -945,6 +945,40 @@ impl Drop for Backend {
 }
 
 impl Backend {
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Handle {
+        self.rt.handle()
+    }
+
+    pub(crate) fn cancel_play(&self) -> u64 {
+        self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub(crate) fn shared_song(&self, id: String) -> Receiver<Option<Track>> {
+        let (tx, rx) = channel();
+        let api = self.api.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            let track = api
+                .mix(&id)
+                .await
+                .ok()
+                .and_then(|q| q.tracks.into_iter().find(|t| t.video_id == id))
+                .or_else(|| {
+                    VideoId::new(&id).ok().map(|_| {
+                        crate::listening::Metadata {
+                            id,
+                            title: "Shared song".into(),
+                            ..Default::default()
+                        }
+                        .to_track()
+                    })
+                });
+            let _ = tx.send(track);
+            ctx.request_repaint();
+        });
+        rx
+    }
+
     pub fn new(ctx: egui::Context) -> anyhow::Result<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             // Two workers is plenty: this app does a handful of concurrent HTTP requests, and
@@ -2320,6 +2354,9 @@ impl Backend {
                 .ok()
                 .and_then(|guard| guard.get(&track.video_id).cloned())
                 .filter(|path| path.is_file());
+            if scrobble.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             if let Some(path) = downloaded {
                 let event = match player::load(
                     &mpv,
@@ -2396,6 +2433,9 @@ impl Backend {
 
             let event = match resolver.resolve(&id).await {
                 Ok(stream) => {
+                    if scrobble.generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
                     let url = playable_url(proxy.as_deref(), &id, &stream);
                     match player::load(
                         &mpv,
@@ -2463,6 +2503,9 @@ impl Backend {
                 Ok(id) => resolver.resolve_video(&id).await,
                 Err(e) => Err(e),
             };
+            if scrobble.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
             let load = match &direct {
                 Ok(stream) => player::load_video(
                     &mpv,

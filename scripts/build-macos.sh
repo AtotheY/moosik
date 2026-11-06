@@ -112,6 +112,7 @@ if [ "$app_name" = Moosik ]; then
     /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$app/Contents/Info.plist" 2>/dev/null || true
     rm -f "$app/Contents/Resources/Assets.car"
     "$root/scripts/prepare-macos-media-helper.sh" "$app"
+    plutil -replace CFBundleURLTypes -json "$(cat "$root/packaging/macos/url-types.json")" "$app/Contents/Info.plist"
     "$root/scripts/prepare-macos-updater.sh" "$app"
 fi
 
