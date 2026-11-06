@@ -835,27 +835,95 @@ fn sign_in(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(10.0);
     }
 
-    widgets::setting_group(ui, &p, Some("Sign in"), |ui, g| {
-        g.free(ui, |ui| {
-            ui.label(
-                RichText::new("Sign in to see your library and playlists.")
-                    .font(theme::medium(13.0))
-                    .color(p.text),
+    ui.add_enabled_ui(!app.sign_in_busy, |ui| {
+        widgets::setting_group(ui, &p, Some("Sign in to YouTube Music"), |ui, g| {
+            let browsers = app
+                .detected_browsers
+                .get_or_insert_with(|| {
+                    if crate::flatpak::sandboxed() {
+                        Vec::new()
+                    } else {
+                        browser_cookies::detected()
+                    }
+                })
+                .clone();
+            let has_browsers = !browsers.is_empty();
+            if has_browsers {
+                browser_logins(app, ui, g, browsers);
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+            g.wide_row(
+                ui,
+                "Sign in with Google",
+                "Opens a separate sign-in window.",
+                |ui| {
+                    let button = if !has_browsers {
+                        widgets::pill_button(ui, &p, "Open sign-in window")
+                    } else {
+                        widgets::outline_button(ui, &p, "Open sign-in window")
+                    };
+                    if button.clicked() {
+                        app.login_browser = None;
+                        app.sign_in_error = None;
+                        app.sign_in_busy = true;
+                        app.backend.sign_in_from_window();
+                    }
+                },
             );
-            ui.label(
-                RichText::new("Search and playback work without one.")
-                    .font(theme::regular(11.0))
-                    .color(p.dim),
-            );
+            paste_cookies(app, ui, g);
         });
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        window_sign_in(app, ui, g);
-        // The sandbox cannot read a browser's profile folder, so there would be nothing to find.
-        if !crate::flatpak::sandboxed() {
-            browser_import(app, ui, g);
-        }
-        paste_cookies(app, ui, g);
     });
+}
+
+fn browser_logins(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    g: &mut widgets::Group,
+    browsers: Vec<browser_cookies::Browser>,
+) {
+    let p = app.palette;
+    g.wide_row(
+        ui,
+        "Use a browser login",
+        "Choose the browser you use for YouTube Music.",
+        |ui| {
+            for (i, browser) in browsers.into_iter().enumerate() {
+                let label = if app.sign_in_busy && app.login_browser.as_ref() == Some(&browser) {
+                    format!("Checking {}…", browser.label)
+                } else {
+                    format!("Use my {} login", browser.label)
+                };
+                let button = if i == 0 {
+                    widgets::pill_button(ui, &p, &label)
+                } else {
+                    widgets::outline_button(ui, &p, &label)
+                };
+                if button.clicked() {
+                    app.import_from(browser);
+                }
+            }
+        },
+    );
+    if let Some(browser) = &app.login_browser
+        && app.sign_in_error.is_some()
+    {
+        let label = browser.label;
+        g.wide_row(
+            ui,
+            &format!("Sign in to YouTube Music in {label}"),
+            "Then return here and choose the same login again.",
+            |ui| {
+                if widgets::outline_button(ui, &p, &format!("Open {label}")).clicked()
+                    && let Err(error) = browser.open_music()
+                {
+                    tracing::warn!(%error, label, "could not launch the selected browser");
+                    app.sign_in_error = Some(format!(
+                        "Couldn’t open {label}. Open music.youtube.com in {label} yourself."
+                    ));
+                }
+            },
+        );
+    }
 }
 
 /// The way in when neither of the others can be used: the cookie header from a browser's
@@ -871,115 +939,6 @@ fn paste_cookies(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
     );
     if clicked {
         app.paste_cookies_open = true;
-    }
-}
-
-/// The path that needs no browser already signed in: the app's own window owns the session it
-/// creates. On Windows that is also the only path that works at all — a modern Chromium's cookie
-/// store is sealed with App-Bound Encryption, so the only process that can read it is the browser
-/// itself, and this window is one. See [`crate::webview_login`].
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-fn window_sign_in(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
-    let p = app.palette;
-    let mut clicked = false;
-    g.row(
-        ui,
-        "Sign-in window",
-        "Signs in through Google in a small window of its own.",
-        |ui| clicked = widgets::pill_button(ui, &p, "Sign in").clicked(),
-    );
-    if clicked {
-        // Deliberately not `auth = Checking`: that state means "verifying a stored session at
-        // startup", and `AuthChanged` reads it to tell an optimistically personalised feed from
-        // an anonymous one a fresh sign-in has just invalidated. The state changes when the
-        // attempt actually lands.
-        app.backend.sign_in_from_window();
-    }
-}
-
-/// The path that works: read the cookies out of a browser that is already signed in.
-fn browser_import(app: &mut App, ui: &mut egui::Ui, g: &mut widgets::Group) {
-    let title = if cfg!(any(
-        target_os = "linux",
-        target_os = "windows",
-        target_os = "macos"
-    )) {
-        "Or import from a browser"
-    } else {
-        "Import from a browser"
-    };
-    let browsers = app
-        .detected_browsers
-        .get_or_insert_with(browser_cookies::detected)
-        .clone();
-    if browsers.is_empty() {
-        g.row(
-            ui,
-            title,
-            if cfg!(target_os = "windows") {
-                "No browser found that Moosik can read: Firefox-based ones and Helium work, Chrome and Edge don't. Sign in to music.youtube.com there, or use the window above."
-            } else {
-                "No browser found. Sign in to music.youtube.com in your browser first."
-            },
-            |_| {},
-        );
-        return;
-    }
-    // No "close the browser first" hint up front: Firefox-based browsers neither lock their store
-    // nor seal it, and the sealed Chromium ones are not shown on Windows at all (see
-    // `browser_cookies::readable_on`). A Chromium one that is shown there, Helium for one, does
-    // lock its store while it runs; the import's error says to close it when that happens.
-    let detail = "Uses the session from a browser you're signed in to.";
-    g.row(ui, title, detail, |ui| import_controls(app, ui, &browsers));
-}
-
-/// The browser import's button, on Home and in Settings. With one browser found it imports from
-/// it; with several it opens a menu of them, the one used most recently first.
-pub(crate) fn import_controls(
-    app: &mut App,
-    ui: &mut egui::Ui,
-    browsers: &[browser_cookies::Browser],
-) {
-    let p = app.palette;
-    let busy = app.browser_importing;
-    let label = if busy {
-        "Importing…"
-    } else {
-        "Import from browser"
-    };
-    let button = ui
-        .add_enabled_ui(!busy, |ui| widgets::outline_button(ui, &p, label))
-        .inner;
-    let mut chosen = None;
-    if let [only] = browsers {
-        if button.clicked() {
-            chosen = Some(only.arg.clone());
-        }
-    } else {
-        egui::Popup::new(
-            ui.id().with("import-choose-browser"),
-            ui.ctx().clone(),
-            &button,
-            ui.layer_id(),
-        )
-        .kind(egui::PopupKind::Menu)
-        .frame(widgets::menu_frame(ui, &p))
-        .layout(egui::Layout::top_down_justified(egui::Align::Min))
-        .width(widgets::MENU_WIDTH)
-        .gap(4.0)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .open_memory(button.clicked().then_some(egui::SetOpenCommand::Toggle))
-        .show(|mui| {
-            for b in browsers {
-                if widgets::menu_item_plain(mui, &p, b.label, None).clicked() {
-                    chosen = Some(b.arg.clone());
-                    mui.close();
-                }
-            }
-        });
-    }
-    if let Some(arg) = chosen {
-        app.import_from(arg);
     }
 }
 

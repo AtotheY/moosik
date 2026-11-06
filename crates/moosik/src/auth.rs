@@ -300,7 +300,7 @@ pub fn validate_cookie(cookie: &str) -> Result<()> {
     }
     anyhow::bail!(
         "this cookie is missing {}. Those are HttpOnly, so `document.cookie` cannot show them. \
-         Use Import from browser, or copy the cookie from DevTools → Network → right-click a \
+         Choose a browser login, or copy the cookie from DevTools → Network → right-click a \
          request → Copy as cURL.",
         missing.join(", ")
     )

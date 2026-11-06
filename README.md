@@ -71,7 +71,7 @@ cargo run --locked --release -p moosik --bin moosik
 
 ## Account and playlists
 
-Google sign-in opens an embedded web view. On macOS, Moosik stores the saved YouTube session in Keychain. Windows and Linux use session files.
+Choose **Sign in**, then **Use my [browser] login** to use an existing YouTube Music session. If you need to sign in again, open that browser from Moosik, sign in to YouTube Music, and choose the same login again. **Open sign-in window** works independently of browser import, including in Flatpak and on Windows with protected Chrome or Edge profiles. On macOS, Moosik stores the saved YouTube session in Keychain. Windows and Linux use session files.
 
 YouTube playlist edits sync to your account and follow each playlist's visibility settings. Choose **Save privately** to keep a playlist on this computer.
 

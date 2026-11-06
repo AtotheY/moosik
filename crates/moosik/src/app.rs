@@ -1531,12 +1531,11 @@ pub struct App {
     /// at startup), and kept for the rest of the session.
     pub(crate) logo: Option<egui::TextureHandle>,
 
-    /// Which browsers have a cookie profile on disk, for the sign-in page's "Import from a
-    /// browser" list. Cached the same way as `logo` above (lazily, on first Settings visit) since
-    /// this cannot change without a restart or a new browser profile being created mid-session.
+    /// Detected on entry to sign-in. Only the browser explicitly chosen is read.
     pub(crate) detected_browsers: Option<Vec<crate::browser_cookies::Browser>>,
-    /// A browser import is under way: the Import buttons read "Importing…" until it lands.
-    pub(crate) browser_importing: bool,
+    pub(crate) sign_in_busy: bool,
+    /// Remembers which browser to open or retry if its login could not be used.
+    pub(crate) login_browser: Option<crate::browser_cookies::Browser>,
 
     /// What the Settings page shows about authentication.
     pub(crate) auth: crate::auth::AuthState,
@@ -2144,7 +2143,8 @@ impl App {
             pending_page_action: None,
             logo: None,
             detected_browsers: None,
-            browser_importing: false,
+            sign_in_busy: false,
+            login_browser: None,
             auth,
             startup_splash: checking,
             sign_in_error: None,
@@ -4863,24 +4863,18 @@ impl App {
         self.backend.search_scoped(self.searched.clone(), scope);
     }
 
-    /// Open the sign-in window: what every Sign in button outside Settings does. The prompts on
-    /// Home, Library and History used to only go to Settings, where a second Sign in opened it.
-    /// Elsewhere there is no window, and Settings' browser import is the way in.
+    /// All sign-in entry points share the Account tab and its platform-aware choices.
     pub(crate) fn sign_in(&mut self) {
-        // Deliberately not `auth = Checking`: that state means "verifying a stored session at
-        // startup", which is what tells `AuthChanged` whether the loaded home feed was already
-        // personalised or is the anonymous one this sign-in just invalidated. Same reason as the
-        // Settings buttons.
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        self.backend.sign_in_from_window();
-        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        self.settings_tab = ui::settings::SettingsTab::Account;
+        self.detected_browsers = None;
         self.navigate(Route::Settings);
     }
 
-    /// Import from `arg`, a browser found by `browser_cookies::detected`.
-    pub(crate) fn import_from(&mut self, arg: String) {
-        self.browser_importing = true;
-        self.backend.sign_in_from_browser(arg);
+    pub(crate) fn import_from(&mut self, browser: crate::browser_cookies::Browser) {
+        self.sign_in_busy = true;
+        self.sign_in_error = None;
+        self.backend.sign_in_from_browser(browser.arg.clone());
+        self.login_browser = Some(browser);
     }
 
     /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
@@ -5696,7 +5690,7 @@ impl App {
                 Event::AccountsLoaded { .. } => {}
 
                 Event::SignInFailed { error } => {
-                    self.browser_importing = false;
+                    self.sign_in_busy = false;
                     self.sign_in_error = Some(error);
                     // The reason is shown on the Account tab, so that is where Settings opens.
                     self.settings_tab = ui::settings::SettingsTab::Account;
@@ -5726,11 +5720,12 @@ impl App {
                     // (which is why a liked song restored at launch, or played from a card,
                     // could show unrated in the bar all session).
                     self.auth = state;
-                    self.browser_importing = false;
+                    self.sign_in_busy = false;
                     match &self.auth {
                         // A fresh session invalidates any previously fetched library.
                         crate::auth::AuthState::SignedIn { .. } => {
                             self.library_loaded = false;
+                            self.login_browser = None;
                             self.sign_in_error = None;
                             // Only a *real* transition into signed-in — from
                             // `SignedOut`/`Failed`, finishing sign-in from Settings mid-session

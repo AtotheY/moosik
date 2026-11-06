@@ -15,6 +15,8 @@
 //! plain SQLite. `yt-dlp` already implements all of that, and this project already requires
 //! `yt-dlp` for stream resolution — so importing costs one subprocess and no new dependency.
 
+mod launch;
+
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -334,12 +336,23 @@ pub fn label_for(arg: &str) -> String {
 pub async fn import(browser: &str) -> Result<String> {
     // The name, never the argument: that can be a whole profile path.
     let label = label_for(browser);
-    let path = temp_jar()?;
-    // Best effort cleanup even on the error paths below.
-    let _guard = Cleanup(path.clone());
+    // yt-dlp writes all domains before we filter. Keep the export private for its entire lifetime.
+    let mut temp = tempfile::Builder::new();
+    temp.prefix("moosik-login-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = temp
+        .tempdir()
+        .context("could not create a private browser import folder")?;
+    let path = dir.path().join("cookies.txt");
 
     let mut cmd = Command::new(crate::backend::yt_dlp_program());
-    cmd.arg("--cookies-from-browser")
+    cmd.kill_on_drop(true)
+        .arg("--ignore-config")
+        .arg("--cookies-from-browser")
         .arg(browser)
         .arg("--cookies")
         .arg(&path);
@@ -378,28 +391,6 @@ pub async fn import(browser: &str) -> Result<String> {
     Ok(cookie)
 }
 
-/// Delete the exported jar as soon as we are done with it: it is a credential.
-struct Cleanup(PathBuf);
-
-impl Drop for Cleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn temp_jar() -> Result<PathBuf> {
-    let dir = std::env::temp_dir();
-    let unique = format!(
-        "moosik-cookies-{}-{}.txt",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default()
-    );
-    Ok(dir.join(unique))
-}
-
 /// Turn a Netscape cookie jar into a `Cookie` header, keeping only youtube.com.
 ///
 /// The format is one tab-separated record per line: domain, include-subdomains, path, secure,
@@ -421,7 +412,8 @@ pub fn cookie_header(jar: &str) -> String {
         let [domain, _, _, _, _, name, value] = fields[..] else {
             continue;
         };
-        if !domain.contains("youtube.com") || name.is_empty() {
+        let domain = domain.trim_start_matches('.');
+        if !(domain == "youtube.com" || domain.ends_with(".youtube.com")) || name.is_empty() {
             continue;
         }
         if values.insert(name.to_owned(), value.to_owned()).is_none() {
@@ -439,6 +431,12 @@ pub fn cookie_header(jar: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignores_lookalike_domains_during_browser_sign_in() {
+        let jar = "#HttpOnly_.notyoutube.com\tTRUE\t/\tTRUE\t0\tHSID\twrong\n.youtube.com.evil.test\tTRUE\t/\tTRUE\t0\tSID\twrong";
+        assert!(cookie_header(jar).is_empty());
+    }
 
     const JAR: &str = "\
 # Netscape HTTP Cookie File

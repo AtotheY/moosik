@@ -189,6 +189,8 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
         // session `install_cookie` saves.
         let raw = std::mem::take(&mut app.pasted_cookie);
         app.sign_in_error = None;
+        app.login_browser = None;
+        app.sign_in_busy = true;
         app.backend.sign_in_with_cookie(raw);
         app.paste_cookies_open = false;
     } else if close {

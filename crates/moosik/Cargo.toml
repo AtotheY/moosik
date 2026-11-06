@@ -25,6 +25,7 @@ skrifa = "0.44"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "cookies", "http2"] }
 serde.workspace = true
 serde_json.workspace = true
+tempfile = "3"
 tokio.workspace = true
 # The crash report's prefilled issue URL.
 url.workspace = true
