@@ -50,18 +50,36 @@ $app=Start-Process "$dest/refryt.exe" -PassThru
 Start-Sleep 12
 $button=Find-Button
 if (!$button) { throw 'Running Moosik button not found' }
-Click-Element $button $true
-# This is the first pin of a clean test install. Explorer opens the jump list
-# with Moosik focused, followed by "Pin to taskbar". Some Windows builds do
-# not expose these menu items through UI Automation, but accept menu keys.
 $keys=New-Object -ComObject WScript.Shell
-$keys.SendKeys('{DOWN}{ENTER}')
-Start-Sleep 2
+$profilePins=Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar'
+$pinCommand=New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::NameProperty, 'Pin to taskbar')
+# Wait for a real Explorer pin before closing the old app. Depending on its
+# initial focus, sending Down immediately can activate a different menu item.
+foreach ($fallback in @('{DOWN}', '{END}{UP}', '{HOME}{DOWN}')) {
+    Click-Element $button $true
+    $menuItem=[System.Windows.Automation.AutomationElement]::RootElement.FindFirst($scope,$pinCommand)
+    if ($menuItem -and !$menuItem.Current.IsOffscreen -and $menuItem.Current.BoundingRectangle.Width -gt 0) {
+        Click-Element $menuItem $false
+    } else {
+        $keys.SendKeys($fallback)
+        Start-Sleep -Milliseconds 400
+        Write-Host "Explorer focus: $([System.Windows.Automation.AutomationElement]::FocusedElement.Current.Name)"
+        $keys.SendKeys('{ENTER}')
+    }
+    for ($i=0; $i -lt 10; $i++) {
+        if (Get-ChildItem $profilePins -Filter 'Moosik*.lnk') { break }
+        Start-Sleep -Milliseconds 400
+    }
+    if (Get-ChildItem $profilePins -Filter 'Moosik*.lnk') { break }
+    $keys.SendKeys('{ESC}')
+    $button=Find-Button
+    if (!$button) { throw 'Old Moosik window disappeared before it was pinned' }
+}
 [Mouse]::SetCursorPos(30,30) | Out-Null
 Stop-Process -Id $app.Id
 Start-Sleep 3
 if (!(Find-Button)) { throw 'Moosik not pinned after closing old version' }
-$profilePins=Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar'
 function Show-Pins {
     Get-ChildItem $profilePins -Filter '*.lnk' | ForEach-Object {
         $link=$keys.CreateShortcut($_.FullName)
@@ -75,7 +93,11 @@ Start-Sleep 12
 $icon=Join-Path $dest 'icons\amber.ico'
 Show-Pins
 $pin=(Get-ChildItem $profilePins -Filter 'Moosik*.lnk' | Select-Object -First 1).FullName
-if (!$pin -or $keys.CreateShortcut($pin).IconLocation -ne "$icon,0") {throw 'Legacy pin was not migrated'}
+if (!$pin) { throw 'Legacy pin disappeared during upgrade' }
+$upgradedLink=$keys.CreateShortcut($pin)
+if ($upgradedLink.IconLocation -ne "$icon,0" -or $upgradedLink.TargetPath -ne (Join-Path $dest 'moosik.exe')) {
+    throw 'Legacy pin did not migrate to the new executable and selected icon'
+}
 $app.Refresh()
 & "$PSScriptRoot/windows-taskbar.ps1" -Window $app.MainWindowHandle -Exe (Join-Path $dest 'moosik.exe') -Icon $icon -Pin $pin
 if (!(Find-Button)) {throw 'No running Moosik taskbar button'}
