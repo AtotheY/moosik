@@ -1941,6 +1941,7 @@ fn same_queue(a: &[Track], b: &[Track]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.video_id == y.video_id)
 }
 
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How long "Later" on the update window keeps the launch check quiet about that release.
 const UPDATE_LATER_SECS: i64 = 24 * 60 * 60;
 
@@ -2327,12 +2328,13 @@ impl App {
                 Err(e) => tracing::warn!(error = %e, "native updater unavailable"),
             }
         }
-        if !app.update.native
-            && !startup_timing
-            && app.screenshot.is_none()
-            && app.stats_after.is_none()
-        {
-            app.update.next_check = Some(Instant::now());
+        if !startup_timing && app.screenshot.is_none() && app.stats_after.is_none() {
+            // Sparkle checks at startup itself. The shared timer covers the rest of the session.
+            app.update.next_check = Some(if app.update.native {
+                Instant::now() + UPDATE_CHECK_INTERVAL
+            } else {
+                Instant::now()
+            });
         }
         if let Some(after) = tray_test {
             app.spawn_tray_test(after);
@@ -2630,6 +2632,8 @@ impl App {
                     self.update.checking = true;
                     self.backend.check_update_feed(url);
                 }
+            } else {
+                crate::update::macos::check_in_background();
             }
             return;
         }
@@ -8234,12 +8238,12 @@ impl eframe::App for App {
     /// minimized window played its song out and stopped there, and answered no media key.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
-        if self.settings.check_for_updates
+        if (self.update.native || self.settings.check_for_updates)
             && let Some(next) = self.update.next_check
         {
             let now = Instant::now();
             if now >= next {
-                self.update.next_check = Some(now + Duration::from_secs(15 * 60));
+                self.update.next_check = Some(now + UPDATE_CHECK_INTERVAL);
                 if !self.update.open && self.update.progress.is_none() {
                     self.check_for_update(false);
                 }

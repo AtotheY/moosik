@@ -64,15 +64,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     // pointer position, so a pointer-anchored popup would never render.
     account_menu(app, &mut right, &chip, signed_in);
     right.add_space(2.0);
-    // Listening history beside the chip, as a clock — it is a page, not a setting.
-    // Settings itself lives only under the chip, which carries it in every state. One door,
-    // one keyhole — a second gear beside the chip was two doors to the same room.
-    if widgets::icon_button(&mut right, &p, Icon::History, 18.0, false)
-        .on_hover_text(crate::ui::tips::HISTORY)
-        .clicked()
-    {
-        app.navigate(Route::History);
-    }
+    // This group lays out right to left: put an available update directly beside the avatar.
     if app.update.notice
         && let Some(release) = &app.update.available
     {
@@ -90,6 +82,12 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 app.show_update();
             }
         }
+    }
+    if widgets::icon_button(&mut right, &p, Icon::History, 18.0, false)
+        .on_hover_text(crate::ui::tips::HISTORY)
+        .clicked()
+    {
+        app.navigate(Route::History);
     }
     // Whatever the right group took, plus a gap so the search never touches it.
     let reserved = (rect.right() - right.min_rect().left()).max(0.0) + RIGHT_GAP;

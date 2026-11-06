@@ -20,7 +20,7 @@ pub(crate) struct State {
     pub(crate) open: bool,
     /// A check is in flight.
     pub(crate) checking: bool,
-    /// Only set for interactive builds using the GitHub checker. Sparkle schedules its own.
+    /// Next automatic check for an interactive session.
     pub(crate) next_check: Option<std::time::Instant>,
     /// A check found nothing newer, which About says until the next one.
     pub(crate) up_to_date: bool,
@@ -188,7 +188,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// A lit download glyph beside History. During a download the rim fills clockwise.
+/// A lit download glyph beside the profile picture. During a download the rim fills clockwise.
 pub(crate) fn indicator(
     ui: &mut egui::Ui,
     p: &theme::Palette,

@@ -92,6 +92,10 @@ extern "C" fn current(_: &AnyObject, _: Sel, _: &AnyObject) {
     emit(Event::Current);
 }
 extern "C" fn failed(_: &AnyObject, _: Sel, _: &AnyObject, error: &NSError) {
+    // Sparkle also reports SUNoUpdateError after the ordinary "current" callback.
+    if error.code() == 1001 && error.domain().to_string() == "SUSparkleErrorDomain" {
+        return;
+    }
     // Sparkle presents manual errors itself; the app records the status without a second alert.
     emit(Event::Failed(error.localizedDescription().to_string()));
 }
@@ -232,12 +236,6 @@ pub(crate) fn start(ctx: &egui::Context, legacy_automatic: bool) -> Result<bool>
         ));
     }
     let _ = CONTEXT.set(ctx.clone());
-    let automatic: Bool = unsafe { msg_send![&*updater, automaticallyChecksForUpdates] };
-    if automatic.as_bool() {
-        unsafe {
-            let _: () = msg_send![&*updater, checkForUpdatesInBackground];
-        }
-    }
     NATIVE.with(|n| {
         *n.borrow_mut() = Some(Native {
             _framework: framework,
@@ -246,8 +244,29 @@ pub(crate) fn start(ctx: &egui::Context, legacy_automatic: bool) -> Result<bool>
             feed_url,
         })
     });
+    check_in_background();
     Ok(true)
 }
+
+/// Sparkle owns the session, preference and staged installer. Never interrupt them to poll.
+pub(crate) fn check_in_background() {
+    if PREPARED.with(|slot| slot.borrow().is_some()) {
+        return;
+    }
+    NATIVE.with(|n| {
+        if let Some(native) = n.borrow().as_ref() {
+            unsafe {
+                let updater: Retained<AnyObject> = msg_send![&*native.controller, updater];
+                let automatic: Bool = msg_send![&*updater, automaticallyChecksForUpdates];
+                let busy: Bool = msg_send![&*updater, sessionInProgress];
+                if automatic.as_bool() && !busy.as_bool() {
+                    let _: () = msg_send![&*updater, checkForUpdatesInBackground];
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn feed_url() -> Option<String> {
     NATIVE.with(|n| n.borrow().as_ref().map(|native| native.feed_url.clone()))
 }
