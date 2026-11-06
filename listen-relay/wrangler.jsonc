@@ -3,9 +3,77 @@
   "main": "worker.mjs",
   "compatibility_date": "2026-11-06",
   "workers_dev": false,
-  "routes": [{ "pattern": "rooms.moosik.dev", "custom_domain": true }],
-  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "Room" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
-  "ratelimits": [{ "name": "CREATIONS", "namespace_id": "60261", "simple": { "limit": 30, "period": 60 } }],
-  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false }, "traces": { "enabled": false } }
+  "routes": [
+    {
+      "pattern": "rooms.moosik.dev",
+      "custom_domain": true
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "Room"
+      },
+      {
+        "name": "BUDGET",
+        "class_name": "RelayBudget"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Room"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "RelayBudget"
+      ]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "CREATIONS",
+      "namespace_id": "60261",
+      "simple": {
+        "limit": 4,
+        "period": 60
+      }
+    },
+    {
+      "name": "TRAFFIC",
+      "namespace_id": "60262",
+      "simple": {
+        "limit": 480,
+        "period": 60
+      }
+    },
+    {
+      "name": "ADMISSIONS",
+      "namespace_id": "60263",
+      "simple": {
+        "limit": 40,
+        "period": 60
+      }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    },
+    "traces": {
+      "enabled": false
+    }
+  },
+  "secrets": {
+    "required": [
+      "ROOM_SIGNING_KEY"
+    ]
+  }
 }
