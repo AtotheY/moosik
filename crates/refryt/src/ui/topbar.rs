@@ -76,11 +76,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             format!("Moosik {} is available", release.version)
         };
         if crate::ui::update::indicator(&mut right, &p, &tip, app.update.progress) {
-            if release.installable() {
-                app.install_update();
-            } else {
-                app.show_update();
-            }
+            app.activate_update();
         }
     }
     if widgets::icon_button(&mut right, &p, Icon::History, 18.0, false)

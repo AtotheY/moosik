@@ -163,7 +163,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         app.check_for_update(true);
     }
     if show {
-        app.show_update();
+        app.activate_update();
     }
 
     if app.logo.is_none() {

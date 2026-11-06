@@ -2645,14 +2645,15 @@ impl App {
         self.backend.check_for_update(delay, manual);
     }
 
-    /// Open the update found by the badge, About tab, or manual check.
-    pub(crate) fn show_update(&mut self) {
-        #[cfg(target_os = "macos")]
-        if self.update.native {
-            self.check_for_update(true);
-            return;
+    /// Both the toolbar and About act on the release already offered to the user.
+    pub(crate) fn activate_update(&mut self) {
+        if let Some(release) = &self.update.available {
+            if release.installable() {
+                self.install_update();
+            } else {
+                self.update.open = true;
+            }
         }
-        self.update.open = true;
     }
 
     /// Download and install the release the check found. The window closes once it is ready.
@@ -2665,10 +2666,11 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         if release.native {
-            if crate::update::macos::install_prepared() {
-                return;
+            if !crate::update::macos::install_prepared() {
+                // Bring Sparkle's existing offer or download to the front, even if
+                // a previous manual check is still marked in progress.
+                crate::update::macos::check();
             }
-            self.check_for_update(true);
             return;
         }
         self.update.progress = Some(0.0);
@@ -5066,7 +5068,10 @@ impl App {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                Event::NativeUpdateFeedReady => crate::update::macos::check(),
+                Event::NativeUpdateFeedReady => {
+                    self.update.checking = false;
+                    crate::update::macos::check();
+                }
                 Event::UpdateProgress { percent } => {
                     if self.update.progress.is_some() {
                         self.update.progress = Some(percent);
