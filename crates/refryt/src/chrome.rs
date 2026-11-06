@@ -50,65 +50,74 @@ pub fn paint_background(ui: &Ui, palette: &Palette, rounded: bool) {
 
 /// Invisible grab bands around the window edge that start a native resize.
 ///
-/// Corners are checked before edges so the diagonal directions win in the overlap, which is what
-/// makes dragging a corner feel right.
+/// The straight bands end where the corner targets begin, so each drag has one direction.
 pub fn resize_handles(ui: &Ui) {
     let ctx = ui.ctx();
     let rect = ctx.content_rect();
     let h = theme::RESIZE_HANDLE;
 
+    let corner = 2.0 * h;
+    let corner_size = vec2(corner, corner);
+    let horizontal = rect.shrink2(vec2(corner, 0.0));
+    let vertical = rect.shrink2(vec2(0.0, corner));
     let corners = [
         (
-            Rect::from_min_size(rect.left_top(), vec2(h, h)),
+            Rect::from_min_size(rect.left_top(), corner_size),
             ResizeDirection::NorthWest,
             egui::CursorIcon::ResizeNwSe,
         ),
         (
-            Rect::from_min_size(rect.right_top() - vec2(h, 0.0), vec2(h, h)),
+            Rect::from_min_size(rect.right_top() - vec2(corner, 0.0), corner_size),
             ResizeDirection::NorthEast,
             egui::CursorIcon::ResizeNeSw,
         ),
         (
-            Rect::from_min_size(rect.left_bottom() - vec2(0.0, h), vec2(h, h)),
+            Rect::from_min_size(rect.left_bottom() - vec2(0.0, corner), corner_size),
             ResizeDirection::SouthWest,
             egui::CursorIcon::ResizeNeSw,
         ),
         (
-            Rect::from_min_size(rect.right_bottom() - vec2(h, h), vec2(h, h)),
+            Rect::from_min_size(rect.right_bottom() - corner_size, corner_size),
             ResizeDirection::SouthEast,
             egui::CursorIcon::ResizeNwSe,
         ),
     ];
     let edges = [
         (
-            Rect::from_min_size(rect.left_top(), vec2(rect.width(), h)),
+            Rect::from_min_size(horizontal.left_top(), vec2(horizontal.width(), h)),
             ResizeDirection::North,
             egui::CursorIcon::ResizeVertical,
         ),
         (
-            Rect::from_min_size(rect.left_bottom() - vec2(0.0, h), vec2(rect.width(), h)),
+            Rect::from_min_size(
+                horizontal.left_bottom() - vec2(0.0, h),
+                vec2(horizontal.width(), h),
+            ),
             ResizeDirection::South,
             egui::CursorIcon::ResizeVertical,
         ),
         (
-            Rect::from_min_size(rect.left_top(), vec2(h, rect.height())),
+            Rect::from_min_size(vertical.left_top(), vec2(h, vertical.height())),
             ResizeDirection::West,
             egui::CursorIcon::ResizeHorizontal,
         ),
         (
-            Rect::from_min_size(rect.right_top() - vec2(h, 0.0), vec2(h, rect.height())),
+            Rect::from_min_size(
+                vertical.right_top() - vec2(h, 0.0),
+                vec2(h, vertical.height()),
+            ),
             ResizeDirection::East,
             egui::CursorIcon::ResizeHorizontal,
         ),
     ];
 
-    for (i, (zone, dir, cursor)) in corners.iter().chain(edges.iter()).enumerate() {
+    for (i, (zone, dir, cursor)) in edges.iter().chain(corners.iter()).enumerate() {
         let id = egui::Id::new("ytm-resize").with(i);
         let r = ui.interact(*zone, id, Sense::drag());
         if r.hovered() || r.dragged() {
             ctx.set_cursor_icon(*cursor);
         }
-        if r.drag_started() {
+        if r.drag_started_by(egui::PointerButton::Primary) {
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(*dir));
         }
     }
@@ -403,6 +412,62 @@ mod macos {
             let origin = NSPoint::new(left + i as f64 * step, y);
             if button.frame().origin != origin {
                 button.setFrameOrigin(origin);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use egui::{Context, Event, Modifiers, PointerButton, Pos2, RawInput, ViewportId, pos2};
+
+    #[test]
+    fn drags_start_one_native_resize_in_the_expected_direction() {
+        for (w, h) in [(1200.0, 800.0), (620.0, 510.0)] {
+            for (p, expected) in [
+                (pos2(2.0, 2.0), ResizeDirection::NorthWest),
+                (pos2(w - 3.0, 8.0), ResizeDirection::NorthEast),
+                (pos2(8.0, h - 3.0), ResizeDirection::SouthWest),
+                (pos2(w - 2.0, h - 2.0), ResizeDirection::SouthEast),
+                (pos2(w / 2.0, 2.0), ResizeDirection::North),
+                (pos2(w / 2.0, h - 2.0), ResizeDirection::South),
+                (pos2(2.0, h / 2.0), ResizeDirection::West),
+                (pos2(w - 2.0, h / 2.0), ResizeDirection::East),
+            ] {
+                let ctx = Context::default();
+                let mut commands = Vec::new();
+                for events in [
+                    vec![],
+                    vec![Event::PointerMoved(p)],
+                    vec![Event::PointerButton {
+                        pos: p,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Modifiers::NONE,
+                    }],
+                    vec![Event::PointerMoved(p + vec2(16.0, 16.0))],
+                ] {
+                    let out = ctx.run_ui(
+                        RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(w, h))),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| resize_handles(ui),
+                    );
+                    commands.extend(
+                        out.viewport_output[&ViewportId::ROOT]
+                            .commands
+                            .iter()
+                            .filter_map(|cmd| match cmd {
+                                ViewportCommand::BeginResize(dir) => Some(*dir),
+                                _ => None,
+                            }),
+                    );
+                    out.drop_without_applying_deltas();
+                }
+                assert_eq!(commands, [expected], "drag at {p:?} in {w} x {h}");
             }
         }
     }

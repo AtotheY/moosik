@@ -1,4 +1,4 @@
-name: Moosik macOS release
+name: Moosik release
 on:
   push:
     tags: ['moosik-v*']
@@ -142,9 +142,12 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/sparkle-private.key" "$RUNNER_TEMP/moosik.p12"
           security delete-keychain "$RUNNER_TEMP/moosik-release.keychain-db" || true
+  windows:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/moosik-windows.yml
   publish:
     if: github.ref_type == 'tag'
-    needs: macos
+    needs: [macos, windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -156,8 +159,16 @@ jobs:
         with:
           name: moosik-macos
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: moosik-windows
+          path: windows
       - name: Publish a complete release
         run: |
           version="${GITHUB_REF_NAME#moosik-v}"
+          # Installed clients look up both platforms in this versioned manifest.
+          mv "windows/moosik-$version-windows-x86_64-setup.exe" "windows/moosik-$version-windows-x86_64.zip" dist/
+          cat windows/moosik-windows-SHA256SUMS.txt >> "dist/moosik-$version-SHA256SUMS.txt"
+          (cd dist && sha256sum --check "moosik-$version-SHA256SUMS.txt")
           gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --draft --title "Moosik $version" --notes-file "release-notes/$version.md"
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

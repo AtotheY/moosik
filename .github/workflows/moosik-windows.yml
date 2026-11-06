@@ -2,7 +2,7 @@ name: Moosik Windows release
 on:
   push:
     branches: [codex/windows-distribution]
-    tags: ['moosik-v*']
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
@@ -70,7 +70,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows
-      - name: Windows x64 (zip, setup, MSI)
+      - name: Windows x64 (ZIP and setup)
         run: |
           ./scripts/build-windows.sh
       - name: Verify packages exist and checksum
@@ -119,32 +119,3 @@ jobs:
           Stop-Process -Id $app.Id
           $uninstall = Start-Process "$dest/unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }
-  publish:
-    if: github.ref_type == 'tag'
-    needs: [build, smoke]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: moosik-windows
-          path: dist
-      - name: Attach tested Windows packages to the matching Moosik release
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#moosik-v}"
-          test -s "dist/moosik-$version-windows-x86_64-setup.exe"
-          # The macOS workflow creates the shared release; never create a competing release.
-          for attempt in $(seq 1 90); do
-            if gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft | grep -qx false; then
-              gh release upload "$GITHUB_REF_NAME" dist/moosik-* --clobber
-              exit 0
-            fi
-            sleep 20
-          done
-          echo 'Matching published release not ready. The Windows packages are retained as workflow artifacts.' >&2
-          exit 1

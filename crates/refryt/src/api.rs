@@ -7,6 +7,8 @@
 //! This file is the only place `ytmapi-rs` types appear; everything it returns is mapped into
 //! `model.rs`.
 
+mod home_page;
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -1400,6 +1402,34 @@ impl Api {
             .await
     }
 
+    /// A rejected unfiltered Home browse can still be served in the web homepage's initial data.
+    async fn web_home(&self) -> Result<serde_json::Value> {
+        let cookie = self.session.lock().await.as_ref().map(|s| s.cookie.clone());
+        let page_id = crate::settings::load().account_page_id;
+        let signed_in = cookie.is_some();
+        let headers = [
+            // Same browser identity ytmapi-rs uses when bootstrapping a session.
+            (
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0"
+                    .into(),
+            ),
+            ("Cookie", cookie.as_deref().unwrap_or(CONSENT_COOKIE).into()),
+        ];
+        let page = self
+            .http()
+            .await
+            .get_query("https://music.youtube.com/", headers, &())
+            .await?;
+        anyhow::ensure!(
+            page.status_code == 200,
+            "web Home returned HTTP {}",
+            page.status_code
+        );
+        home_page::feed(&page.text, signed_in, page_id.as_deref())
+            .context("web Home did not contain the requested account’s feed")
+    }
+
     /// A browse with a sort order, or the next page of one already open.
     async fn run_browse(&self, query: BrowseQuery, what: &str) -> Result<serde_json::Value> {
         self.run_browse_owned(query, what).await
@@ -1410,13 +1440,29 @@ impl Api {
             .browse_id
             .clone()
             .unwrap_or_else(|| "continuation".to_owned());
+        let initial_home =
+            browse_id == HOME && query.params.is_none() && query.continuation.is_none();
         let json = match self.client_ref().await? {
             ClientRef::NoAuth(yt) => yt.json_query(query).await,
             ClientRef::Browser(yt) => yt.json_query(query).await,
         };
-        let json = json
-            .map(ytmapi_rs::json::Json::into_inner)
-            .with_context(|| format!("could not load {what}"))?;
+        let json = match json {
+            Ok(json) => json.into_inner(),
+            Err(error) if initial_home => {
+                let kind = error.into_kind();
+                if !matches!(
+                    kind,
+                    ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse { code: 400, .. }
+                ) {
+                    anyhow::bail!("could not load {what}: {kind}");
+                }
+                tracing::info!("YouTube rejected the Home browse; trying its web homepage");
+                self.web_home()
+                    .await
+                    .with_context(|| format!("could not load {what}: {kind}"))?
+            }
+            Err(error) => return Err(error).with_context(|| format!("could not load {what}")),
+        };
         // One file per feed: a single path would be overwritten by whichever browse finished last,
         // which is never the one you are trying to look at.
         if let Some(dir) = std::env::var_os("REFRYT_DUMP_BROWSE") {
