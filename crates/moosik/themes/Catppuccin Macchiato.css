@@ -1,0 +1,25 @@
+/* Catppuccin Macchiato
+   Catppuccin: github.com/catppuccin/palette (palette.json v1.7.1).
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: dark;
+
+  --base:             #24273a;  /* the cards */
+  --text:             #cad3f5;  /* body text */
+  --accent:           #c6a0f6;  /* play buttons, selection, links */
+  --on-accent:        #181926;  /* text and icons on the accent */
+
+  --gutter:           #181926;  /* the gap behind the cards */
+  --popup:            #1e2030;  /* menus and popups */
+  --surface:          #363a4f;  /* chips, inputs */
+  --surface-hover:    #494d64;
+  --surface-active:   #5b6078;
+  --outline:          #494d64;  /* hairlines */
+  --subtext:          #b8c0e0;  /* second-rank text */
+  --muted:            #6e738d;  /* third-rank text */
+  --danger:           #ed8796;
+  --warning:          #eed49f;
+}

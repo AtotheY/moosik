@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Moosik
+GenericName=Music Player
+Comment=A fast, native YouTube Music client
+Exec=moosik %u
+MimeType=x-scheme-handler/moosik;
+Icon=io.github.AtotheY.moosik
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;youtube;player;
+StartupNotify=true

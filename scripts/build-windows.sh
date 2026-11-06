@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build dist/refryt-<version>-windows-x86_64.zip: a cross-compiled release .exe plus the one
+# Build dist/moosik-<version>-windows-x86_64.zip: a cross-compiled release .exe plus the one
 # non-system DLL it needs (libmpv-2.dll) and yt-dlp.exe, zipped up as a portable, unzip-and-run
 # folder — no installer, matching the AppImage's own "no system changes" philosophy.
 #
-# `ARCH=aarch64` builds the Windows on ARM zip instead, refryt-<version>-windows-arm64.zip, and no
+# `ARCH=aarch64` builds the Windows on ARM zip instead, moosik-<version>-windows-arm64.zip, and no
 # setup .exe: ARM's installer is the MSI that build-msi.sh makes from this zip. It is native ARM64
 # code end to end: mpv-player-windows and yt-dlp both publish
 # ARM64 builds, and WebView2's loader ships one in the same crate as the x64 copy.
@@ -24,7 +24,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "moosik"))')"
 tools=".windows-tools"
 # Everything that differs between the two architectures. The ARM64 target is the `gnullvm` one:
 # it links with llvm-mingw's clang and lld, and the mpv ARM64 package is built with the same
@@ -97,14 +97,14 @@ if [ ! -f "$mpv_dev/libmpv-2.dll" ]; then
 fi
 
 echo "building release binary for $target"
-"$cargo_bin" build --locked --release -p refryt --bin refryt --target "$target"
+"$cargo_bin" build --locked --release -p moosik --bin moosik --target "$target"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 pkg="$work/Moosik"
 mkdir -p "$pkg"
 
-cp "target/$target/release/refryt.exe" "$pkg/"
+cp "target/$target/release/moosik.exe" "$pkg/"
 # Explorer reads the pinned shortcut icon even after Moosik exits.
 python3 - "$pkg" <<'PYICONS'
 from pathlib import Path
@@ -127,7 +127,7 @@ cp "$mpv_dev/libmpv-2.dll" "$pkg/"
 # are COLRv1-only, which is the same thing Segoe UI Emoji could not be read for.
 cp assets/fonts/NotoColorEmoji.ttf "$pkg/"
 cp LICENSE "$pkg/LICENSE.txt"
-printf 'Moosik — https://github.com/AtotheY/moosik\nBased on Refryt — https://github.com/gridoe/refryt\nSource: https://github.com/AtotheY/moosik/tree/%s\nBundled playback: mpv (https://mpv.io), yt-dlp (https://github.com/yt-dlp/yt-dlp), Microsoft WebView2, Noto Color Emoji (SIL OFL).\n' "$(git rev-parse HEAD)" > "$pkg/NOTICE.txt"
+printf 'Moosik — https://github.com/AtotheY/moosik\nBased on the original work of gridoe and contributors — https://github.com/gridoe\nSource: https://github.com/AtotheY/moosik/tree/%s\nBundled playback: mpv (https://mpv.io), yt-dlp (https://github.com/yt-dlp/yt-dlp), Microsoft WebView2, Noto Color Emoji (SIL OFL).\n' "$(git rev-parse HEAD)" > "$pkg/NOTICE.txt"
 
 # WebView2's loader: the GNU targets link it dynamically (only MSVC targets
 # link the static library), so the sign-in window's one file has to travel next to the exe. It

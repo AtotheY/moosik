@@ -1,0 +1,23 @@
+/* Nord Polar Night
+   Nord: nordtheme.com/docs/colors-and-palettes.
+
+   A moosik theme. Edit and save to repaint the app; see docs/THEMES.md for every
+   variable. What a file leaves out is derived from --base, --text and --accent. */
+
+:root {
+  color-scheme: dark;
+
+  --base:             #3b4252;  /* the cards */
+  --text:             #eceff4;  /* body text */
+  --accent:           #88c0d0;  /* play buttons, selection, links */
+  --on-accent:        #2e3440;  /* text and icons on the accent */
+
+  --gutter:           #2e3440;  /* the gap behind the cards */
+  --popup:            #2e3440;  /* menus and popups */
+  --surface:          #434c5e;  /* chips, inputs */
+  --surface-hover:    #4c566a;
+  --outline:          #434c5e;  /* hairlines */
+  --subtext:          #d8dee9;  /* second-rank text */
+  --danger:           #bf616a;
+  --warning:          #ebcb8b;
+}

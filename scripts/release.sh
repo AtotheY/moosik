@@ -26,7 +26,7 @@
 #       command is the manual fallback.
 #
 #   scripts/release.sh checksums <version> [--yes]
-#       Downloads the published release's files and writes refryt-<version>-SHA256SUMS.txt for
+#       Downloads the published release's files and writes moosik-<version>-SHA256SUMS.txt for
 #       them; with --yes it is attached to the release, replacing an older one. Run it again after
 #       adding the macOS image, so the sums cover it too. Works on the Mac as well.
 #
@@ -43,7 +43,7 @@ warn() { echo "warning: $*" >&2; }
 
 current_version() {
     cargo metadata --no-deps --offline --format-version 1 \
-        | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))'
+        | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "moosik"))'
 }
 
 # Whether Cargo.lock agrees with the manifests. Resolved for this machine's platform only: the
@@ -70,7 +70,7 @@ need_clean_tree() {
 # The private build's feature must never reach a release: the patch lives outside the repo and
 # is applied only to a local tree, so a tree that has it is not a release tree.
 private_patch_applied() {
-    grep -rq "unlocked-downloads" --exclude=release.sh crates/refryt/Cargo.toml crates/refryt/src scripts 2>/dev/null
+    grep -rq "unlocked-downloads" --exclude=release.sh crates/moosik/Cargo.toml crates/moosik/src scripts 2>/dev/null
 }
 
 need_no_private_patch() {
@@ -102,14 +102,14 @@ PY
 
 artifacts() { # artifacts <version>: "<kind> <path>" lines
     local v="$1"
-    echo "appimage dist/refryt-$v-x86_64.AppImage"
-    echo "windows-zip dist/refryt-$v-windows-x86_64.zip"
-    echo "windows-setup dist/refryt-$v-windows-x86_64-setup.exe"
-    echo "windows-msi dist/refryt-$v-windows-x86_64.msi"
-    echo "windows-arm64-zip dist/refryt-$v-windows-arm64.zip"
-    echo "windows-arm64-msi dist/refryt-$v-windows-arm64.msi"
-    echo "flatpak dist/refryt-$v-x86_64.flatpak"
-    echo "macos dist/refryt-$v-macos-arm64.dmg"
+    echo "appimage dist/moosik-$v-x86_64.AppImage"
+    echo "windows-zip dist/moosik-$v-windows-x86_64.zip"
+    echo "windows-setup dist/moosik-$v-windows-x86_64-setup.exe"
+    echo "windows-msi dist/moosik-$v-windows-x86_64.msi"
+    echo "windows-arm64-zip dist/moosik-$v-windows-arm64.zip"
+    echo "windows-arm64-msi dist/moosik-$v-windows-arm64.msi"
+    echo "flatpak dist/moosik-$v-x86_64.flatpak"
+    echo "macos dist/moosik-$v-macos-arm64.dmg"
 }
 
 cmd_prep() {
@@ -154,7 +154,7 @@ tail, n = re.subn(r'^version = "%s"$' % re.escape(cur), 'version = "%s"' % new, 
 assert n == 1, "the workspace version line was not found"
 open(p, "w").write(head + sep + tail)
 # Flatpak metainfo: the newest release goes first.
-p = "packaging/flatpak/io.github.gridoe.refryt.metainfo.xml"
+p = "packaging/flatpak/io.github.AtotheY.moosik.metainfo.xml"
 s = open(p).read()
 entry = '<release version="%s" date="%s"/>' % (new, today)
 if 'version="%s"' % new not in s:
@@ -184,14 +184,14 @@ PY
         echo "== gate =="
         cargo fmt --all --check
         cargo clippy --workspace --all-targets -- -D warnings
-        cargo clippy -p refryt-resolve --features native-resolver -- -D warnings
+        cargo clippy -p moosik-resolve --features native-resolver -- -D warnings
         cargo test --workspace
         [ "$perf" = 1 ] && ./scripts/perf.sh
     else
         warn "the gate was skipped"
     fi
 
-    git add Cargo.toml Cargo.lock packaging/flatpak/io.github.gridoe.refryt.metainfo.xml
+    git add Cargo.toml Cargo.lock packaging/flatpak/io.github.AtotheY.moosik.metainfo.xml
     [ ! -f "release-notes/$v.md" ] || git add "release-notes/$v.md"
     git commit -q -m "Release $v"
     echo "committed: $(git log -1 --oneline)"
@@ -226,7 +226,7 @@ cmd_verify() {
 
     echo "== repository =="
     [ "$(current_version)" = "$v" ] && ok "Cargo.toml is $v" || bad "Cargo.toml is $(current_version), not $v"
-    grep -q "<release version=\"$v\"" packaging/flatpak/io.github.gridoe.refryt.metainfo.xml \
+    grep -q "<release version=\"$v\"" packaging/flatpak/io.github.AtotheY.moosik.metainfo.xml \
         && ok "the Flatpak metainfo lists $v" || bad "the Flatpak metainfo has no release entry for $v"
     lock_consistent && ok "Cargo.lock matches" || bad "Cargo.lock is out of step with Cargo.toml"
     if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
@@ -291,15 +291,15 @@ cmd_verify() {
             windows-zip | windows-arm64-zip)
                 local list want machines wrong
                 list="$(unzip -l "$path" 2>/dev/null)" || { bad "$path is not a readable zip"; continue; }
-                if ! grep -q "refryt.exe" <<<"$list" || ! grep -q "libmpv-2.dll" <<<"$list"; then
-                    bad "$path ($size) is missing refryt.exe or libmpv-2.dll"
+                if ! grep -q "moosik.exe" <<<"$list" || ! grep -q "libmpv-2.dll" <<<"$list"; then
+                    bad "$path ($size) is missing moosik.exe or libmpv-2.dll"
                     continue
                 fi
                 [ "$kind" = windows-zip ] && want=8664 || want=aa64
                 machines="$(pe_machines "$path")" || { bad "$path: could not read its executables"; continue; }
                 wrong="$(awk -v want="$want" '$2 != want {print $1}' <<<"$machines" | paste -sd ' ')"
                 [ -z "$wrong" ] \
-                    && ok "$path ($size): refryt.exe and libmpv-2.dll inside, all $([ "$want" = 8664 ] && echo x64 || echo ARM64)" \
+                    && ok "$path ($size): moosik.exe and libmpv-2.dll inside, all $([ "$want" = 8664 ] && echo x64 || echo ARM64)" \
                     || bad "$path ($size): built for the wrong CPU: $wrong" ;;
             windows-msi | windows-arm64-msi)
                 # The version inside has to be this one: an MSI built from an older zip upgrades
@@ -357,9 +357,9 @@ cmd_publish() {
     done < <(artifacts "$v")
     command -v gh > /dev/null || die "gh is needed to create the release"
 
-    local tag_cmd=(git tag -a "v$v" -m "refryt $v")
+    local tag_cmd=(git tag -a "v$v" -m "moosik $v")
     local push_cmd=(git push origin main "v$v")
-    local release_cmd=(gh release create "v$v" "${assets[@]}" --title "refryt $v" --notes-file "$notes")
+    local release_cmd=(gh release create "v$v" "${assets[@]}" --title "moosik $v" --notes-file "$notes")
     if git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
         tag_cmd=(true)
     fi
@@ -393,19 +393,19 @@ cmd_checksums() {
     done
     valid_version "$v" || die "usage: release.sh checksums <version> [--yes]"
     command -v gh > /dev/null || die "gh is needed to read the release"
-    local sums="refryt-$v-SHA256SUMS.txt" tmp
+    local sums="moosik-$v-SHA256SUMS.txt" tmp
     tmp="$(mktemp -d)"
     trap "rm -rf '$tmp'; trap - RETURN" RETURN
     # The files in one folder, the sums in another: written beside them, the sums file would be
     # created before the list is read and end up hashing itself.
     mkdir "$tmp/files" "$tmp/out"
-    gh release download "v$v" --dir "$tmp/files" --pattern 'refryt-*' > /dev/null
+    gh release download "v$v" --dir "$tmp/files" --pattern 'moosik-*' > /dev/null
     rm -f "$tmp/files/$sums"
     [ -n "$(ls -A "$tmp/files")" ] || die "release v$v has no files"
     if command -v sha256sum > /dev/null; then
-        (cd "$tmp/files" && sha256sum refryt-*) > "$tmp/out/$sums"
+        (cd "$tmp/files" && sha256sum moosik-*) > "$tmp/out/$sums"
     else
-        (cd "$tmp/files" && shasum -a 256 refryt-*) > "$tmp/out/$sums"
+        (cd "$tmp/files" && shasum -a 256 moosik-*) > "$tmp/out/$sums"
     fi
     cat "$tmp/out/$sums"
     if [ "$yes" != 1 ]; then

@@ -13,7 +13,7 @@ shift
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 spike="$root/target/release/resolve-spike"
-[[ -x "$spike" ]] || cargo build --release -p refryt-resolve --bin resolve-spike
+[[ -x "$spike" ]] || cargo build --release -p moosik-resolve --bin resolve-spike
 
 url="$(SPIKE_PRINT_URL=1 "$spike" "$id" 2>/dev/null | sed -n 's/^  url  *//p')"
 [[ -n "$url" ]] || { echo "could not resolve $id" >&2; exit 1; }

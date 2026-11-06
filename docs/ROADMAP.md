@@ -6,7 +6,7 @@ This is a direction for development, not a release-date promise. [Suggest a work
 
 ## Available in Moosik 0.1.15
 
-- Refryt's native browsing, playback, queue, lyrics, themes, YouTube playlist editing, and local-file support.
+- Moosik's native browsing, playback, queue, lyrics, themes, YouTube playlist editing, and local-file support.
 - Local listening ledger; song, artist, album, and manually tagged genre reports.
 - Custom date ranges, local ratings and mood tags, recap generation, and data exports.
 - macOS Keychain session migration and restricted authenticated reporting destinations.
@@ -47,4 +47,4 @@ automatic genre enrichment, and cross-device sync need separate design and priva
 3. Common actions stay close to the song; advanced tools use progressive disclosure.
 4. Local actions and changes to a YouTube account must be distinguishable.
 5. Measure real listening conservatively. Never invent history or metadata.
-6. Preserve Refryt's credit and contribute broadly useful fixes upstream where practical.
+6. Credit the original contributors and contribute broadly useful fixes upstream where practical.

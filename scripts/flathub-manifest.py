@@ -4,11 +4,11 @@
     scripts/flathub-manifest.py 0.1.14 [--out dist/flathub]
     scripts/flathub-manifest.py 0.1.14 --test-ref HEAD   # a local test build, before the tag
 
-The repo's own manifest (packaging/flatpak/io.github.gridoe.refryt.yml) builds from this checkout
+The repo's own manifest (packaging/flatpak/io.github.AtotheY.moosik.yml) builds from this checkout
 with the network on, for the GitHub release. Flathub builds without a network and from a fixed
 source, so the copy written here differs in three places:
 
-- refryt is built from the git tag v<version> and its commit, not from the checkout;
+- moosik is built from the git tag v<version> and its commit, not from the checkout;
 - cargo gets every crate from cargo-sources.json, made from that tag's Cargo.lock by
   flatpak-cargo-generator (flatpak/flatpak-builder-tools), and builds with --offline;
 - yt-dlp is upstream's Python zipapp (the runtime has Python), pinned by checksum, with
@@ -36,9 +36,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_ID = "io.github.gridoe.refryt"
+APP_ID = "io.github.AtotheY.moosik"
 MANIFEST = ROOT / "packaging" / "flatpak" / f"{APP_ID}.yml"
-REPO_URL = "https://github.com/gridoe/refryt.git"
+REPO_URL = "https://github.com/AtotheY/moosik.git"
 YT_DLP_LATEST = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
 
 
@@ -64,7 +64,7 @@ def module(manifest: dict, name: str) -> dict:
 
 def yt_dlp_source() -> dict:
     """The newest yt-dlp zipapp as a pinned file source."""
-    request = urllib.request.Request(YT_DLP_LATEST, headers={"User-Agent": "refryt-flathub-manifest"})
+    request = urllib.request.Request(YT_DLP_LATEST, headers={"User-Agent": "moosik-flathub-manifest"})
     with urllib.request.urlopen(request) as response:
         release = json.load(response)
     asset = next(a for a in release["assets"] if a["name"] == "yt-dlp")
@@ -107,7 +107,7 @@ def main() -> None:
         help="build this local commit instead of the tag, from this checkout: for a test build only",
     )
     args = parser.parse_args()
-    tag = f"v{args.version}"
+    tag = f"moosik-v{args.version}"
     ref = args.test_ref or tag
     try:
         commit = git("rev-parse", f"{ref}^{{commit}}").strip()
@@ -117,30 +117,30 @@ def main() -> None:
     # The manifest as it was at the tag, so the copy matches what was released.
     manifest = yaml.safe_load(git("show", f"{commit}:{MANIFEST.relative_to(ROOT)}"))
 
-    refryt = module(manifest, "refryt")
-    refryt.get("build-options", {}).pop("build-args", None)
-    if not refryt.get("build-options"):
-        refryt.pop("build-options", None)
-    refryt["build-commands"] = [
-        c.replace("cargo build ", "cargo --offline build ", 1) for c in refryt["build-commands"]
+    moosik = module(manifest, "moosik")
+    moosik.get("build-options", {}).pop("build-args", None)
+    if not moosik.get("build-options"):
+        moosik.pop("build-options", None)
+    moosik["build-commands"] = [
+        c.replace("cargo build ", "cargo --offline build ", 1) for c in moosik["build-commands"]
     ]
     source = {"type": "git", "url": REPO_URL, "tag": tag, "commit": commit}
     if args.test_ref:
         # A sandboxed build reads sources only from inside the manifest's folder, so the test
         # builds from a bare clone of this checkout put there.
-        clone = args.out / "refryt.git"
+        clone = args.out / "moosik.git"
         subprocess.run(["rm", "-rf", str(clone)], check=True)
         args.out.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "-q", "--bare", str(ROOT), str(clone)], check=True)
-        source = {"type": "git", "path": "refryt.git", "commit": commit}
-    refryt["sources"] = [source, "cargo-sources.json"]
+        source = {"type": "git", "path": "moosik.git", "commit": commit}
+    moosik["sources"] = [source, "cargo-sources.json"]
 
     yt_dlp = module(manifest, "yt-dlp")
     yt_dlp["sources"] = [yt_dlp_source()]
 
     args.out.mkdir(parents=True, exist_ok=True)
     header = (
-        f"# Flathub's manifest for refryt {args.version}, written by scripts/flathub-manifest.py\n"
+        f"# Flathub's manifest for moosik {args.version}, written by scripts/flathub-manifest.py\n"
         f"# from packaging/flatpak/{APP_ID}.yml at {ref}. Edit that one, not this.\n"
     )
     text = yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True, width=100)

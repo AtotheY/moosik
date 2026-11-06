@@ -1,0 +1,153 @@
+# The Flatpak build of moosik. Built by scripts/build-flatpak.sh, which first fetches the pieces
+# kept out of git (shared-modules/, yt-dlp). Needs the network at build time: cargo fetches the
+# crates, and libplacebo is a git checkout with submodules. This is a build for a GitHub
+# release, not for Flathub, which would want vendored sources.
+app-id: io.github.AtotheY.moosik
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: moosik
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  # X11 only where there is no Wayland. The sign-in window is an ordinary GTK window (WebKitGTK
+  # through wry's `build_gtk`), which runs on Wayland as it is.
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  # Media keys and the desktop's media controls: the name playwire registers.
+  - --own-name=org.mpris.MediaPlayer2.Moosik
+  # The tray icon, a StatusNotifierItem. Inside the sandbox it registers under the connection's
+  # unique name, so it needs no name of its own (see `tray.rs`).
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.Notifications
+  # Discord Rich Presence connects to Discord's IPC socket.
+  - --filesystem=xdg-run/discord-ipc-0
+  - --filesystem=xdg-run/app/com.discordapp.Discord:create
+  # Downloads are written to ~/Music/moosik, so Music needs write access, not only read access;
+  # it is also where Settings -> Library -> Local files looks.
+  - --filesystem=xdg-music
+  - --filesystem=xdg-download
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/moosik/cargo
+    # The linker is not told about /app/lib, where libmpv lands.
+    LIBRARY_PATH: /app/lib
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/*.a
+  - /share/man
+
+modules:
+  # mpv's yt-dlp hook is a Lua script, and the `ytdl` option exists only with Lua built in.
+  - shared-modules/lua5.1/lua-5.1.5.json
+
+  # mpv needs libass, which the runtime lacks.
+  - name: libass
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://github.com/libass/libass/releases/download/0.17.3/libass-0.17.3.tar.xz
+        sha256: eae425da50f0015c21f7b3a9c7262a910f0218af469e22e2931462fed3c50959
+
+  # ... and libplacebo. Built with no GPU backends: moosik draws its own video through mpv's
+  # software renderer, so only the core is wanted.
+  - name: libplacebo
+    buildsystem: meson
+    config-opts:
+      - -Ddemos=false
+      - -Dtests=false
+      - -Dvulkan=disabled
+      - -Dopengl=disabled
+      - -Dd3d11=disabled
+      - -Dglslang=disabled
+      - -Dshaderc=disabled
+      - -Dlcms=disabled
+      - -Dunwind=disabled
+    sources:
+      # GitHub's mirror of VideoLAN's repository: the same tag, on a host the build can reach.
+      - type: git
+        url: https://github.com/haasn/libplacebo.git
+        tag: v7.351.0
+        commit: 98c1416e95b21cd767b84ac9ee430ccadf263ff6
+
+  # libmpv only: moosik links it and plays audio through PulseAudio (PipeWire answers that).
+  - name: mpv
+    buildsystem: meson
+    config-opts:
+      - -Dcplayer=false
+      - -Dlibmpv=true
+      - -Dbuild-date=false
+      - -Dmanpage-build=disabled
+      - -Dlua=lua51
+      - -Djavascript=disabled
+      - -Dgl=disabled
+      - -Degl=disabled
+      - -Dvulkan=disabled
+      - -Dwayland=disabled
+      - -Dx11=disabled
+      - -Ddrm=disabled
+      - -Dvaapi=disabled
+      - -Dvdpau=disabled
+      - -Dcaca=disabled
+      - -Djack=disabled
+      - -Dvapoursynth=disabled
+      - -Dzimg=disabled
+      - -Duchardet=disabled
+      - -Dlcms2=disabled
+      - -Dpulse=enabled
+      - -Dalsa=enabled
+    sources:
+      - type: archive
+        url: https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz
+        sha256: ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
+
+  # yt-dlp: the resolver for songs YouTube's own endpoint will not hand over, the video view and
+  # downloads. The build script fetches the newest release into this directory first, as the
+  # AppImage build does: the Python zipapp, which runs on the runtime's own Python (Flathub's copy
+  # pins it instead; see scripts/flathub-manifest.py). moosik looks for it beside its own
+  # executable.
+  - name: yt-dlp
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 yt-dlp /app/bin/yt-dlp
+    sources:
+      - type: file
+        path: yt-dlp
+
+  - name: moosik
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release -p moosik --bin moosik
+      - install -Dm755 target/release/moosik /app/bin/moosik
+      - install -Dm644 packaging/flatpak/io.github.AtotheY.moosik.desktop -t /app/share/applications
+      - install -Dm644 packaging/flatpak/io.github.AtotheY.moosik.metainfo.xml -t /app/share/metainfo
+      - |
+        for s in 16 32 48 64 128 256 512; do
+          install -Dm644 assets/icons/app/moosik-$s.png \
+            /app/share/icons/hicolor/${s}x${s}/apps/io.github.AtotheY.moosik.png
+        done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - dist
+          - .appimage-tools
+          - .windows-tools
+          - packaging/flatpak/.flatpak-builder
+          - packaging/flatpak/build-dir

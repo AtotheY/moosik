@@ -4925,7 +4925,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "refryt"
+name = "moosik"
 version = "0.1.26"
 dependencies = [
  "anyhow",
@@ -4955,7 +4955,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "playwire",
  "raw-window-handle",
- "refryt-resolve",
+ "moosik-resolve",
  "reqwest",
  "rfd",
  "rusqlite",
@@ -4983,7 +4983,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "refryt-resolve"
+name = "moosik-resolve"
 version = "0.1.26"
 dependencies = [
  "anyhow",

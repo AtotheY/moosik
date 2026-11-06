@@ -26,7 +26,7 @@ def run(*args):
 for name, identifier in [('Player', 'com.moosik.media-fallback.player-test'), ('Target', 'com.moosik.media-fallback.fixture'), ('Unrelated', 'com.moosik.media-fallback.unrelated')]:
     app = root / (name + '.app')
     (app / 'Contents/MacOS').mkdir(parents=True, exist_ok=True)
-    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier=identifier, CFBundleExecutable='refryt', CFBundleName=name, CFBundlePackageType='APPL', CFBundleVersion='1', LSUIElement=True)))
+    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier=identifier, CFBundleExecutable='moosik', CFBundleName=name, CFBundlePackageType='APPL', CFBundleVersion='1', LSUIElement=True)))
 agent = root / 'Player.app/Contents/Library/LaunchAgents'
 agent.mkdir(parents=True, exist_ok=True)
 p = plistlib.loads(Path('packaging/macos/com.moosik.media-fallback.plist').read_bytes())
@@ -37,7 +37,7 @@ p['Label'] = 'com.moosik.media-fallback.test'
 cache = repo / '.ark-build/swift-module-cache'
 cache.mkdir(parents=True, exist_ok=True)
 for name, source in [('Player', 'player.swift'), ('Target', 'target.swift'), ('Unrelated', 'target.swift')]:
-    run('xcrun', 'swiftc', '-module-cache-path', cache, root / source, '-o', root / (name + '.app/Contents/MacOS/refryt'))
+    run('xcrun', 'swiftc', '-module-cache-path', cache, root / source, '-o', root / (name + '.app/Contents/MacOS/moosik'))
 run('xcrun', 'swiftc', '-D', 'MEDIA_FALLBACK_TEST', '-module-cache-path', cache, repo / 'packaging/macos/MediaFallback.swift', '-o', root / 'Player.app/Contents/MacOS/moosik-media-helper')
 monitor = root / 'Player.app/Contents/Helpers/MoosikMediaHelper.app/Contents'
 (monitor / 'MacOS').mkdir(parents=True, exist_ok=True)
@@ -53,7 +53,7 @@ helper = root / 'Player.app/Contents/MacOS/moosik-media-helper'
 log = root / 'resumes.log'
 
 def pids(name):
-    p = subprocess.run(['pgrep', '-f', '^' + re.escape(str(root / (name + '.app/Contents/MacOS/refryt'))) + '$'], capture_output=True, text=True)
+    p = subprocess.run(['pgrep', '-f', '^' + re.escape(str(root / (name + '.app/Contents/MacOS/moosik'))) + '$'], capture_output=True, text=True)
     return [int(x) for x in p.stdout.split()]
 
 def stop(name):

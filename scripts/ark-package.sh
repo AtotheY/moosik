@@ -4,18 +4,20 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 project="$(dirname "$root")"
 cd "$root"
-template="${REFRYT_TEMPLATE_APP:-$project/Moosik.app}"
-if [ ! -d "$template" ]; then template="$project/Refryt.app"; fi
+template="${MOOSIK_TEMPLATE_APP:-$project/Moosik.app}"
 test -f "$template/Contents/Frameworks/libmpv.2.dylib"
-./scripts/ark-cargo.sh build --locked --release -p refryt --bin refryt
+./scripts/ark-cargo.sh build --locked --release -p moosik --bin moosik
 stage="$root/dist/Moosik.app"
 mkdir -p "$root/dist"
 if [ -e "$stage" ]; then
     mv "$stage" "$root/.ark-build/previous-package-$(date +%s).app"
 fi
 ditto "$template" "$stage"
-cp target/release/refryt "$stage/Contents/MacOS/refryt"
-version=$(./scripts/ark-cargo.sh metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="refryt"))')
+old_exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$stage/Contents/Info.plist")
+if [ "$old_exe" = refryt ]; then rm -f "$stage/Contents/MacOS/$old_exe"; fi
+/usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable moosik' "$stage/Contents/Info.plist"
+cp target/release/moosik "$stage/Contents/MacOS/moosik"
+version=$(./scripts/ark-cargo.sh metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="moosik"))')
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0.1.1407' "$stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Moosik" "$stage/Contents/Info.plist"

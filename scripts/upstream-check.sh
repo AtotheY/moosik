@@ -13,7 +13,7 @@ if ! git rev-parse --verify upstream/main >/dev/null 2>&1; then
     exit 1
 fi
 printf 'Moosik:  '; git log -1 --format='%h %s' HEAD
-printf 'Refryt:  '; git log -1 --format='%h %s' upstream/main
+printf 'Upstream:  '; git log -1 --format='%h %s' upstream/main
 printf 'Moosik-only / upstream-only commits: '; git rev-list --left-right --count HEAD...upstream/main
 printf '\nUpstream commits not in this branch:\n'
 git log --oneline HEAD..upstream/main

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Flatpak bundle: dist/refryt-<version>-x86_64.flatpak.
+# Build the Flatpak bundle: dist/moosik-<version>-x86_64.flatpak.
 #
 # Needs flatpak and flatpak-builder (org.flatpak.Builder from Flathub works), the GNOME 51
 # Platform and Sdk, and org.freedesktop.Sdk.Extension.rust-stable//26.08. Needs the network.
@@ -8,11 +8,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 dir="packaging/flatpak"
-id="io.github.gridoe.refryt"
+id="io.github.AtotheY.moosik"
 
 version="$(cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "refryt"))')"
-out="dist/refryt-$version-x86_64.flatpak"
+    | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "moosik"))')"
+out="dist/moosik-$version-x86_64.flatpak"
 
 if command -v flatpak-builder > /dev/null; then
     builder=(flatpak-builder)

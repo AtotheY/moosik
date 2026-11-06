@@ -1,22 +1,22 @@
 # Themes
 
-Every colour theme in refryt is a `.css` file in the themes folder, including the ones the app
-ships with. The first time refryt starts, it writes its 23 themes there (Classic, Catppuccin,
+Every colour theme in moosik is a `.css` file in the themes folder, including the ones the app
+ships with. The first time moosik starts, it writes its 23 themes there (Classic, Catppuccin,
 Nord, Gruvbox, Tokyo Night, Dracula, Rosé Pine, Everforest and Solarized, each light and dark
 flavour as its own file, and Spotify). From then on the folder is all there is:
 
 - **Delete a file** and that theme is gone. Nothing puts it back.
 - **A theme added in a newer release** is written into the folder once. A hidden `.offered` file
   in the folder records which built-in themes it has been given, so a deleted one stays deleted.
-- **Edit a file** and that theme changes. Save it while refryt is open, then come back to the
+- **Edit a file** and that theme changes. Save it while moosik is open, then come back to the
   window (or open Settings) and the app repaints. It looks at the folder at those moments, not on
-  a timer, so an idle refryt does nothing in the background.
+  a timer, so an idle moosik does nothing in the background.
 - **Add a file** and it shows up in **Settings → Theme** under its file name.
 
 The folder is:
 
-- Linux: `~/.config/refryt/themes/`
-- Windows: `%APPDATA%\refryt\config\themes\`
+- Linux: `~/.config/moosik/themes/`
+- Windows: `%APPDATA%\moosik\config\themes\`
 
 **Settings → Open Themes Folder** opens it. The shipped files are the best examples to copy.
 
@@ -41,7 +41,7 @@ Only `--base`, `--text` and `--accent` are required. Everything else is derived 
 same way the shipped themes fill in what their upstream palettes leave out. You set only what
 you want to change.
 
-This is CSS *syntax*, not a stylesheet: refryt draws its own interface, so there are no
+This is CSS *syntax*, not a stylesheet: moosik draws its own interface, so there are no
 selectors to match. Declarations inside `:root { }`, any other block, or no block at all all
 mean the same thing. `/* comments */` are fine.
 
@@ -65,7 +65,7 @@ Colours can be written `#rgb`, `#rrggbb`, or `rgb(r, g, b)`.
 | `--danger` | Errors | a red |
 | `--warning` | Warnings | an amber |
 
-`color-scheme: dark` or `light` says which mode the theme belongs to. Without it, refryt guesses
+`color-scheme: dark` or `light` says which mode the theme belongs to. Without it, moosik guesses
 from `--base`.
 
 ## When something is off
@@ -79,5 +79,5 @@ from `--base`.
   gets a warning. Both are shown under the Theme row while that theme paints; neither
   stops the theme from applying.
 - Transparency still works. It is applied on top of whatever theme is chosen.
-- `refryt --scheme catppuccin-frappe` paints a theme for one run without changing your
+- `moosik --scheme catppuccin-frappe` paints a theme for one run without changing your
   settings. The name is matched ignoring case, spaces, hyphens and accents.

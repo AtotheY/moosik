@@ -2,13 +2,13 @@
 """Turn a raw square logo into the app's icon set.
 
 A launcher icon wants its corners transparent. This intersects the artwork's own alpha with a
-rounded-rectangle mask at the standard 22.37% app-icon radius (what the first `refryt-master.png`
+rounded-rectangle mask at the standard 22.37% app-icon radius (what the first `moosik-master.png`
 used: 280/1254) — a raw square with opaque corners gets them clipped, while art that is already
 a transparent, inset tile passes through untouched — then emits:
 
-    assets/icons/app/refryt-master.png      the RGBA master both AppImage scripts resize from
-    assets/icons/app/refryt-{16..512}.png   the pre-sized hicolor set `just install` copies
-    assets/icons/app/refryt.ico             the multi-size icon the Windows build embeds
+    assets/icons/app/moosik-master.png      the RGBA master both AppImage scripts resize from
+    assets/icons/app/moosik-{16..512}.png   the pre-sized hicolor set `just install` copies
+    assets/icons/app/moosik.ico             the multi-size icon the Windows build embeds
 
 Run after changing the source logo:  python3 scripts/make-icons.py [newlogo.png]
 """
@@ -49,29 +49,29 @@ def _masked(src: Image.Image, size: int) -> Image.Image:
 
 
 def main() -> None:
-    src_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "newlogo.png")
+    src_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "assets/branding/moosik/eclipse/ceramic-final.png")
     src = Image.open(src_path).convert("RGBA")
     if src.width != src.height:
         raise SystemExit(f"{src_path}: expected a square image, got {src.size}")
 
     os.makedirs(OUT, exist_ok=True)
     master = _masked(src, src.width)
-    master.save(os.path.join(OUT, "refryt-master.png"))
+    master.save(os.path.join(OUT, "moosik-master.png"))
 
     for s in SIZES:
-        _masked(src, s).save(os.path.join(OUT, f"refryt-{s}.png"))
+        _masked(src, s).save(os.path.join(OUT, f"moosik-{s}.png"))
 
     # The .ico is written from the already-masked master, so the Windows icon carries the same
     # rounded corners as every other size, and at each of Windows' own preferred dimensions.
     master.save(
-        os.path.join(OUT, "refryt.ico"),
+        os.path.join(OUT, "moosik.ico"),
         format="ICO",
         sizes=[(s, s) for s in ICO_SIZES],
     )
 
     print(
-        f"wrote refryt-master.png ({src.width}px), refryt.ico, and "
-        f"refryt-{{{','.join(map(str, SIZES))}}}.png from {os.path.relpath(src_path, ROOT)}"
+        f"wrote moosik-master.png ({src.width}px), moosik.ico, and "
+        f"moosik-{{{','.join(map(str, SIZES))}}}.png from {os.path.relpath(src_path, ROOT)}"
     )
 
 

@@ -8,14 +8,14 @@ Open a [bug report](https://github.com/AtotheY/moosik/issues/new?template=bug.ym
 
 - The version and the package, for example "0.1.10, Windows ARM64 MSI" or "0.1.10, Flatpak". The version is shown in Settings.
 - What happened, what was expected, and the steps to get there.
-- The end of `refryt.log`, which is in the config folder:
+- The end of `moosik.log`, which is in the config folder:
 
 | Platform | Config folder |
 |---|---|
-| Linux | `~/.config/refryt` |
-| Flatpak | `~/.var/app/io.github.gridoe.refryt/config/refryt` |
-| macOS | `~/Library/Application Support/refryt` |
-| Windows | `%APPDATA%\refryt\config` |
+| Linux | `~/.config/moosik` |
+| Flatpak | `~/.var/app/io.github.AtotheY.moosik/config/moosik` |
+| macOS | `~/Library/Application Support/moosik` |
+| Windows | `%APPDATA%\moosik\config` |
 
 Review logs before sharing. They can show song names, file paths, and your username; remove anything personal and never assume a diagnostic is safe to publish. Never post `browser.json` or `oauth.json` from the same folder: they hold the signed-in session and work like a password.
 
@@ -38,4 +38,4 @@ Open a [feature request](https://github.com/AtotheY/moosik/issues/new?template=f
 
 ## Licence
 
-Moosik is an independent fork of [Refryt](https://github.com/gridoe/refryt), by gridoe and contributors. Keep upstream attribution and existing copyright notices. Moosik is licensed under the [GPL-3.0-or-later](LICENSE), and contributions are accepted under the same licence.
+Moosik is an independent fork based on work by [gridoe](https://github.com/gridoe) and contributors. Keep upstream attribution and existing copyright notices. Moosik is licensed under the [GPL-3.0-or-later](LICENSE), and contributions are accepted under the same licence.
