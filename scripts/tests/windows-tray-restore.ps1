@@ -22,17 +22,22 @@ function Wait-For([scriptblock]$Condition, [string]$Description, [int]$Seconds) 
     throw "Timed out waiting for $Description"
 }
 
-# The diagnostic sends ToggleVisible, ToggleVisible, Quit, three seconds apart.
-$app = Start-Process -FilePath $Exe -ArgumentList '--tray-test','10' -PassThru
+$start = [Diagnostics.ProcessStartInfo]::new($Exe, '--tray-test stdin')
+$start.UseShellExecute = $false
+$start.RedirectStandardInput = $true
+$app = [Diagnostics.Process]::Start($start)
 try {
     Wait-For { $app.Refresh(); $app.MainWindowHandle -ne 0 } 'the player window' 30
     $window = $app.MainWindowHandle
     [void][TrayWindow]::ShowWindowAsync($window, 6) # SW_MINIMIZE
     Wait-For { [TrayWindow]::IsIconic($window) } 'Windows to minimize the player' 3
+    $app.StandardInput.WriteLine('toggle')
     Wait-For {
         [TrayWindow]::IsWindowVisible($window) -and ![TrayWindow]::IsIconic($window)
     } 'the first tray toggle to restore the player' 15
+    $app.StandardInput.WriteLine('toggle')
     Wait-For { ![TrayWindow]::IsWindowVisible($window) } 'the second toggle to hide the player' 6
+    $app.StandardInput.WriteLine('quit')
     if (!$app.WaitForExit(10000) -or $app.ExitCode -ne 0) { throw 'Tray Quit failed' }
     Write-Output 'Verified tray restore, hide and quit on Windows.'
 } finally {

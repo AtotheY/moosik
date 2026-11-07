@@ -764,6 +764,12 @@ impl History {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum TrayTest {
+    Timed(Duration),
+    Stdin,
+}
+
 /// What the command line asked for. Grouped so `App::new` takes one argument rather than eight.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -812,11 +818,8 @@ pub struct Options {
     /// `scheme`: the switch lives in Settings, and a comparison run needs the off state without
     /// clicking through to it.
     pub no_autoplay: bool,
-    /// Exercise the tray path without a mouse: after this long, hide the window, show it three
-    /// seconds later, then quit three seconds after that — each step injected through the same
-    /// queue-and-wake path a real tray event takes. A test aid, like `autoscroll`: there is no
-    /// way to click a tray icon from outside the process, and the point is to time each step.
-    pub tray_test: Option<Duration>,
+    /// Exercise the tray on a timer or accept a diagnostic action per line on stdin.
+    pub tray_test: Option<TrayTest>,
     /// Login started this run (`autostart::ARG`): once the window is up, ask the compositor to
     /// bring it forward. Wayland maps an autostarted window behind whatever already has focus
     /// and cannot be asked to raise itself later, so the request has to be made up front; on
@@ -2357,8 +2360,8 @@ impl App {
                 Instant::now()
             });
         }
-        if let Some(after) = tray_test {
-            app.spawn_tray_test(after);
+        if let Some(mode) = tray_test {
+            app.spawn_tray_test(mode);
         }
         Ok(app)
     }
@@ -2367,10 +2370,25 @@ impl App {
     /// the same queue-and-wake path a real tray click takes. The log lines carry the timestamps
     /// the steps actually landed on, so a slow quit can be attributed to the event being acted
     /// on late (line long after injection) or to teardown (line, then a long silence).
-    fn spawn_tray_test(&self, after: Duration) {
+    fn spawn_tray_test(&self, mode: TrayTest) {
         use crate::tray::{TrayAction, inject};
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
+            let TrayTest::Timed(after) = mode else {
+                use std::io::BufRead;
+                // The Windows smoke test checks each window state before sending the next action.
+                for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                    match line.trim() {
+                        "toggle" => inject(&ctx, TrayAction::ToggleVisible),
+                        "quit" => {
+                            inject(&ctx, TrayAction::Quit);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            };
             std::thread::sleep(after);
             tracing::info!("tray test: hiding");
             inject(&ctx, TrayAction::ToggleVisible);
