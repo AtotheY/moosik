@@ -255,7 +255,7 @@ impl Transport {
         )?;
         Ok(Playlist {
             summary,
-            description: text(data, "/description"),
+            description: text(data, "/description").and_then(playlist_description),
             saved: saved(data),
             tracks,
         })
@@ -491,6 +491,46 @@ impl Transport {
 
 fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
+fn playlist_description(description: String) -> Option<String> {
+    if !description.contains(['<', '&']) {
+        return Some(description);
+    }
+    let input = html5ever::tokenizer::BufferQueue::default();
+    input.push_back(description.as_str().into());
+    let tokenizer = html5ever::tokenizer::Tokenizer::new(
+        DescriptionText(std::cell::RefCell::new(String::new())),
+        Default::default(),
+    );
+    let _ = tokenizer.feed(&input);
+    tokenizer.end();
+    let plain = tokenizer.sink.0.into_inner();
+    let trimmed = plain.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+struct DescriptionText(std::cell::RefCell<String>);
+
+impl html5ever::tokenizer::TokenSink for DescriptionText {
+    type Handle = ();
+
+    fn process_token(
+        &self,
+        token: html5ever::tokenizer::Token,
+        _: u64,
+    ) -> html5ever::tokenizer::TokenSinkResult<()> {
+        use html5ever::tokenizer::{TagKind, Token, TokenSinkResult};
+
+        match token {
+            Token::CharacterTokens(text) => self.0.borrow_mut().push_str(&text),
+            Token::TagToken(tag) if tag.kind == TagKind::StartTag && tag.name.as_ref() == "br" => {
+                self.0.borrow_mut().push('\n');
+            }
+            _ => {}
+        }
+        TokenSinkResult::Continue
+    }
 }
 
 fn text(value: &Value, pointer: &str) -> Option<String> {
@@ -1007,6 +1047,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spotify_playlist_description_keeps_labels_and_decodes_entities() {
+        let description = r#"<a href=spotify:playlist:twxn>TWXN</a>, <a href="spotify:playlist:swae">Swae Lee</a> &amp; friends<br>Made for you"#;
+        assert_eq!(
+            playlist_description(description.to_owned()).as_deref(),
+            Some("TWXN, Swae Lee & friends\nMade for you")
+        );
+        assert_eq!(playlist_description("<br>".to_owned()), None);
+        assert_eq!(
+            playlist_description("A mix for me <3".to_owned()).as_deref(),
+            Some("A mix for me <3")
+        );
+    }
 
     const ID: &str = "3TO7bbrUKrOSPGRTB5MeCz";
     const ARTIST: &str = "spotify:artist:74ASZWbe4lXaubB36ztrGX";

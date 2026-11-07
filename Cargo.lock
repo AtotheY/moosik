@@ -3590,6 +3590,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hmac",
+ "html5ever 0.36.1",
  "rand 0.9.5",
  "reqwest",
  "rustls",

@@ -11,6 +11,7 @@ data-encoding = "2"
 flate2 = "1"
 futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
+html5ever = "0.36"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
