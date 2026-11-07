@@ -629,7 +629,7 @@ fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
         // "Remove from playlist" only on your own lists — never LM, never someone else's.
         let playlist_id = playlist
             .as_ref()
-            .filter(|p| p.editable)
+            .filter(|p| p.editable || p.source == crate::model::PlaylistSource::Spotify)
             .map(|p| p.id.as_str());
         // Liked Music is liked all the way down; its thumbs show only under the pointer.
         let liked_music = playlist

@@ -271,6 +271,17 @@ pub async fn playlist_more(token: &str) -> Result<crate::innertube::Page> {
     })
 }
 
+pub async fn save_track(uri: &str) -> Result<()> {
+    Ok(transport().await?.save_track(uri).await?)
+}
+
+pub async fn remove_playlist_item(playlist_id: &str, uid: &str) -> Result<()> {
+    Ok(transport()
+        .await?
+        .remove_playlist_item(playlist_id, uid)
+        .await?)
+}
+
 pub async fn album(id: &str) -> Result<Album> {
     let album = transport().await?.album(id).await?;
     let summary = album.summary;
@@ -498,6 +509,7 @@ fn catalog_track(item: CatalogTrack) -> Track {
     let mut track = track(item.metadata);
     track.artists = artist_links(item.artists);
     track.album_id = item.album_uri;
+    track.set_video_id = item.playlist_item_uid.map(Into::into);
     track.in_library = item.saved;
     track.like = if item.saved {
         LikeStatus::Like

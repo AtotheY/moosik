@@ -8,6 +8,8 @@ use crate::{Error, Result, TrackMetadata, Transport};
 
 const PAGE_SIZE: u64 = 50;
 const PLAYLIST_HASH: &str = "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf";
+const PLAYLIST_MUTATION_HASH: &str =
+    "b907ad6b088d5bf7680fa81198996d58398c2d55dfcdf59fcc959e0be98a418a";
 const ALBUM_HASH: &str = "0b6ce3511e1b02e4a40fa95440f992acbe85080eb308af9194322d708fc1914f";
 const ARTIST_HASH: &str = "eafb1620d783ece118e72fbfede2b0064483e029d3c1aafafa1c2de0e25a89e7";
 const LIBRARY_HASH: &str = "390c78e5b951029bad359785e69b07b536a509c581cbcd0aded5e5067f187455";
@@ -27,6 +29,7 @@ pub struct CatalogTrack {
     pub album_uri: Option<String>,
     pub saved: bool,
     pub plays: Option<String>,
+    pub playlist_item_uid: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,14 +237,13 @@ impl Transport {
             .pointer("/data/playlistV2")
             .ok_or(Error::Invalid("playlist"))?;
         let summary = playlist_summary(data, Some(&uri)).ok_or(Error::Invalid("playlist"))?;
-        let tracks = parse_track_page(
-            &data["content"],
+        let tracks = parse_playlist_tracks(
+            data,
             Cursor {
                 section: None,
                 uri: Some(uri),
                 offset: 0,
             },
-            false,
         )?;
         Ok(Playlist {
             summary,
@@ -271,10 +273,23 @@ impl Transport {
             "playlist",
         )?;
         let response = self.playlist_query(&uri, cursor.offset).await?;
-        let content = response
-            .pointer("/data/playlistV2/content")
+        let data = response
+            .pointer("/data/playlistV2")
             .ok_or(Error::Invalid("playlist tracks"))?;
-        parse_track_page(content, cursor, false)
+        parse_playlist_tracks(data, cursor)
+    }
+
+    pub async fn remove_playlist_item(&self, playlist_id: &str, uid: &str) -> Result<()> {
+        let uri = require_uri(playlist_id, "playlist")?;
+        if !valid_playlist_item_uid(uid) {
+            return Err(Error::Invalid("playlist item ID"));
+        }
+        self.mutate(
+            "removeFromPlaylist",
+            PLAYLIST_MUTATION_HASH,
+            json!({"playlistUri": uri, "uids": [uid]}),
+        )
+        .await
     }
 
     pub async fn album(&self, input: &str) -> Result<Album> {
@@ -360,7 +375,7 @@ impl Transport {
             let data = response
                 .pointer("/data/me/library/tracks")
                 .ok_or(Error::Invalid("saved tracks"))?;
-            let page = parse_track_page(data, cursor, true)?;
+            let page = parse_track_page(data, cursor, TrackPageKind::SavedSongs)?;
             return Ok(Page {
                 items: page.items.into_iter().map(CatalogItem::Track).collect(),
                 next: page.next,
@@ -514,6 +529,7 @@ fn parse_track(data: &Value, uri: Option<&str>, force_saved: bool) -> Option<Cat
         saved: force_saved || saved(data),
         plays: text(data, "/playcount")
             .or_else(|| data["playcount"].as_u64().map(|count| count.to_string())),
+        playlist_item_uid: None,
     })
 }
 
@@ -600,13 +616,48 @@ fn decode_cursor(token: &str) -> Result<Cursor> {
     Ok(cursor)
 }
 
-fn parse_track_page(data: &Value, cursor: Cursor, force_saved: bool) -> Result<Page<CatalogTrack>> {
+enum TrackPageKind {
+    Playlist { can_edit_items: bool },
+    SavedSongs,
+}
+
+fn valid_playlist_item_uid(uid: &str) -> bool {
+    !uid.is_empty() && uid.len() <= 256 && uid.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn parse_playlist_tracks(data: &Value, cursor: Cursor) -> Result<Page<CatalogTrack>> {
+    let can_edit_items = data["currentUserCapabilities"]["canEditItems"].as_bool() == Some(true);
+    parse_track_page(
+        &data["content"],
+        cursor,
+        TrackPageKind::Playlist { can_edit_items },
+    )
+}
+
+fn parse_track_page(
+    data: &Value,
+    cursor: Cursor,
+    kind: TrackPageKind,
+) -> Result<Page<CatalogTrack>> {
     let next = next_cursor(data, cursor)?;
+    let force_saved = matches!(kind, TrackPageKind::SavedSongs);
     let items = array(&data["items"])
         .iter()
         .filter_map(|item| {
             let (data, uri) = unwrap_item(item);
-            parse_track(data, uri, force_saved)
+            let mut track = parse_track(data, uri, force_saved)?;
+            if matches!(
+                kind,
+                TrackPageKind::Playlist {
+                    can_edit_items: true
+                }
+            ) {
+                track.playlist_item_uid = item["uid"]
+                    .as_str()
+                    .filter(|uid| valid_playlist_item_uid(uid))
+                    .map(str::to_owned);
+            }
+            Some(track)
         })
         .collect();
     Ok(Page { items, next })
@@ -868,16 +919,21 @@ mod tests {
 
     #[test]
     fn playlist_paging_counts_unplayable_rows_and_keeps_links() {
+        let mut playable = wrapped_track();
+        playable["uid"] = json!("1234567890abcdef");
         let mut unavailable = wrapped_track();
+        unavailable["uid"] = json!("1234567890abcdee");
         unavailable["itemV2"]["data"]["playability"]["playable"] = json!(false);
-        let page = parse_track_page(
-            &json!({"totalCount": 3, "items": [wrapped_track(), unavailable]}),
+        let page = parse_playlist_tracks(
+            &json!({
+                "currentUserCapabilities": {"canEditItems": true},
+                "content": {"totalCount": 3, "items": [playable, unavailable]}
+            }),
             Cursor {
                 section: None,
                 uri: Some(format!("spotify:playlist:{ID}")),
                 offset: 0,
             },
-            false,
         )
         .unwrap();
         assert_eq!(page.items.len(), 1);
@@ -890,9 +946,52 @@ mod tests {
             Some("https://i.scdn.co/image/large")
         );
         assert!(track.metadata.explicit);
+        assert_eq!(track.playlist_item_uid.as_deref(), Some("1234567890abcdef"));
         assert_eq!(
             decode_cursor(page.next.as_deref().unwrap()).unwrap().offset,
             2
+        );
+    }
+
+    #[test]
+    fn only_editable_playlist_rows_keep_distinct_item_ids() {
+        let mut first = wrapped_track();
+        first["uid"] = json!("1234567890abcdef");
+        let mut second = wrapped_track();
+        second["uid"] = json!("1234567890abcdee");
+        let mut invalid = wrapped_track();
+        invalid["uid"] = json!(" ");
+        let mut data = json!({
+            "currentUserCapabilities": {"canEditItems": true},
+            "content": {"totalCount": 53, "items": [first, second, invalid]}
+        });
+        let cursor = || Cursor {
+            section: None,
+            uri: Some(format!("spotify:playlist:{ID}")),
+            offset: 50,
+        };
+        let editable = parse_playlist_tracks(&data, cursor()).unwrap();
+        assert_eq!(
+            editable.items[0].metadata.uri,
+            editable.items[1].metadata.uri
+        );
+        assert_eq!(
+            editable.items[0].playlist_item_uid.as_deref(),
+            Some("1234567890abcdef")
+        );
+        assert_eq!(
+            editable.items[1].playlist_item_uid.as_deref(),
+            Some("1234567890abcdee")
+        );
+        assert_eq!(editable.items[2].playlist_item_uid, None);
+
+        data["currentUserCapabilities"]["canEditItems"] = json!(false);
+        let read_only = parse_playlist_tracks(&data, cursor()).unwrap();
+        assert!(
+            read_only
+                .items
+                .iter()
+                .all(|track| track.playlist_item_uid.is_none())
         );
     }
 
@@ -907,10 +1006,11 @@ mod tests {
                 uri: None,
                 offset: 0,
             },
-            true,
+            TrackPageKind::SavedSongs,
         )
         .unwrap();
         assert!(page.items[0].saved);
+        assert!(page.items[0].playlist_item_uid.is_none());
         assert!(page.next.is_none());
     }
 
@@ -1011,7 +1111,7 @@ mod tests {
                     uri: None,
                     offset: 0,
                 },
-                true
+                TrackPageKind::SavedSongs
             )
             .is_err()
         );

@@ -232,10 +232,12 @@ pub enum Event {
     },
     PlaylistMore {
         id: String,
+        revision: u64,
         page: crate::innertube::Page,
     },
     PlaylistMoreFailed {
         id: String,
+        revision: u64,
         error: String,
     },
     /// Whether the account holds YouTube Premium. `None` when it could not be asked (offline,
@@ -466,6 +468,7 @@ pub enum Event {
         previous: bool,
         error: String,
     },
+    SpotifyTrackSaved(Result<Track, String>),
     /// A page's (album or playlist header) library toggle landed. `album` picks the page to
     /// repaint; `in_library` is the new state.
     PageLibraryToggled {
@@ -693,6 +696,7 @@ impl Event {
             | Event::LyricsFailed { error, .. }
             | Event::RatingFailed { error, .. }
             | Event::LibraryToggleFailed { error, .. }
+            | Event::SpotifyTrackSaved(Err(error))
             | Event::PageLibraryFailed { error, .. }
             | Event::PlaylistEditFailed { error, .. }
             | Event::PlaylistDeleteFailed { error, .. }
@@ -2221,7 +2225,7 @@ impl Backend {
     /// way to parallelise it — and at that length, one of them occasionally drops with a
     /// transient body-read error that a bare retry clears right up. Without this, that single
     /// flaky page killed the whole chain and the sort silently never happened.
-    pub fn fetch_playlist_more(&self, id: String, token: String) {
+    pub fn fetch_playlist_more(&self, id: String, token: String, revision: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
@@ -2254,9 +2258,10 @@ impl Backend {
                 }
             }
             let event = match page {
-                Some(page) => Event::PlaylistMore { id, page },
+                Some(page) => Event::PlaylistMore { id, revision, page },
                 None => Event::PlaylistMoreFailed {
                     id,
+                    revision,
                     error: format!("{:#}", last_err.expect("loop always sets this on failure")),
                 },
             };
@@ -2987,6 +2992,21 @@ impl Backend {
         });
     }
 
+    pub fn save_spotify_track(&self, track: Track) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let search_cache = Arc::clone(&self.search_cache);
+        self.rt.spawn(async move {
+            let result = crate::spotify::save_track(&track.video_id).await;
+            if result.is_ok() {
+                search_cache.invalidate();
+            }
+            let event =
+                Event::SpotifyTrackSaved(result.map(|()| track).map_err(|e| format!("{e:#}")));
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
     /// Save a video to one of your playlists. A song already there comes back as
     /// `PlaylistDuplicate` rather than being added twice, unless `allow_duplicate`.
     pub fn add_to_playlist(&self, playlist_id: String, video_id: String, allow_duplicate: bool) {
@@ -3031,12 +3051,19 @@ impl Backend {
         set_video_id: String,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let edit = crate::api::PlaylistEdit::RemoveVideo {
-                video_id: video_id.clone(),
-                set_video_id,
+            let spotify = playlist_id.starts_with("spotify:playlist:");
+            let result = if spotify {
+                crate::spotify::remove_playlist_item(&playlist_id, &set_video_id).await
+            } else {
+                let edit = crate::api::PlaylistEdit::RemoveVideo {
+                    video_id: video_id.clone(),
+                    set_video_id,
+                };
+                api.edit_playlist(&playlist_id, edit).await
             };
-            let event = match api.edit_playlist(&playlist_id, edit).await {
+            let event = match result {
                 Ok(()) => Event::PlaylistRemoved {
                     playlist_id,
                     video_id,
@@ -3047,7 +3074,11 @@ impl Backend {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            if spotify {
+                Self::emit_browse(&tx, &ctx, epoch, event);
+            } else {
+                Self::emit(&tx, &ctx, event);
+            }
         });
     }
 

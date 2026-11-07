@@ -1649,6 +1649,8 @@ pub struct App {
     pub(crate) playlist_suggestions_loading: bool,
     pub(crate) playlist_error: Option<String>,
     playlist_for: Option<String>,
+    playlist_revision: u64,
+    spotify_playlist_remove_pending: bool,
     /// How the open playlist's track list is currently shown — client-side and session-only,
     /// reset whenever a different playlist opens (see [`PlaylistSort`]'s own doc comment for
     /// why this can't be a server order the way [`LibrarySort`] is).
@@ -2271,6 +2273,8 @@ impl App {
             playlist_suggestions_loading: false,
             playlist_error: None,
             playlist_for: None,
+            playlist_revision: 0,
+            spotify_playlist_remove_pending: false,
             playlist_sort: PlaylistSort::default(),
             playlist_sort_pending: false,
             playlist_original_order: None,
@@ -4105,6 +4109,7 @@ impl App {
             return;
         }
         self.playlist_for = Some(id.clone());
+        self.playlist_revision = self.playlist_revision.wrapping_add(1);
         self.smart_playlist_report = None;
         // A new playlist starts back at its own order, not whatever the last one was sorted
         // to, and cancels any load-the-rest-then-sort chain that was still in flight.
@@ -5084,7 +5089,8 @@ impl App {
         };
         playlist.tracks.loading = true;
         let id = playlist.id.clone();
-        self.backend.fetch_playlist_more(id, token);
+        self.backend
+            .fetch_playlist_more(id, token, self.playlist_revision);
     }
 
     /// Ask for the next page of one library section, if there is one and none is in flight.
@@ -6050,7 +6056,9 @@ impl App {
                     }
                 }
                 // A further page of the open playlist, appended in order.
-                Event::PlaylistMore { id, page } if self.playlist_is_for(&id) => {
+                Event::PlaylistMore { id, revision, page }
+                    if self.playlist_is_for(&id) && revision == self.playlist_revision =>
+                {
                     if let Some(playlist) = self.playlist.as_mut() {
                         let next = page.next;
                         playlist.tracks.extend(
@@ -6083,7 +6091,11 @@ impl App {
                         }
                     }
                 }
-                Event::PlaylistMoreFailed { id, error } if self.playlist_is_for(&id) => {
+                Event::PlaylistMoreFailed {
+                    id,
+                    revision,
+                    error,
+                } if self.playlist_is_for(&id) && revision == self.playlist_revision => {
                     tracing::warn!(%id, %error, "could not load another playlist page");
                     if let Some(playlist) = self.playlist.as_mut() {
                         playlist.tracks.loading = false;
@@ -6953,6 +6965,17 @@ impl App {
                     self.set_library_state(&video_id, previous);
                     self.toast_error(&failure_text("Could not update your library", &error));
                 }
+                Event::SpotifyTrackSaved(Ok(track)) => {
+                    self.set_library_state(&track.video_id, true);
+                    self.liked_music.save_spotify_track(track);
+                    self.toast("Added to Spotify Liked Songs");
+                }
+                Event::SpotifyTrackSaved(Err(error)) => {
+                    self.toast_error(&failure_text(
+                        "Could not save to Spotify Liked Songs",
+                        &error,
+                    ));
+                }
                 Event::PageLibraryToggled { in_library, .. } => {
                     tracing::debug!(in_library, "page library toggle confirmed");
                     // Already painted optimistically; this is the confirmation. The rail was
@@ -7082,6 +7105,14 @@ impl App {
                     video_id,
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "removed from playlist");
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.spotify_playlist_remove_pending = false;
+                        self.bump_playlist_counts(&playlist_id, -1);
+                        if self.playlist_is_for(&playlist_id) {
+                            self.playlist_for = None;
+                            self.load_playlist(playlist_id);
+                        }
+                    }
                     // The count went down when the removal was asked for.
                     self.toast("Removed from playlist");
                 }
@@ -7090,6 +7121,14 @@ impl App {
                     video_id,
                     error,
                 } => {
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.spotify_playlist_remove_pending = false;
+                        self.toast_error(&failure_text(
+                            "Could not remove that song from Spotify",
+                            &error,
+                        ));
+                        continue;
+                    }
                     // The row is already gone and cannot be reconstructed — reload the page.
                     // `playlist_for` is cleared first: `load_playlist` treats a matching id
                     // as already loading and would no-op.
@@ -7852,6 +7891,7 @@ impl App {
         self.library_failed_provider = None;
         self.library_source_retry = None;
         self.liked_music = ui::liked_music::State::default();
+        self.spotify_playlist_remove_pending = false;
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();
         self.library_source_rows = ui::source_rows::State::default();
@@ -7999,6 +8039,13 @@ impl App {
                 self.backend
                     .toggle_library(token.to_owned(), track.video_id, saving);
             }
+            RowAction::SaveSpotifyTrack(track) => {
+                if crate::spotify::is_signed_in() {
+                    self.backend.save_spotify_track(track);
+                } else {
+                    self.toast_error("Sign in to Spotify to save songs");
+                }
+            }
             RowAction::SavePrivate {
                 playlist_id,
                 tracks,
@@ -8045,6 +8092,27 @@ impl App {
                 video_id,
                 set_video_id,
             } => {
+                if playlist_id.starts_with("spotify:playlist:") {
+                    if !crate::spotify::is_signed_in() {
+                        self.toast_error("Sign in to Spotify to edit playlists");
+                        return;
+                    }
+                    if self.spotify_playlist_remove_pending {
+                        return;
+                    }
+                    if self.playlist.as_ref().is_some_and(|playlist| {
+                        playlist.id == playlist_id
+                            && playlist.tracks.iter().any(|track| {
+                                track.video_id == video_id
+                                    && track.set_video_id.as_deref() == Some(set_video_id.as_str())
+                            })
+                    }) {
+                        self.spotify_playlist_remove_pending = true;
+                        self.backend
+                            .remove_from_playlist(playlist_id, video_id, set_video_id);
+                    }
+                    return;
+                }
                 if playlist_id.starts_with("private:") {
                     let mut lists = self.local_playlists.clone();
                     if let Some(lp) = lists.iter_mut().find(|p| p.id == playlist_id) {
@@ -9230,9 +9298,14 @@ impl App {
     fn set_library_state(&mut self, video_id: &str, in_library: bool) {
         self.liked_music.set_library_state(video_id, in_library);
         let set = |t: &mut Track| {
-            let changed = t.video_id == video_id && t.in_library != in_library;
-            if changed {
-                t.in_library = in_library;
+            if t.video_id != video_id {
+                return false;
+            }
+            let mut changed = t.in_library != in_library;
+            t.in_library = in_library;
+            if t.is_spotify() && in_library && t.like != LikeStatus::Like {
+                t.like = LikeStatus::Like;
+                changed = true;
             }
             changed
         };

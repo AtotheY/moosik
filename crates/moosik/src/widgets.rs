@@ -803,8 +803,7 @@ pub struct RowClick<'a> {
 /// every call site.
 pub struct RowMenu<'a> {
     pub track: &'a crate::model::Track,
-    /// The open playlist, when this row is one of its tracks and the playlist is editable
-    /// (yours — not LM, not someone else's). Enables "Remove from playlist".
+    /// The playlist containing the row. Removal also requires an editable item ID.
     pub playlist_id: Option<&'a str>,
     /// Your playlists, for the "Save to playlist" picker. Empty when signed out, which hides
     /// the item with no auth check — the library is only ever fetched on sign-in.
@@ -3118,9 +3117,16 @@ fn row_menu_with_button(
 ) -> Option<super::ui::RowAction> {
     use super::ui::RowAction;
     let t = menu.track;
-    let youtube = t.local_path.is_none() && !t.is_spotify();
+    let spotify = t.is_spotify();
+    let youtube = t.local_path.is_none() && !spotify;
     let id = match menu.queue_index {
         Some(index) => ui.id().with(("ytm-queue-row-menu", index)),
+        None if menu
+            .playlist_id
+            .is_some_and(|id| id.starts_with("spotify:")) =>
+        {
+            ui.id().with(("spotify-playlist-row-menu", response.id))
+        }
         None => ui.id().with(("ytm-row-menu", t.video_id.as_str())),
     };
     let via_button = button.is_some_and(|b| b.clicked());
@@ -3263,16 +3269,33 @@ fn row_menu_with_button(
                         && !p.id.starts_with("private:")
                 })
                 .collect();
+            let spotify_signed_in = spotify && crate::spotify::is_signed_in();
+            let spotify_save = spotify_signed_in && !t.in_library;
             let removable = menu
                 .playlist_id
                 .zip(t.set_video_id.as_deref())
                 .filter(|(id, _)| {
-                    id.starts_with("private:") || (!id.starts_with("spotify:") && !t.is_spotify())
+                    if id.starts_with("spotify:playlist:") {
+                        spotify_signed_in
+                    } else {
+                        id.starts_with("private:") || !spotify
+                    }
                 });
             // A download item shows for every YouTube song, so the block is there whenever the
             // song is one, or has a library or playlist move to offer.
-            if token.is_some() || youtube || !targets.is_empty() || removable.is_some() {
+            if token.is_some()
+                || youtube
+                || spotify_save
+                || !targets.is_empty()
+                || removable.is_some()
+            {
                 menu_divider(mui, palette);
+            }
+            if spotify_save
+                && menu_item(mui, palette, Icon::Heart, "Add to Liked Songs", None).clicked()
+            {
+                choice = Some(RowAction::SaveSpotifyTrack(t.clone()));
+                mui.close();
             }
             if token.is_some()
                 && menu_item(

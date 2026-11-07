@@ -103,6 +103,17 @@ impl State {
             .or_else(|| self.removed_youtube.get(id))
     }
 
+    pub(crate) fn save_spotify_track(&mut self, mut track: Track) {
+        let spotify = self.source_mut(Provider::Spotify);
+        if spotify.ids.insert(track.video_id.clone()) {
+            track.in_library = true;
+            track.like = LikeStatus::Like;
+            track.set_video_id = None;
+            spotify.songs.items.insert(0, track);
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     pub(crate) fn set_youtube_rating(&mut self, mut track: Track, like: LikeStatus) {
         if track.is_spotify() || track.local_path.is_some() {
             return;
@@ -442,6 +453,23 @@ mod tests {
             state.rows.playback_queue(0, spotify, None).unwrap().0[0].video_id,
             yt.video_id
         );
+    }
+
+    #[test]
+    fn saved_spotify_track_stays_in_its_own_list_once() {
+        let [youtube, spotify] = SOURCES;
+        let mut state = State::default();
+        let mut track = song("spotify:track:0000000000000000000001");
+        track.set_video_id = Some("playlist-item".into());
+        state.save_spotify_track(track.clone());
+        state.loaded(spotify, Ok(Paged::new(vec![track], None)));
+
+        assert!(state.source(youtube).songs.is_empty());
+        assert_eq!(state.source(spotify).songs.len(), 1);
+        let saved = &state.source(spotify).songs.items[0];
+        assert_eq!(saved.like, LikeStatus::Like);
+        assert!(saved.in_library);
+        assert!(saved.set_video_id.is_none());
     }
 
     #[test]

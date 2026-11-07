@@ -435,6 +435,7 @@ pub(crate) enum RowAction {
     },
     /// Flip a song's library membership with its own bookmark token.
     ToggleLibrary(Track),
+    SaveSpotifyTrack(Track),
     SaveToPlaylist {
         playlist_id: String,
         video_id: String,
@@ -577,9 +578,11 @@ pub(crate) fn spec_rows_with_slot<'d>(
     let drawn = virtual_rows(ui, theme::ROW_HEIGHT, count, |ui, i| {
         let s = spec(i);
         let like = row_like(&s, liked);
-        // Only an editable playlist's own track list ever sets this — see `RowMenu::playlist_id`
-        // and `ListOutcome::reorder`'s own doc comments.
-        let draggable = s.menu.as_ref().and_then(|m| m.playlist_id).is_some();
+        let draggable = s
+            .menu
+            .as_ref()
+            .and_then(|m| m.playlist_id)
+            .is_some_and(|id| !id.starts_with("spotify:"));
         // A video still is 16:9; fetch its wide crop so the row draws it at its own aspect
         // instead of squeezing it into the square cover slot. A hidden slot fetches nothing.
         let art = if s.hide_art {

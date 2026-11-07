@@ -129,6 +129,32 @@ impl Transport {
         Ok(value)
     }
 
+    pub(crate) async fn mutate(
+        &self,
+        operation: &'static str,
+        hash: &'static str,
+        variables: Value,
+    ) -> Result<()> {
+        let response = self.query(operation, hash, variables).await?;
+        if !response["data"]
+            .as_object()
+            .is_some_and(|data| !data.is_empty())
+        {
+            return Err(Error::Invalid(operation));
+        }
+        Ok(())
+    }
+
+    pub async fn save_track(&self, uri: &str) -> Result<()> {
+        track_id(uri)?;
+        self.mutate(
+            "addToLibrary",
+            "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
+            json!({"libraryItemUris": [uri], "interactionId": null}),
+        )
+        .await
+    }
+
     pub(crate) async fn artist_verified(&self, uri: &str) -> Result<bool> {
         const STAGE: &str = "artist verification";
         if self.inner.expires_at <= now_ms()? {
