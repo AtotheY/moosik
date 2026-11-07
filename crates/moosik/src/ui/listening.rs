@@ -357,8 +357,9 @@ fn source_filter(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, refresh: 
             "Downloaded YouTube Music".to_owned(),
         ));
     }
+    let can_filter = options.len() > 2;
     if report.is_some()
-        && (providers.len() <= 1
+        && (!can_filter
             || !options
                 .iter()
                 .any(|(id, _)| id == &app.listening_view.source))
@@ -367,7 +368,7 @@ fn source_filter(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, refresh: 
         app.listening_view.source.clear();
         *refresh = true;
     }
-    if providers.len() <= 1 && (app.listening_view.source.is_empty() || report.is_some()) {
+    if !can_filter && (app.listening_view.source.is_empty() || report.is_some()) {
         return;
     }
     if !options
