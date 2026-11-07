@@ -10,6 +10,8 @@
 //! split keeps the socket's blocking calls and the crate's own types out of the UI thread, and
 //! makes the presence's shape (and its tests) independent of the transport.
 //!
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -162,18 +164,25 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
 /// A live integration: the channel to its worker thread. Dropping this stops the worker (and
 /// clears the presence), so the handle is held for as long as the setting is on.
 pub struct Discord {
+    connected: Arc<AtomicBool>,
     tx: Sender<Cmd>,
 }
 
 impl Discord {
     /// Start the worker. Nothing connects until the first [`set`](Self::set), and the worker keeps
     /// trying in the background if Discord is not running yet.
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        let connected = Arc::new(AtomicBool::new(false));
+        let worker_connected = Arc::clone(&connected);
         let _ = std::thread::Builder::new()
             .name("discord-rpc".into())
-            .spawn(move || run(rx));
-        Self { tx }
+            .spawn(move || run(rx, worker_connected, ctx));
+        Self { tx, connected }
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Publish a presence. Cheap: a send on a channel.
@@ -204,7 +213,7 @@ enum Cmd {
 
 /// The worker's whole life: own the socket, keep it in sync with the last `Presence`, and get it
 /// back if Discord goes away.
-fn run(rx: mpsc::Receiver<Cmd>) {
+fn run(rx: mpsc::Receiver<Cmd>, connected: Arc<AtomicBool>, ctx: egui::Context) {
     let mut client: Option<DiscordIpcClient> = None;
     // What the app last asked for, and whether Discord has been told about it.
     let mut wanted: Option<Presence> = None;
@@ -270,9 +279,17 @@ fn run(rx: mpsc::Receiver<Cmd>) {
                 None => client.clear_activity(),
             });
             match sent {
-                Some(Ok(())) => dirty = false,
+                Some(Ok(())) => {
+                    if !connected.swap(true, Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
+                    dirty = false;
+                }
                 Some(Err(e)) => {
                     tracing::debug!(error = %e, "discord went away; will retry");
+                    if connected.swap(false, Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
                     client = None;
                     next_try = Instant::now() + RETRY_EVERY;
                 }

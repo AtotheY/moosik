@@ -4692,7 +4692,9 @@ pub fn tab_strip(
     let left = ui.cursor().min.x;
     let right = ui.max_rect().right();
     let mut x = left;
-    let top = ui.cursor().min.y;
+    let first_top = ui.cursor().min.y;
+    let mut top = first_top;
+    let mut active = None;
     for (i, label) in labels.iter().enumerate() {
         let font = if i == selected {
             theme::semibold(14.0)
@@ -4701,7 +4703,14 @@ pub fn tab_strip(
         };
         let galley =
             ui.fonts_mut(|f| f.layout_no_wrap((*label).to_owned(), font, Color32::PLACEHOLDER));
+        if x > left && x + galley.size().x > right {
+            x = left;
+            top += HEIGHT;
+        }
         let rect = Rect::from_min_size(egui::pos2(x, top), vec2(galley.size().x, HEIGHT));
+        if i == selected {
+            active = Some(rect);
+        }
         let response = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
         let t = lit(ui, &response);
         let colour = if i == selected {
@@ -4727,32 +4736,14 @@ pub fn tab_strip(
         base,
         egui::Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
-    // The bar under the open tab, over the hairline.
-    let mut x = left;
-    for (i, label) in labels.iter().enumerate() {
-        let w = ui.fonts_mut(|f| {
-            f.layout_no_wrap(
-                (*label).to_owned(),
-                if i == selected {
-                    theme::semibold(14.0)
-                } else {
-                    theme::medium(14.0)
-                },
-                Color32::PLACEHOLDER,
-            )
-            .size()
-            .x
-        });
-        if i == selected {
-            ui.painter().rect_filled(
-                Rect::from_min_size(egui::pos2(x, base - 2.0), vec2(w, 2.0)),
-                CornerRadius::same(1),
-                palette.accent,
-            );
-        }
-        x += w + GAP;
+    if let Some(rect) = active {
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.left_bottom() - vec2(0.0, 2.0), vec2(rect.width(), 2.0)),
+            CornerRadius::same(1),
+            palette.accent,
+        );
     }
-    ui.allocate_space(vec2(right - left, HEIGHT + 1.0));
+    ui.allocate_space(vec2(right - left, base - first_top + 1.0));
     clicked
 }
 

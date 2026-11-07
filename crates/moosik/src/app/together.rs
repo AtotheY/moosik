@@ -1,4 +1,4 @@
-//! Ephemeral, opt-in rooms. Discord only gets a read-only join URL.
+//! Ephemeral listening rooms. Discord only gets a read-only join URL.
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -243,10 +243,7 @@ impl App {
             .as_deref()
     }
 
-    pub(crate) fn start_hosting(&mut self) {
-        if !self.settings.discord_rich_presence || self.together.session.is_some() {
-            return;
-        }
+    fn start_hosting(&mut self) {
         let (tx, updates) = channel();
         let (publish, samples) = watch::channel(None);
         let ctx = self.ctx.clone();
@@ -344,6 +341,23 @@ impl App {
                 None => self.toast("This shared song is unavailable"),
             }
         }
+        let shareable =
+            |t: &Track| t.local_path.is_none() && moosik_resolve::VideoId::new(&t.video_id).is_ok();
+        let can_host = self.settings.discord_host_listen_along
+            && self
+                .discord
+                .as_ref()
+                .is_some_and(|discord| discord.connected());
+        if self.hosting() && !can_host {
+            self.leave_room();
+            return;
+        }
+        if can_host
+            && self.together.session.is_none()
+            && self.now.track.as_ref().is_some_and(shareable)
+        {
+            self.start_hosting();
+        }
         let position = self.saved_position();
         let Some(session) = self.together.session.as_mut() else {
             return;
@@ -356,9 +370,7 @@ impl App {
                 .now
                 .track
                 .as_ref()
-                .filter(|t| {
-                    t.local_path.is_none() && moosik_resolve::VideoId::new(&t.video_id).is_ok()
-                })
+                .filter(|t| shareable(t))
                 .map(|track| Song {
                     id: track.video_id.clone(),
                     title: track.title.chars().take(128).collect(),

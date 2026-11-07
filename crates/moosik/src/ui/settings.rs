@@ -26,16 +26,18 @@ pub enum SettingsTab {
     Playback,
     Library,
     System,
+    Discord,
     Account,
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Appearance,
         SettingsTab::Playback,
         SettingsTab::Library,
         SettingsTab::System,
+        SettingsTab::Discord,
         SettingsTab::Account,
         SettingsTab::About,
     ];
@@ -46,6 +48,7 @@ impl SettingsTab {
             SettingsTab::Playback => "Playback",
             SettingsTab::Library => "Library",
             SettingsTab::System => "System",
+            SettingsTab::Discord => "Discord",
             SettingsTab::Account => "Account",
             SettingsTab::About => "About",
         }
@@ -75,6 +78,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             SettingsTab::Playback => playback(app, ui),
             SettingsTab::Library => library(app, ui),
             SettingsTab::System => system(app, ui),
+            SettingsTab::Discord => discord(app, ui),
             SettingsTab::Account => account(app, ui),
             SettingsTab::About => about(app, ui),
         }
@@ -705,43 +709,6 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
     #[cfg(target_os = "macos")]
     mac_media_fallback(app, ui);
 
-    // Discord Rich Presence. Nothing to configure: the app connects as its own Discord
-    // application (the id is fixed in `crate::discord`), so the toggle is the whole setting.
-    let mut discord = app.settings.discord_rich_presence;
-    let mut hosting = app.hosting();
-    let mut leave = false;
-    widgets::setting_group(ui, &p, Some("Integrations"), |ui, g| {
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-discord",
-            "Discord Rich Presence",
-            "Shows what you're playing on Discord.",
-            &mut discord,
-        );
-        if app.following() {
-            g.row(
-                ui,
-                "Listen along",
-                "Following the host’s playback.",
-                |ui| {
-                    leave = widgets::outline_button(ui, &p, "Leave").clicked();
-                },
-            );
-        } else if discord {
-            toggle_row(
-                g,
-                ui,
-                &p,
-                "host-listen-along",
-                "Host Listen along",
-                "Let friends on Discord follow your playback for this session.",
-                &mut hosting,
-            );
-        }
-    });
-
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -749,12 +716,51 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
             s.start_on_boot = start_on_boot;
         }
         s.hide_tray_on_close = hide_tray;
-        s.discord_rich_presence = discord;
     });
-    if leave || (app.hosting() && !hosting) {
+}
+
+fn discord(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut presence = app.settings.discord_rich_presence;
+    let mut hosting = app.settings.discord_host_listen_along;
+    let mut leave = false;
+    widgets::setting_group(ui, &p, None, |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-discord",
+            "Discord Rich Presence",
+            "Show your current song on your Discord profile.",
+            &mut presence,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "host-listen-along",
+            "Host Listen along",
+            "Let friends join your playback when Rich Presence is on.",
+            &mut hosting,
+        );
+        if app.following() {
+            g.row(
+                ui,
+                "Listening along",
+                "Following the host’s playback.",
+                |ui| {
+                    leave = widgets::outline_button(ui, &p, "Leave").clicked();
+                },
+            );
+        }
+    });
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.discord_rich_presence = presence;
+        s.discord_host_listen_along = hosting;
+    });
+    if leave {
         app.leave_room();
-    } else if discord && hosting && !app.hosting() {
-        app.start_hosting();
     }
 }
 

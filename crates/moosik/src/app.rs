@@ -3110,7 +3110,7 @@ impl App {
             self.leave_room();
         }
         self.discord = if self.settings.discord_rich_presence {
-            Some(crate::discord::Discord::spawn())
+            Some(crate::discord::Discord::spawn(self.ctx.clone()))
         } else {
             None
         };

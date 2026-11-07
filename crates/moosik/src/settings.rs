@@ -309,11 +309,10 @@ pub struct Settings {
     /// icon that appears the first time someone closes the window, with no prior warning that
     /// closing no longer quits, would look like the close button broke.
     pub hide_tray_on_close: bool,
-    /// Publish what is playing to Discord as a Rich Presence. Off by default: it tells everyone
-    /// who can see your profile what you are listening to, which is worth an explicit yes. It
-    /// connects as moosik's own Discord application — the id is fixed in `crate::discord` — so
-    /// turning it on is the only setup there is.
+    /// Show the current track on the user's Discord profile.
     pub discord_rich_presence: bool,
+    /// Offer a synchronized listening invite while sharing a YouTube Music track.
+    pub discord_host_listen_along: bool,
     /// Folders scanned for local audio files, shown in the Library's Local tab. Absolute paths,
     /// same shape as `playlist_order`.
     pub local_folders: Vec<String>,
@@ -364,7 +363,8 @@ impl Default for Settings {
             playlist_layout: Default::default(),
             start_on_boot: false,
             hide_tray_on_close: false,
-            discord_rich_presence: false,
+            discord_rich_presence: true,
+            discord_host_listen_along: true,
             local_folders: Vec::new(),
             playlist_default_sort: crate::app::PlaylistSort::Default,
             sidebar_width: None,
@@ -509,6 +509,20 @@ pub fn save(settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_defaults_and_saved_choices_survive_upgrades() {
+        let fresh: Settings = serde_json::from_str("{}").unwrap();
+        assert!(fresh.discord_rich_presence && fresh.discord_host_listen_along);
+        let old: Settings = serde_json::from_str(r#"{"discord_rich_presence":false}"#).unwrap();
+        assert!(!old.discord_rich_presence && old.discord_host_listen_along);
+        let prefs = Settings {
+            discord_host_listen_along: false,
+            ..fresh
+        };
+        let saved: Settings = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert!(saved.discord_rich_presence && !saved.discord_host_listen_along);
+    }
 
     /// A settings file from an older build, or a hand-edited one, must not stop the app.
     #[test]
