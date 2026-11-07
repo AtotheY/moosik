@@ -141,7 +141,7 @@ async fn host_room(
     anyhow::ensure!(created.id.len() == 32 && created.id.bytes().all(|b| b.is_ascii_hexdigit()));
     let url = format!("{rooms}/{}", created.id);
     let mut advertised = false;
-    let mut failures = 0;
+    let mut retry = Duration::from_secs(2);
     loop {
         if samples.has_changed().is_err() {
             break;
@@ -155,18 +155,28 @@ async fn host_room(
             .send()
             .await
             .and_then(|r| r.error_for_status());
-        if sent.is_ok() {
-            failures = 0;
-            if !advertised {
-                advertised = notify(tx, ctx, Update::Ready(created.id.clone()));
-                if !advertised {
-                    break;
-                }
+        if let Err(error) = sent {
+            if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                return Err(error.into());
             }
-        } else {
-            failures += 1;
-            if failures >= 3 {
-                anyhow::bail!("room unavailable");
+            // Keep this room through network and quota failures. A new POST spends
+            // a separate shared allowance and cannot fix a rejected playback write.
+            if advertised && !notify(tx, ctx, Update::Reconnecting) {
+                break;
+            }
+            advertised = false;
+            tokio::select! {
+                _ = samples.wait_for(|_| false) => break,
+                _ = tokio::time::sleep(retry) => {}
+            }
+            retry = (retry * 2).min(Duration::from_secs(120));
+            continue;
+        }
+        retry = Duration::from_secs(2);
+        if !advertised {
+            advertised = notify(tx, ctx, Update::Ready(created.id.clone()));
+            if !advertised {
+                break;
             }
         }
         if samples.changed().await.is_err() {
