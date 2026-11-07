@@ -9089,9 +9089,11 @@ impl App {
     fn set_library_state(&mut self, video_id: &str, in_library: bool) {
         self.liked_music.set_library_state(video_id, in_library);
         let set = |t: &mut Track| {
-            if t.video_id == video_id {
+            let changed = t.video_id == video_id && t.in_library != in_library;
+            if changed {
                 t.in_library = in_library;
             }
+            changed
         };
         if let Some(t) = self.now.track.as_mut() {
             set(t);
@@ -9099,13 +9101,20 @@ impl App {
         for t in self.q.tracks_mut() {
             set(t);
         }
-        for t in self
-            .results
-            .items
-            .iter_mut()
-            .filter_map(crate::model::Entry::track_mut)
-        {
-            set(t);
+        for (entries, generation) in [
+            (&mut self.results.items, &mut self.results_generation),
+            (
+                &mut self.scoped_results,
+                &mut self.scoped_results_generation,
+            ),
+        ] {
+            let mut changed = false;
+            for track in entries.iter_mut().filter_map(Entry::track_mut) {
+                changed |= set(track);
+            }
+            if changed {
+                *generation = generation.wrapping_add(1);
+            }
         }
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
