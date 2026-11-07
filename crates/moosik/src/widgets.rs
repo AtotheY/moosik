@@ -11,6 +11,94 @@ use egui::{Color32, CornerRadius, Rect, Sense, Ui, vec2};
 use crate::icons::Icon;
 use crate::theme::{self, Palette};
 
+pub(crate) fn provider_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    provider: crate::model::Provider,
+    selected: bool,
+    verb: &str,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(24.0), Sense::click());
+    let label = format!("{verb} {}", provider.name());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, &label)
+    });
+    if ui.is_rect_visible(rect) {
+        let t = lit(ui, &response);
+        let base = if selected {
+            mix(palette.surface, palette.surface_active, 0.55)
+        } else {
+            palette.surface
+        };
+        let fill = if response.is_pointer_button_down_on() {
+            palette.surface_active
+        } else {
+            mix(base, palette.surface_hover, t)
+        };
+        let radius = CornerRadius::same(theme::RADIUS_SMALL + 2);
+        if selected || t > 0.001 || response.is_pointer_button_down_on() {
+            ui.painter().rect_filled(rect, radius, fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(1.0, palette.text),
+                egui::StrokeKind::Inside,
+            );
+        }
+        crate::icons::paint_source(
+            ui,
+            Rect::from_center_size(
+                rect.center() + press_offset(&response),
+                egui::Vec2::splat(16.0),
+            ),
+            provider.name(),
+            if selected {
+                palette.text
+            } else {
+                mix(palette.secondary, palette.text, t)
+            },
+        );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    response.on_hover_text(label)
+}
+
+pub fn source_indicator(
+    ui: &Ui,
+    palette: &Palette,
+    rect: Rect,
+    track: &crate::model::Track,
+    id: egui::Id,
+) {
+    source_name_indicator(ui, palette, rect, track.source_name(), id);
+}
+
+pub fn source_name_indicator(ui: &Ui, palette: &Palette, rect: Rect, source: &str, id: egui::Id) {
+    let response = ui.interact(rect, id, Sense::focusable_noninteractive());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), source)
+    });
+    crate::icons::paint_source(ui, rect.shrink(2.0), source, palette.secondary);
+    let tooltip = if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            CornerRadius::same(3),
+            egui::Stroke::new(1.0, palette.accent),
+            egui::StrokeKind::Outside,
+        );
+        egui::Tooltip::for_widget(&response)
+    } else {
+        egui::Tooltip::for_enabled(&response)
+    };
+    tooltip.show(|ui| {
+        ui.label(source);
+    });
+}
+
 /// How lit a control is: `0.0` at rest, `1.0` hovered, moving between them over
 /// [`theme::HOVER_FADE_SECS`].
 ///
@@ -2303,12 +2391,28 @@ fn badge_font() -> egui::FontId {
     theme::medium(11.0)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RowSlot {
+    Trailing(f32),
+    Subtitle(f32),
+}
+
 /// A single track row: number (optional), art, title with an explicit badge, artist with play
 /// count, duration.
 ///
 /// Returns the response so the caller decides what a click means.
 pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowClick<'a> {
+    track_row_with_slot(ui, palette, row, RowSlot::Trailing(0.0)).0
+}
+
+pub(crate) fn track_row_with_slot<'a>(
+    ui: &mut Ui,
+    palette: &Palette,
+    row: TrackRow<'a>,
+    slot: RowSlot,
+) -> (RowClick<'a>, Option<Rect>) {
     let TrackRow {
+        source,
         number,
         rank,
         trend,
@@ -2339,16 +2443,32 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // came from an editable playlist, and egui only treats a press as a drag once the pointer
     // has actually moved, so an ordinary click is unaffected.
     let queue_index = menu.as_ref().and_then(|m| m.queue_index);
-    let (rect, _) = ui.allocate_exact_size(
+    let (full_rect, _) = ui.allocate_exact_size(
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::hover(),
     );
+    let requested_width = match slot {
+        RowSlot::Trailing(width) | RowSlot::Subtitle(width) => width,
+    };
+    let slot_width = if requested_width.is_finite() {
+        requested_width
+            .clamp(0.0, 120.0)
+            .min(full_rect.width().max(0.0))
+    } else {
+        0.0
+    };
+    let trailing_width = match slot {
+        RowSlot::Trailing(_) => slot_width,
+        RowSlot::Subtitle(_) => 0.0,
+    };
+    let rect = Rect::from_min_max(full_rect.min, full_rect.max - vec2(trailing_width, 0.0));
+    let trailing = (trailing_width > 0.0)
+        .then(|| Rect::from_min_max(egui::pos2(rect.right(), full_rect.top()), full_rect.max));
     // Stable identities survive artwork loading, virtual spacers and toolbar changes.
     let row_id = match queue_index {
         Some(index) => ui.id().with(("ytm-queue-row", index)),
         None => ui.id().with(("ytm-song-row", id_salt)),
     };
-    let response = ui.interact(rect, row_id, Sense::click_and_drag());
     // Reserve the menu slot even at rest: no text, duration or rating moves on hover.
     let more_w = if menu.is_some() { 36.0 } else { 0.0 };
     let right_pad = 20.0 + more_w;
@@ -2356,13 +2476,6 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         egui::pos2(rect.right() - 27.0, rect.center().y),
         vec2(30.0, 30.0),
     );
-    let more_response = menu.as_ref().map(|_| {
-        ui.interact(
-            more_rect,
-            ui.id().with(("ytm-row-more", id_salt)),
-            Sense::click(),
-        )
-    });
     // A narrow row — the open queue on a small window — compresses instead of starving:
     // the number column and the art yield first, and what they give back is the title's
     // room. A full-size art and a 30pt number column left 21pt of it on a 215pt card,
@@ -2435,10 +2548,52 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         rect.left_center() + vec2(theme::ROW_LEFT_INSET + num_w + art_w / 2.0, 0.0),
         vec2(art_w, row_art),
     );
+    let text_x = art_rect.right() + 12.0;
+    let sub_right = rect.right() - right_pad - duration_w - thumb_w;
+    let sub_w = (sub_right - text_x).max(0.0);
+    let subtitle_y = rect.center().y
+        + if matches!(slot, RowSlot::Subtitle(_)) {
+            12.0
+        } else {
+            9.5
+        };
+    let subtitle_slot = (matches!(slot, RowSlot::Subtitle(_)) && slot_width > 0.0 && sub_w > 0.0)
+        .then(|| {
+            Rect::from_min_size(
+                egui::pos2(text_x, subtitle_y - 12.0),
+                vec2(slot_width.min(sub_w), 24.0),
+            )
+        });
+    let custom_slot = subtitle_slot.or(trailing);
+    let on_subtitle_slot = subtitle_slot.is_some_and(|slot| {
+        ui.input(|input| {
+            [input.pointer.interact_pos(), input.pointer.press_origin()]
+                .into_iter()
+                .flatten()
+                .any(|pos| slot.contains(pos))
+        })
+    });
+    let response = ui.interact(
+        rect,
+        row_id,
+        if on_subtitle_slot {
+            Sense::hover()
+        } else {
+            Sense::click_and_drag()
+        },
+    );
+    let more_response = menu.as_ref().map(|_| {
+        ui.interact(
+            more_rect,
+            ui.id().with(("ytm-row-more", id_salt)),
+            Sense::click(),
+        )
+    });
 
     // Geometric, not `hovered()`: children stacked on top (links, thumbs) steal the hover
     // flag, which would blink the highlight out as the pointer crosses them.
-    let over = response.contains_pointer();
+    let over = response.contains_pointer()
+        || (custom_slot.is_some() && ui.rect_contains_pointer(full_rect));
     let t = fade(ui, response.id.with("row"), over);
     // A hidden cover leaves its play control behind in the number's slot: the leading column
     // — where the hover glyph appears — plays on a single click, exactly as the cover did, so
@@ -2459,22 +2614,31 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             && response
                 .interact_pointer_pos()
                 .is_some_and(|p| more_rect.contains(p)));
-    let queue_suppress = menu
-        .as_ref()
-        .and_then(|m| m.queue_index)
-        .is_some_and(|index| {
-            crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
-        });
-    let song_suppress = menu
-        .as_ref()
-        .filter(|m| m.queue_index.is_none())
-        .is_some_and(|m| {
-            crate::ui::song_drag::interact(ui, &response, id_salt, m.track, m.playlist_id, on_more)
-        });
+    let queue_suppress = !on_subtitle_slot
+        && menu
+            .as_ref()
+            .and_then(|m| m.queue_index)
+            .is_some_and(|index| {
+                crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
+            });
+    let song_suppress = !on_subtitle_slot
+        && menu
+            .as_ref()
+            .filter(|m| m.queue_index.is_none())
+            .is_some_and(|m| {
+                crate::ui::song_drag::interact(
+                    ui,
+                    &response,
+                    id_salt,
+                    m.track,
+                    m.playlist_id,
+                    on_more,
+                )
+            });
     if song_suppress {
         link = None;
     }
-    let activate = if on_more || queue_suppress || song_suppress {
+    let activate = if on_more || on_subtitle_slot || queue_suppress || song_suppress {
         false
     } else if (!hide_art
         && on_cover(
@@ -2511,14 +2675,17 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // marked row reads at rest and the pointer still lights it.
         if selected {
             ui.painter().rect_filled(
-                rect,
+                full_rect,
                 radius,
                 palette.glass_state(palette.surface_active, 0.55),
             );
         }
         if t > 0.001 {
-            ui.painter()
-                .rect_filled(rect, radius, palette.glass_state(palette.surface_hover, t));
+            ui.painter().rect_filled(
+                full_rect,
+                radius,
+                palette.glass_state(palette.surface_hover, t),
+            );
         }
 
         // The row that asked to play shows it loading: over its cover, or — on a page whose
@@ -2620,8 +2787,6 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             }
         }
 
-        let text_x = art_rect.right() + 12.0;
-
         // Explicit badge first, at a fixed spot so the title never shifts when art loads.
         let mut title_x = text_x;
         if explicit {
@@ -2679,13 +2844,29 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // Subtitle pieces, laid out left to right so each linked piece gets its own hit area.
         // The play-count tail rides the same line and scrolls with it. The pair's ±9.5 split
         // (was ±9 at the old 13pt title) keeps the same gap between the two lines.
-        let sub_right = rect.right() - right_pad - duration_w - thumb_w;
-        let sub_w = (sub_right - text_x).max(0.0);
+        let source_w = if let Some(slot) = subtitle_slot {
+            slot.width() + 4.0
+        } else if custom_slot.is_none()
+            && sub_w >= 80.0
+            && let Some(source) =
+                source.or_else(|| menu.as_ref().map(|menu| menu.track.source_name()))
+        {
+            source_name_indicator(
+                ui,
+                palette,
+                Rect::from_center_size(egui::pos2(text_x + 9.0, subtitle_y), vec2(18.0, 18.0)),
+                source,
+                row_id.with("source"),
+            );
+            22.0
+        } else {
+            0.0
+        };
         if let Some(target) = paint_subtitle_marquee(
             ui,
             palette,
-            egui::pos2(text_x, rect.center().y + 9.5),
-            sub_w,
+            egui::pos2(text_x + source_w, subtitle_y),
+            (sub_w - source_w).max(0.0),
             &subtitle,
             plays,
             ("ytm-row-link", id_salt),
@@ -2821,12 +3002,15 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             });
         }
     }
-    RowClick {
-        response,
-        link: if queue_suppress { None } else { link },
-        activate,
-        action,
-    }
+    (
+        RowClick {
+            response,
+            link: if queue_suppress { None } else { link },
+            activate,
+            action,
+        },
+        custom_slot,
+    )
 }
 
 /// The room a row's + button takes, left of the duration.
@@ -4553,7 +4737,18 @@ pub fn text_dropdown(
     current: &str,
     options: &[&str],
 ) -> Option<usize> {
-    let response = chip(ui, palette, &format!("{current}   "), false);
+    text_dropdown_with_label(ui, palette, id, current, current, options)
+}
+
+pub(crate) fn text_dropdown_with_label(
+    ui: &mut Ui,
+    palette: &Palette,
+    id: egui::Id,
+    label: &str,
+    current: &str,
+    options: &[&str],
+) -> Option<usize> {
+    let response = chip(ui, palette, &format!("{label}   "), false);
     Icon::ChevronDown.image(palette.secondary, 14.0).paint_at(
         ui,
         Rect::from_center_size(
@@ -6088,6 +6283,194 @@ mod tests {
         // Exactly at the threshold the zone still fits; sharing starts below it.
         assert!(corner_shares_duration(519.0, true, true, true));
         assert!(!corner_shares_duration(520.0, true, true, true));
+    }
+
+    #[test]
+    fn source_controls_keep_their_full_slot_in_narrow_rows() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let palette = Palette::dark();
+        for width in [240.0, 280.0, 360.0] {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 200.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    let (row, trailing) = track_row_with_slot(
+                        ui,
+                        &palette,
+                        TrackRow {
+                            source: None,
+                            number: None,
+                            rank: None,
+                            trend: crate::model::ChartTrend::Unknown,
+                            title: "Song",
+                            album_id: None,
+                            subtitle: plain_subtitle("Artist"),
+                            duration: Some(180),
+                            plays: None,
+                            explicit: false,
+                            active: false,
+                            playing: false,
+                            badge: None,
+                            art: None,
+                            shape: ArtShape::Square,
+                            hide_art: false,
+                            id_salt: 0,
+                            menu: None,
+                            like: crate::model::LikeStatus::Indifferent,
+                            show_rating: false,
+                            quiet_like: false,
+                            add_to: None,
+                        },
+                        RowSlot::Trailing(72.0),
+                    );
+                    let trailing = trailing.expect("source controls have a slot");
+                    assert_eq!(trailing.width(), 72.0);
+                    assert_eq!(row.response.rect.right(), trailing.left());
+                },
+            )
+            .drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn subtitle_source_slot_keeps_links_clear_and_does_not_activate_or_drag_the_row() {
+        use std::cell::Cell;
+
+        use egui::{Event, PointerButton, Pos2};
+
+        for width in [240.0, 280.0, 600.0] {
+            let ctx = egui::Context::default();
+            crate::theme::install_fonts(&ctx);
+            let palette = Palette::dark();
+            let mut track = crate::listening::Metadata {
+                id: "subtitle-slot-test".to_owned(),
+                title: "A Song".to_owned(),
+                ..Default::default()
+            }
+            .to_track();
+            track.duration = Some(180);
+            let playlists = [];
+            let activated = Cell::new(false);
+            let dragged = Cell::new(false);
+            let source = Cell::new(Rect::NOTHING);
+            let cover = Cell::new(Pos2::ZERO);
+            let mut time = 0.0;
+            let mut pass = |events: Vec<Event>| {
+                time += 1.0 / 60.0;
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(width, 200.0))),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let mut subtitle = no_subtitle();
+                        subtitle[0] = Some(Part::link("Artist", LinkTarget::Artist("UCartist")));
+                        let expected_width = ui.available_width();
+                        let (row, slot) = track_row_with_slot(
+                            ui,
+                            &palette,
+                            TrackRow {
+                                source: Some(track.source_name()),
+                                number: None,
+                                rank: None,
+                                trend: crate::model::ChartTrend::Unknown,
+                                title: &track.title,
+                                album_id: Some("album"),
+                                subtitle,
+                                duration: track.duration,
+                                plays: None,
+                                explicit: false,
+                                active: false,
+                                playing: false,
+                                badge: None,
+                                art: None,
+                                shape: ArtShape::Square,
+                                hide_art: false,
+                                id_salt: 0,
+                                menu: Some(RowMenu {
+                                    track: &track,
+                                    playlist_id: None,
+                                    playlists: &playlists,
+                                    signed_in: false,
+                                    queue_index: None,
+                                }),
+                                like: track.like,
+                                show_rating: false,
+                                quiet_like: false,
+                                add_to: None,
+                            },
+                            RowSlot::Subtitle(52.0),
+                        );
+                        let slot = slot.expect("source controls have a subtitle slot");
+                        let title = ctx
+                            .read_response(ui.id().with((("ytm-row-title", 0_usize), 0_usize)))
+                            .expect("the title has a link hit area");
+                        let artist = ctx
+                            .read_response(ui.id().with((("ytm-row-link", 0_usize), 0_usize)))
+                            .or_else(|| {
+                                let id = ui.id().with(("ytm-row-link", 0_usize));
+                                ctx.read_response(ui.id().with((id, 0_usize)))
+                            })
+                            .expect("the artist has a link hit area");
+                        let art_size = if row.response.rect.width() < 340.0 {
+                            32.0
+                        } else {
+                            theme::ART_SIZE
+                        };
+                        let art_right = row.response.rect.left() + theme::ROW_LEFT_INSET + art_size;
+                        assert_eq!(row.response.rect.width(), expected_width);
+                        assert_eq!(slot.size(), vec2(52.0, 24.0));
+                        assert!(row.response.rect.contains_rect(slot));
+                        assert_eq!(slot.left(), art_right + 12.0);
+                        assert!(title.rect.bottom() <= slot.top());
+                        assert_eq!(artist.rect.left(), slot.right() + 4.0);
+                        assert!(ctx.read_response(row.response.id.with("source")).is_none());
+                        activated.set(row.activate);
+                        dragged.set(row.response.drag_started() || row.response.dragged());
+                        source.set(slot);
+                        cover.set(egui::pos2(
+                            art_right - art_size * 0.5,
+                            row.response.rect.center().y,
+                        ));
+                    },
+                )
+                .drop_without_applying_deltas();
+            };
+            let click = |pos, pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+
+            pass(vec![]);
+            for offset in [12.0, 40.0] {
+                let pos = source.get().left_center() + vec2(offset, 0.0);
+                pass(vec![Event::PointerMoved(pos)]);
+                pass(vec![click(pos, true)]);
+                pass(vec![click(pos, false)]);
+                assert!(!activated.get());
+                assert!(crate::ui::song_drag::payload(&ctx).is_none());
+            }
+            let pos = source.get().center();
+            pass(vec![Event::PointerMoved(pos)]);
+            pass(vec![click(pos, true)]);
+            pass(vec![Event::PointerMoved(pos + vec2(80.0, 0.0))]);
+            assert!(!dragged.get());
+            assert!(crate::ui::song_drag::payload(&ctx).is_none());
+            pass(vec![click(pos + vec2(80.0, 0.0), false)]);
+            assert!(!activated.get());
+            let pos = cover.get();
+            pass(vec![Event::PointerMoved(pos)]);
+            pass(vec![click(pos, true)]);
+            pass(vec![click(pos, false)]);
+            assert!(activated.get());
+        }
     }
 
     /// The cover's play button is a control of its own: a click inside a square row's artwork

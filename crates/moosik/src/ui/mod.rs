@@ -540,6 +540,33 @@ pub(crate) fn spec_rows<'d>(
     count: usize,
     spec: impl Fn(usize) -> RowSpec<'d>,
 ) -> ListOutcome {
+    spec_rows_with_slot(
+        ui,
+        palette,
+        images,
+        backend,
+        stats,
+        liked,
+        count,
+        spec,
+        |_| widgets::RowSlot::Trailing(0.0),
+        |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spec_rows_with_slot<'d>(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    images: &mut Images,
+    backend: &Backend,
+    stats: &mut crate::stats::Stats,
+    liked: &crate::liked::Index,
+    count: usize,
+    spec: impl Fn(usize) -> RowSpec<'d>,
+    slot: impl Fn(usize) -> widgets::RowSlot,
+    mut paint_slot: impl FnMut(&mut egui::Ui, usize),
+) -> ListOutcome {
     let mut clicked = None;
     let mut action = None;
     let mut reorder = None;
@@ -564,10 +591,12 @@ pub(crate) fn spec_rows<'d>(
         } else {
             art_texture(images, backend, ui.ctx(), s.thumbnail, ROW_ART_PT)
         };
-        let hit = crate::widgets::track_row(
+        let placement = slot(i);
+        let (hit, slot_rect) = crate::widgets::track_row_with_slot(
             ui,
             palette,
             crate::widgets::TrackRow {
+                source: s.source,
                 number: s.number,
                 rank: s.rank,
                 trend: s.trend,
@@ -590,7 +619,25 @@ pub(crate) fn spec_rows<'d>(
                 quiet_like: s.quiet_like,
                 add_to: s.add_to,
             },
+            placement,
         );
+        if let Some(rect) = slot_rect {
+            let mut slot_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id(ui.id().with(("row-slot", i)))
+                    .max_rect(rect)
+                    .layout(match placement {
+                        widgets::RowSlot::Trailing(_) => {
+                            egui::Layout::right_to_left(egui::Align::Center)
+                        }
+                        widgets::RowSlot::Subtitle(_) => {
+                            egui::Layout::left_to_right(egui::Align::Center)
+                        }
+                    }),
+            );
+            slot_ui.set_clip_rect(ui.clip_rect().intersect(rect));
+            paint_slot(&mut slot_ui, i);
+        }
         if hit.response.drag_started()
             && let Some(menu) = spec(i).menu
         {
