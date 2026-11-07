@@ -34,7 +34,7 @@ async fn collect_folder_pages<T, FirstPage, NextPage>(
     playlists: Vec<(String, String)>,
     tracks: &mut Vec<T>,
     first: impl Fn(String) -> FirstPage,
-    more: impl Fn(String) -> NextPage,
+    more: impl Fn(String, String) -> NextPage,
 ) -> Vec<String>
 where
     FirstPage: Future<Output = anyhow::Result<crate::model::Paged<T>>>,
@@ -52,7 +52,7 @@ where
                         break;
                     };
                     page = if visited.insert(token.clone()) {
-                        more(token).await
+                        more(id.clone(), token).await
                     } else {
                         Err(anyhow::anyhow!("repeated playlist continuation"))
                     };
@@ -2282,9 +2282,19 @@ impl Backend {
                 collect_folder_pages(
                     playlists,
                     &mut tracks,
-                    |id| async move { Ok(api.playlist(&id).await?.tracks) },
-                    |token| async move {
-                        let page = api.playlist_more(token).await?;
+                    |id| async move {
+                        Ok(if crate::model::is_spotify_id(&id) {
+                            crate::spotify::playlist(&id).await?.tracks
+                        } else {
+                            api.playlist(&id).await?.tracks
+                        })
+                    },
+                    |id, token| async move {
+                        let page = if crate::model::is_spotify_id(&id) {
+                            crate::spotify::playlist_more(&token).await?
+                        } else {
+                            api.playlist_more(token).await?
+                        };
                         Ok(crate::model::Paged::new(
                             page.items
                                 .into_iter()
@@ -3954,5 +3964,32 @@ mod folder_tests {
         .await;
         assert_eq!(tracks, ["private", "first page", "last playlist"]);
         assert_eq!(incomplete, ["deleted", "partial"]);
+    }
+    #[tokio::test]
+    async fn mixed_folder_continuations_keep_their_playlist_source() {
+        let mut tracks = Vec::new();
+        let incomplete = collect_folder_pages(
+            vec![
+                ("youtube-list".to_owned(), "YouTube".to_owned()),
+                ("spotify:playlist:test".to_owned(), "Spotify".to_owned()),
+            ],
+            &mut tracks,
+            |id| async move { Ok(Paged::new(vec![id], Some("next".to_owned()))) },
+            |id, token| async move {
+                assert_eq!(token, "next");
+                Ok(Paged::new(vec![format!("{id}:continued")], None))
+            },
+        )
+        .await;
+        assert!(incomplete.is_empty());
+        assert_eq!(
+            tracks,
+            [
+                "youtube-list",
+                "youtube-list:continued",
+                "spotify:playlist:test",
+                "spotify:playlist:test:continued"
+            ]
+        );
     }
 }

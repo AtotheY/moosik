@@ -8013,6 +8013,7 @@ impl App {
         let mut local = Vec::new();
         let mut rules = Vec::new();
         let mut remote = Vec::new();
+        let providers = self.connected_providers();
         for id in ids {
             if let Some(lp) = self.local_playlists.iter().find(|lp| lp.id == *id) {
                 if let Some(rule) = lp.rule {
@@ -8020,7 +8021,14 @@ impl App {
                 } else {
                     local.extend(self.local_playlist_as_playlist(lp).tracks.items);
                 }
-            } else if self.signed_in() && !id.starts_with("private:") && !id.starts_with("local:") {
+            } else if !id.starts_with("private:")
+                && !id.starts_with("local:")
+                && providers.contains(&if crate::model::is_spotify_id(id) {
+                    crate::model::Provider::Spotify
+                } else {
+                    crate::model::Provider::YouTubeMusic
+                })
+            {
                 let title = self
                     .library
                     .playlists
@@ -8037,7 +8045,7 @@ impl App {
             local,
             rules,
             self.playback_choice,
-            self.account_epoch,
+            self.browsing_epoch,
         );
         self.toast("Preparing folder shuffle…");
     }
