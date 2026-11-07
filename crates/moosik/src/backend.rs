@@ -2799,9 +2799,13 @@ impl Backend {
             return;
         }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let search_cache = Arc::clone(&self.search_cache);
         self.rt.spawn(async move {
             let event = match api.rate(&video_id, status).await {
-                Ok(()) => return,
+                Ok(()) => {
+                    search_cache.invalidate();
+                    return;
+                }
                 Err(e) => Event::RatingFailed {
                     video_id,
                     attempted: status,
@@ -2941,12 +2945,16 @@ impl Backend {
             return;
         }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let search_cache = Arc::clone(&self.search_cache);
         self.rt.spawn(async move {
             let event = match api.feedback(&token).await {
-                Ok(()) => Event::LibraryToggled {
-                    video_id,
-                    in_library,
-                },
+                Ok(()) => {
+                    search_cache.invalidate();
+                    Event::LibraryToggled {
+                        video_id,
+                        in_library,
+                    }
+                }
                 Err(e) => Event::LibraryToggleFailed {
                     video_id,
                     previous: !in_library,
