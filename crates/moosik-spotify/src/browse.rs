@@ -1,3 +1,6 @@
+use std::{future::Future, time::Duration};
+
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -216,7 +219,12 @@ impl Transport {
             "includeAudiobooks": false, "includeAuthors": false, "includePreReleases": false,
             "includeAlbumPreReleases": false, "includeEpisodeContentRatingsV2": false
         })).await?;
-        parse_search(&response, keys)
+        let items = parse_search(&response, keys)?;
+        Ok(collapse_search_recordings(
+            items,
+            |uri| async move { self.canonical_track_uri(&uri).await },
+        )
+        .await)
     }
 
     pub async fn playlist(&self, input: &str) -> Result<Playlist> {
@@ -748,6 +756,67 @@ fn parse_search(response: &Value, keys: &[&str]) -> Result<Vec<CatalogItem>> {
     Ok(items)
 }
 
+fn possible_recording_alias(left: &CatalogItem, right: &CatalogItem) -> bool {
+    let (CatalogItem::Track(left), CatalogItem::Track(right)) = (left, right) else {
+        return false;
+    };
+    left.metadata
+        .title
+        .eq_ignore_ascii_case(&right.metadata.title)
+        && left.metadata.explicit == right.metadata.explicit
+        && !left.artists.is_empty()
+        && left.artists == right.artists
+        && matches!(
+            (left.metadata.duration_ms, right.metadata.duration_ms),
+            (Some(left), Some(right)) if left > 0 && right > 0 && left.abs_diff(right) <= 3_000
+        )
+}
+
+async fn collapse_search_recordings<F, Fut>(items: Vec<CatalogItem>, lookup: F) -> Vec<CatalogItem>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    let candidates = items
+        .iter()
+        .enumerate()
+        .filter(|(index, item)| {
+            items.iter().enumerate().any(|(other, candidate)| {
+                *index != other && possible_recording_alias(item, candidate)
+            })
+        })
+        .map(|(index, item)| (index, item_uri(item).to_owned()))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return items;
+    }
+    let mut lookups = stream::iter(candidates)
+        .map(|(index, uri)| {
+            let find = lookup(uri);
+            async move { (index, find.await) }
+        })
+        .buffer_unordered(6);
+    let mut recordings = vec![None; items.len()];
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some((index, canonical)) = lookups.next().await {
+            recordings[index] = canonical;
+        }
+    })
+    .await;
+    let mut unique: Vec<(CatalogItem, Option<String>)> = Vec::with_capacity(items.len());
+    for (item, canonical) in items.into_iter().zip(recordings) {
+        if canonical.is_some()
+            && unique.iter().any(|(existing, existing_canonical)| {
+                canonical == *existing_canonical && possible_recording_alias(&item, existing)
+            })
+        {
+            continue;
+        }
+        unique.push((item, canonical));
+    }
+    unique.into_iter().map(|(item, _)| item).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +967,38 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(item_uri(&results[0]), format!("spotify:track:{ID}"));
         assert!(parse_search(&json!({"data": {}}), &["tracksV2"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn search_collapses_only_confirmed_recording_aliases() {
+        let uris = [1, 2, 3, 4, 5, 6].map(|id| format!("spotify:track:{id:022}"));
+        let tracks = uris
+            .iter()
+            .enumerate()
+            .map(|(index, uri)| {
+                let mut data = track();
+                data["duration"]["totalMilliseconds"] = json!(192_345 - index * 13);
+                if index == 5 {
+                    data["name"] = json!("A song - Live");
+                }
+                CatalogItem::Track(parse_track(&data, Some(uri), false).unwrap())
+            })
+            .collect();
+        let results = collapse_search_recordings(tracks, |uri| {
+            let index = uris.iter().position(|candidate| *candidate == uri).unwrap();
+            let canonical = match index {
+                0..=2 => Some(uris[1].clone()),
+                3 => Some(uris[3].clone()),
+                4 => None,
+                _ => panic!("unrelated song should not need a lookup"),
+            };
+            std::future::ready(canonical)
+        })
+        .await;
+        assert_eq!(
+            results.iter().map(item_uri).collect::<Vec<_>>(),
+            [&uris[0], &uris[3], &uris[4], &uris[5]]
+        );
     }
 
     #[test]

@@ -217,15 +217,7 @@ impl Transport {
     }
 
     pub async fn metadata(&self, uri: &str) -> Result<TrackMetadata> {
-        let id = format!("{:032x}", track_id(uri)?);
-        let value = self
-            .api(
-                Method::GET,
-                &format!("/metadata/4/track/{id}?alt=json"),
-                None,
-                "metadata",
-            )
-            .await?;
+        let value = self.track_metadata(uri).await?;
         let mut metadata = metadata(&json!({"metadata":value}), uri);
         if metadata.cover_url.is_none() {
             metadata.cover_url = value
@@ -235,6 +227,24 @@ impl Transport {
                 .map(|id| format!("https://i.scdn.co/image/{id}"));
         }
         Ok(metadata)
+    }
+
+    pub(crate) async fn canonical_track_uri(&self, uri: &str) -> Option<String> {
+        let metadata = self.track_metadata(uri).await.ok()?;
+        let canonical = metadata["canonical_uri"].as_str()?;
+        track_id(canonical).ok()?;
+        Some(canonical.to_owned())
+    }
+
+    async fn track_metadata(&self, uri: &str) -> Result<Value> {
+        let id = format!("{:032x}", track_id(uri)?);
+        self.api(
+            Method::GET,
+            &format!("/metadata/4/track/{id}?alt=json"),
+            None,
+            "metadata",
+        )
+        .await
     }
 
     pub async fn search_tracks(&self, query: &str) -> Result<Vec<TrackMetadata>> {
