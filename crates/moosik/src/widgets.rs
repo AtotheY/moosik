@@ -3041,7 +3041,10 @@ pub(crate) fn track_row_with_slot<'a>(
         );
         actions.spacing_mut().item_spacing.x = 4.0;
         if playlist_save_button(&mut actions, palette, menu.track.in_library, false).clicked() {
-            action = Some(super::ui::RowAction::SaveSpotifyTrack(menu.track.clone()));
+            action = Some(super::ui::RowAction::SetSpotifyLiked {
+                track: menu.track.clone(),
+                liked: !menu.track.in_library,
+            });
         }
         if let Some((playlist_id, uid)) = spotify_removal
             && spotify_remove_button(&mut actions, palette).clicked()
@@ -3129,7 +3132,7 @@ pub(crate) fn playlist_save_button(
     let label = if opens_picker {
         "Add to playlist"
     } else if saved {
-        "In Spotify Liked Songs"
+        "Remove from Spotify Liked Songs"
     } else {
         "Add to Spotify Liked Songs"
     };
@@ -3139,19 +3142,11 @@ pub(crate) fn playlist_save_button(
         if saved { Icon::Check } else { Icon::Plus },
         label,
         saved,
-        opens_picker || !saved,
     )
 }
 
 pub(crate) fn spotify_remove_button(ui: &mut Ui, palette: &Palette) -> egui::Response {
-    spotify_item_button(
-        ui,
-        palette,
-        Icon::Minus,
-        "Remove from playlist",
-        false,
-        true,
-    )
+    spotify_item_button(ui, palette, Icon::Minus, "Remove from playlist", false)
 }
 
 fn spotify_item_button(
@@ -3160,14 +3155,8 @@ fn spotify_item_button(
     icon: Icon,
     label: &str,
     saved: bool,
-    clickable: bool,
 ) -> egui::Response {
-    let sense = if clickable {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 30.0), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let center = rect.center() + press_offset(&response);
         let color = mix(palette.secondary, palette.text, lit(ui, &response));
@@ -3186,8 +3175,10 @@ fn spotify_item_button(
                 .circle_stroke(center, 12.0, egui::Stroke::new(1.0, palette.accent));
         }
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, clickable, label));
-    if clickable && response.hovered() {
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     response.on_hover_text(label)
@@ -3396,7 +3387,6 @@ fn row_menu_with_button(
                 })
                 .collect();
             let spotify_signed_in = spotify && crate::spotify::is_signed_in();
-            let spotify_save = spotify_signed_in && !t.in_library;
             let removable = menu
                 .playlist_id
                 .zip(t.set_video_id.as_deref())
@@ -3411,16 +3401,34 @@ fn row_menu_with_button(
             // song is one, or has a library or playlist move to offer.
             if token.is_some()
                 || youtube
-                || spotify_save
+                || spotify_signed_in
                 || !targets.is_empty()
                 || removable.is_some()
             {
                 menu_divider(mui, palette);
             }
-            if spotify_save
-                && menu_item(mui, palette, Icon::Heart, "Add to Liked Songs", None).clicked()
+            if spotify_signed_in
+                && menu_item(
+                    mui,
+                    palette,
+                    if t.in_library {
+                        Icon::HeartFilled
+                    } else {
+                        Icon::Heart
+                    },
+                    if t.in_library {
+                        "Remove from Liked Songs"
+                    } else {
+                        "Add to Liked Songs"
+                    },
+                    None,
+                )
+                .clicked()
             {
-                choice = Some(RowAction::SaveSpotifyTrack(t.clone()));
+                choice = Some(RowAction::SetSpotifyLiked {
+                    track: t.clone(),
+                    liked: !t.in_library,
+                });
                 mui.close();
             }
             if token.is_some()

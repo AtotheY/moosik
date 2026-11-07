@@ -273,8 +273,8 @@ pub async fn playlist_more(token: &str) -> Result<crate::innertube::Page> {
     })
 }
 
-pub async fn save_track(uri: &str) -> Result<()> {
-    Ok(transport().await?.save_track(uri).await?)
+pub async fn set_track_liked(uri: &str, liked: bool) -> Result<()> {
+    Ok(transport().await?.set_track_liked(uri, liked).await?)
 }
 
 pub async fn remove_playlist_item(playlist_id: &str, uid: &str) -> Result<()> {

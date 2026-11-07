@@ -13,6 +13,7 @@ use crate::widgets;
 pub(crate) struct PlaylistPicker {
     track_id: Option<String>,
     choices: Option<Result<EditablePlaylists, String>>,
+    liked_override: Option<bool>,
     loading: bool,
     query: String,
 }
@@ -60,14 +61,17 @@ impl PlaylistPicker {
     }
 
     pub(crate) fn note_liked(&mut self, track_id: &str, liked: bool) {
-        if self.track_id.as_deref() == Some(track_id)
-            && let Some(Ok(choices)) = &mut self.choices
-        {
-            choices.liked = Some(liked);
+        if self.track_id.as_deref() == Some(track_id) {
+            self.liked_override = Some(liked);
         }
     }
 
     fn is_liked(&self, track: &Track) -> bool {
+        if self.track_id.as_deref() == Some(&track.video_id)
+            && let Some(liked) = self.liked_override
+        {
+            return liked;
+        }
         (if track.is_spotify() {
             track.in_library
         } else {
@@ -96,7 +100,13 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
         if picker.track_id.as_deref() != Some(track.video_id.as_str()) {
             picker.track_id = Some(track.video_id.clone());
             picker.choices = None;
+            picker.liked_override = None;
             picker.loading = false;
+        }
+        if track.is_spotify()
+            && let Some(liked) = app.liked_music.spotify_liked(&track.video_id)
+        {
+            picker.note_liked(&track.video_id, liked);
         }
         if !picker.loading && picker.choices.as_ref().is_none_or(Result::is_err) {
             picker.loading = true;
@@ -123,24 +133,32 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
             let mut action = None;
             let liked = picker.is_liked(track);
             if "liked songs".contains(&query) {
-                let save = ui
-                    .add_enabled_ui(!liked, |ui| {
-                        widgets::menu_item(
-                            ui,
-                            &palette,
-                            if liked { Icon::Check } else { Icon::Heart },
-                            "Liked Songs",
-                            None,
-                        )
-                    })
-                    .inner;
+                let save = widgets::menu_item(
+                    ui,
+                    &palette,
+                    if liked { Icon::Check } else { Icon::Heart },
+                    "Liked Songs",
+                    None,
+                )
+                .on_hover_text(if liked {
+                    "Remove from Liked Songs"
+                } else {
+                    "Add to Liked Songs"
+                });
                 if save.clicked() {
                     action = Some(if track.is_spotify() {
-                        RowAction::SaveSpotifyTrack(track.clone())
+                        RowAction::SetSpotifyLiked {
+                            track: track.clone(),
+                            liked: !liked,
+                        }
                     } else {
                         RowAction::Rate {
                             video_id: track.video_id.clone(),
-                            status: LikeStatus::Like,
+                            status: if liked {
+                                LikeStatus::Indifferent
+                            } else {
+                                LikeStatus::Like
+                            },
                         }
                     });
                 }

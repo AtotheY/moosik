@@ -145,12 +145,20 @@ impl Transport {
         Ok(())
     }
 
-    pub async fn save_track(&self, uri: &str) -> Result<()> {
+    pub async fn set_track_liked(&self, uri: &str, liked: bool) -> Result<()> {
         track_id(uri)?;
+        let (operation, variables) = if liked {
+            (
+                "addToLibrary",
+                json!({"libraryItemUris": [uri], "interactionId": null}),
+            )
+        } else {
+            ("removeFromLibrary", json!({"libraryItemUris": [uri]}))
+        };
         self.mutate(
-            "addToLibrary",
+            operation,
             "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
-            json!({"libraryItemUris": [uri], "interactionId": null}),
+            variables,
         )
         .await
     }

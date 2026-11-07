@@ -4187,8 +4187,12 @@ impl App {
 
     pub(crate) fn request_liked_music(&mut self, provider: crate::model::Provider, more: bool) {
         if let Some(token) = self.liked_music.request(provider, more) {
-            self.backend
-                .fetch_liked_music(provider, token, self.browsing_epoch);
+            self.backend.fetch_liked_music(
+                provider,
+                token,
+                self.browsing_epoch,
+                self.liked_music.generation(provider),
+            );
         }
     }
 
@@ -6244,8 +6248,11 @@ impl App {
                 Event::LikedMusicPage {
                     provider,
                     epoch,
+                    generation,
                     result,
-                } if epoch == self.browsing_epoch => {
+                } if epoch == self.browsing_epoch
+                    && generation == self.liked_music.generation(provider) =>
+                {
                     self.liked_music.loaded(provider, result);
                 }
                 Event::LikedMusicPage { .. } => {}
@@ -6985,16 +6992,35 @@ impl App {
                     self.set_library_state(&video_id, previous);
                     self.toast_error(&failure_text("Could not update your library", &error));
                 }
-                Event::SpotifyTrackSaved(Ok(track)) => {
-                    self.set_library_state(&track.video_id, true);
-                    self.liked_music.save_spotify_track(track);
-                    self.toast("Added to Spotify Liked Songs");
-                }
-                Event::SpotifyTrackSaved(Err(error)) => {
-                    self.toast_error(&failure_text(
-                        "Could not save to Spotify Liked Songs",
-                        &error,
-                    ));
+                Event::SpotifyTrackLiked {
+                    track,
+                    liked,
+                    result,
+                } => {
+                    self.liked_music.spotify_pending.remove(&track.video_id);
+                    if let Err(error) = result {
+                        self.toast_error(&failure_text(
+                            "Could not update Spotify Liked Songs",
+                            &error,
+                        ));
+                        continue;
+                    }
+                    self.playlist_picker.note_liked(&track.video_id, liked);
+                    self.set_library_state(&track.video_id, liked);
+                    if liked {
+                        self.liked_music.save_spotify_track(track);
+                        self.toast("Added to Spotify Liked Songs");
+                    } else {
+                        self.liked_music.remove_spotify_track(&track.video_id);
+                        self.library
+                            .songs
+                            .items
+                            .retain(|song| song.video_id != track.video_id);
+                        if self.history.current() == &Route::LikedMusic {
+                            self.request_liked_music(crate::model::Provider::Spotify, false);
+                        }
+                        self.toast("Removed from Spotify Liked Songs");
+                    }
                 }
                 Event::EditablePlaylists { video_id, result } => {
                     self.playlist_picker.loaded(&video_id, result);
@@ -8090,11 +8116,17 @@ impl App {
                 self.backend
                     .toggle_library(token.to_owned(), track.video_id, saving);
             }
-            RowAction::SaveSpotifyTrack(track) => {
+            RowAction::SetSpotifyLiked { track, liked } => {
                 if crate::spotify::is_signed_in() {
-                    self.backend.save_spotify_track(track);
+                    if self
+                        .liked_music
+                        .spotify_pending
+                        .insert(track.video_id.clone())
+                    {
+                        self.backend.set_spotify_liked(track, liked);
+                    }
                 } else {
-                    self.toast_error("Sign in to Spotify to save songs");
+                    self.toast_error("Sign in to Spotify to update Liked Songs");
                 }
             }
             RowAction::SavePrivate {
@@ -9300,6 +9332,17 @@ impl App {
     /// index knows every song the account has liked, which is the one list that outlives the
     /// page it was read on.
     fn reconcile_state(&self, track: &mut Track) {
+        if track.is_spotify()
+            && let Some(liked) = self.liked_music.spotify_liked(&track.video_id)
+        {
+            track.in_library = liked;
+            track.like = if liked {
+                LikeStatus::Like
+            } else {
+                LikeStatus::Indifferent
+            };
+            return;
+        }
         let mut like = None;
         let mut library = None;
         self.for_each_track(|t| {
@@ -9364,9 +9407,14 @@ impl App {
             }
             let mut changed = t.in_library != in_library;
             t.in_library = in_library;
-            if t.is_spotify() && in_library && t.like != LikeStatus::Like {
-                t.like = LikeStatus::Like;
-                changed = true;
+            if t.is_spotify() {
+                let like = if in_library {
+                    LikeStatus::Like
+                } else {
+                    LikeStatus::Indifferent
+                };
+                changed |= t.like != like;
+                t.like = like;
             }
             changed
         };

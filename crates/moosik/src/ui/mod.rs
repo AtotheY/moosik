@@ -435,7 +435,10 @@ pub(crate) enum RowAction {
     },
     /// Flip a song's library membership with its own bookmark token.
     ToggleLibrary(Track),
-    SaveSpotifyTrack(Track),
+    SetSpotifyLiked {
+        track: Track,
+        liked: bool,
+    },
     SaveToPlaylist {
         playlist_id: String,
         video_id: String,

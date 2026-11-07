@@ -212,6 +212,7 @@ pub enum Event {
     LikedMusicPage {
         provider: Provider,
         epoch: u64,
+        generation: u64,
         result: Result<Paged<Track>, String>,
     },
     AlbumLoaded {
@@ -468,7 +469,11 @@ pub enum Event {
         previous: bool,
         error: String,
     },
-    SpotifyTrackSaved(Result<Track, String>),
+    SpotifyTrackLiked {
+        track: Track,
+        liked: bool,
+        result: Result<(), String>,
+    },
     EditablePlaylists {
         video_id: String,
         result: Result<crate::model::EditablePlaylists, String>,
@@ -700,7 +705,9 @@ impl Event {
             | Event::LyricsFailed { error, .. }
             | Event::RatingFailed { error, .. }
             | Event::LibraryToggleFailed { error, .. }
-            | Event::SpotifyTrackSaved(Err(error))
+            | Event::SpotifyTrackLiked {
+                result: Err(error), ..
+            }
             | Event::EditablePlaylists {
                 result: Err(error), ..
             }
@@ -2169,7 +2176,13 @@ impl Backend {
         });
     }
 
-    pub fn fetch_liked_music(&self, provider: Provider, token: Option<String>, epoch: u64) {
+    pub fn fetch_liked_music(
+        &self,
+        provider: Provider,
+        token: Option<String>,
+        epoch: u64,
+        generation: u64,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let token = token.or_else(|| {
@@ -2218,6 +2231,7 @@ impl Backend {
                 Event::LikedMusicPage {
                     provider,
                     epoch,
+                    generation,
                     result: result.map_err(|error| format!("{error:#}")),
                 },
             );
@@ -2999,17 +3013,20 @@ impl Backend {
         });
     }
 
-    pub fn save_spotify_track(&self, track: Track) {
+    pub fn set_spotify_liked(&self, track: Track, liked: bool) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let epoch = self.browse_epoch.load(Ordering::Acquire);
         let search_cache = Arc::clone(&self.search_cache);
         self.rt.spawn(async move {
-            let result = crate::spotify::save_track(&track.video_id).await;
+            let result = crate::spotify::set_track_liked(&track.video_id, liked).await;
             if result.is_ok() {
                 search_cache.invalidate();
             }
-            let event =
-                Event::SpotifyTrackSaved(result.map(|()| track).map_err(|e| format!("{e:#}")));
+            let event = Event::SpotifyTrackLiked {
+                track,
+                liked,
+                result: result.map_err(|e| format!("{e:#}")),
+            };
             Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }

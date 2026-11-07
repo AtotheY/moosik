@@ -16,6 +16,7 @@ struct Source {
     error: Option<String>,
     cursors: HashSet<String>,
     ids: HashSet<String>,
+    generation: u64,
 }
 
 impl Source {
@@ -28,6 +29,8 @@ impl Source {
 pub(crate) struct State {
     sources: [Source; 2],
     removed_youtube: HashMap<String, Track>,
+    removed_spotify: HashSet<String>,
+    pub(crate) spotify_pending: HashSet<String>,
     filter: Option<Provider>,
     sort: PlaylistSort,
     revision: u64,
@@ -42,6 +45,10 @@ impl State {
 
     fn source_mut(&mut self, provider: Provider) -> &mut Source {
         &mut self.sources[usize::from(provider == Provider::Spotify)]
+    }
+
+    pub(crate) fn generation(&self, provider: Provider) -> u64 {
+        self.source(provider).generation
     }
 
     pub(crate) fn request(&mut self, provider: Provider, more: bool) -> Option<Option<String>> {
@@ -62,7 +69,8 @@ impl State {
     }
 
     pub(crate) fn loaded(&mut self, provider: Provider, result: Result<Paged<Track>, String>) {
-        let removed = &self.removed_youtube;
+        let removed_youtube = &self.removed_youtube;
+        let removed_spotify = &self.removed_spotify;
         let source = &mut self.sources[usize::from(provider == Provider::Spotify)];
         source.songs.loading = false;
         let page = match result {
@@ -82,8 +90,11 @@ impl State {
             .items
             .into_iter()
             .filter(|track| {
-                (provider != Provider::YouTubeMusic || !removed.contains_key(&track.video_id))
-                    && source.ids.insert(track.video_id.clone())
+                !match provider {
+                    Provider::YouTubeMusic => removed_youtube.contains_key(&track.video_id),
+                    Provider::Spotify => removed_spotify.contains(&track.video_id),
+                    Provider::Local => false,
+                } && source.ids.insert(track.video_id.clone())
             })
             .map(|mut track| {
                 track.like = LikeStatus::Like;
@@ -103,7 +114,18 @@ impl State {
             .or_else(|| self.removed_youtube.get(id))
     }
 
+    pub(crate) fn spotify_liked(&self, id: &str) -> Option<bool> {
+        if self.removed_spotify.contains(id) {
+            Some(false)
+        } else if self.source(Provider::Spotify).ids.contains(id) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn save_spotify_track(&mut self, mut track: Track) {
+        self.removed_spotify.remove(&track.video_id);
         let spotify = self.source_mut(Provider::Spotify);
         if spotify.ids.insert(track.video_id.clone()) {
             track.in_library = true;
@@ -112,6 +134,22 @@ impl State {
             spotify.songs.items.insert(0, track);
             self.revision = self.revision.wrapping_add(1);
         }
+    }
+
+    pub(crate) fn remove_spotify_track(&mut self, id: &str) {
+        self.removed_spotify.insert(id.to_owned());
+        let spotify = self.source_mut(Provider::Spotify);
+        spotify.ids.remove(id);
+        spotify.songs.items.retain(|track| track.video_id != id);
+        if !spotify.complete() {
+            spotify.generation = spotify.generation.wrapping_add(1);
+            spotify.loaded = false;
+            spotify.error = None;
+            spotify.cursors.clear();
+            spotify.songs.loading = false;
+            spotify.songs.next = None;
+        }
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub(crate) fn set_youtube_rating(&mut self, mut track: Track, like: LikeStatus) {
@@ -470,6 +508,36 @@ mod tests {
         assert_eq!(saved.like, LikeStatus::Like);
         assert!(saved.in_library);
         assert!(saved.set_video_id.is_none());
+    }
+
+    #[test]
+    fn spotify_unlike_drops_the_track_and_restarts_offset_paging() {
+        let [youtube, spotify] = SOURCES;
+        let mut state = State::default();
+        let removed = song("spotify:track:0000000000000000000001");
+        let remaining = song("spotify:track:0000000000000000000002");
+        state.loaded(youtube, Ok(Paged::new(vec![song("youtube-song")], None)));
+        state.loaded(
+            spotify,
+            Ok(Paged::new(
+                vec![removed.clone(), remaining.clone()],
+                Some("next".into()),
+            )),
+        );
+        assert_eq!(state.request(spotify, true), Some(Some("next".into())));
+        let generation = state.generation(spotify);
+        state.remove_spotify_track(&removed.video_id);
+        assert_eq!(state.spotify_liked(&removed.video_id), Some(false));
+        assert_ne!(state.generation(spotify), generation);
+        assert_eq!(state.request(spotify, false), Some(None));
+        state.loaded(
+            spotify,
+            Ok(Paged::new(vec![removed.clone(), remaining], None)),
+        );
+        assert_eq!(state.source(spotify).songs.len(), 1);
+        assert_eq!(state.source(youtube).songs.len(), 1);
+        state.save_spotify_track(removed);
+        assert_eq!(state.source(spotify).songs.len(), 2);
     }
 
     #[test]
