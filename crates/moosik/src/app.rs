@@ -9540,6 +9540,7 @@ impl App {
             set(t);
         }
         self.update_search_tracks(set);
+        self.artist_sources.update_library_tracks(video_id, set);
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
                 set(t);

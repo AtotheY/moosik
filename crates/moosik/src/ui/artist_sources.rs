@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::app::{App, Route};
-use crate::model::{Artist, ArtistLink, Entry, Provider, Shelf};
+use crate::model::{Artist, ArtistLink, Entry, Provider, Shelf, Track};
 use crate::source_groups::prioritize_entries;
 use crate::{theme, widgets};
 
@@ -226,6 +226,44 @@ impl State {
             Provider::YouTubeMusic => self.youtube.artist.as_ref(),
             Provider::Spotify => self.spotify.artist.as_ref(),
             Provider::Local => None,
+        }
+    }
+
+    pub fn update_library_tracks(
+        &mut self,
+        video_id: &str,
+        mut update: impl FnMut(&mut Track) -> bool,
+    ) {
+        let mut top_songs_changed = false;
+        for artist in [&mut self.youtube.artist, &mut self.spotify.artist]
+            .into_iter()
+            .flatten()
+        {
+            for track in &mut artist.top_songs {
+                if track.video_id == video_id {
+                    top_songs_changed |= update(track);
+                }
+            }
+            if artist
+                .shelves
+                .iter()
+                .flat_map(|shelf| &shelf.items)
+                .filter_map(Entry::track)
+                .any(|track| track.video_id == video_id)
+            {
+                for track in Arc::make_mut(&mut artist.shelves)
+                    .iter_mut()
+                    .flat_map(|shelf| &mut shelf.items)
+                    .filter_map(Entry::track_mut)
+                {
+                    if track.video_id == video_id {
+                        update(track);
+                    }
+                }
+            }
+        }
+        if top_songs_changed {
+            self.rebuild_entries();
         }
     }
 
@@ -609,6 +647,64 @@ mod tests {
             },
             name: "Artist".to_owned(),
             shelves: Arc::new(shelves),
+        }
+    }
+
+    #[test]
+    fn library_changes_refresh_cached_artist_rows() {
+        let id = "spotify:track:0000000000000000000000";
+        let spotify = "spotify:artist:0000000000000000000000";
+        let track = crate::listening::Metadata {
+            id: id.to_owned(),
+            title: "Song".to_owned(),
+            ..Default::default()
+        }
+        .to_track();
+        let mut state = State::default();
+        state.begin("UCArtist", spotify);
+        state.loaded(
+            spotify,
+            Artist {
+                id: spotify.to_owned(),
+                name: "Artist".to_owned(),
+                verified: false,
+                official_artist_channel: false,
+                subscribers: None,
+                subscribers_long: None,
+                followers: None,
+                monthly_listeners: None,
+                views: None,
+                actions: Default::default(),
+                description: None,
+                thumbnail: None,
+                hero: None,
+                top_songs: vec![track.clone()],
+                top_songs_title: None,
+                top_songs_playlist: None,
+                shelves: Arc::new(vec![shelf("Songs", vec![Entry::Song(track)])]),
+            },
+        );
+
+        let mut revision = state.revision;
+        state.rows.set_entries(&state.entries, revision, true);
+        for (in_library, changed) in [(true, true), (true, false), (false, true)] {
+            state.update_library_tracks(id, |track| {
+                std::mem::replace(&mut track.in_library, in_library) != in_library
+            });
+            assert_eq!(state.revision != revision, changed);
+            revision = state.revision;
+            state.rows.set_entries(&state.entries, revision, true);
+            let (tracks, index) = state
+                .rows
+                .playback_queue(0, Provider::Spotify, None)
+                .unwrap();
+            assert_eq!(tracks[index].in_library, in_library);
+            let artist = state.profile(Provider::Spotify).unwrap();
+            assert_eq!(artist.top_songs[0].in_library, in_library);
+            assert_eq!(
+                artist.shelves[0].items[0].track().unwrap().in_library,
+                in_library
+            );
         }
     }
 
