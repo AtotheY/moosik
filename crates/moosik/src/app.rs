@@ -1757,6 +1757,7 @@ pub struct App {
     pub(crate) releases: Option<Arc<Vec<crate::model::Shelf>>>,
     pub(crate) releases_loading: bool,
     pub(crate) releases_error: Option<String>,
+    pub(crate) releases_warnings: Vec<String>,
     pub(crate) charts: Option<Arc<crate::model::ChartsFeed>>,
     pub(crate) charts_loading: bool,
     pub(crate) charts_error: Option<String>,
@@ -2308,6 +2309,7 @@ impl App {
             releases: None,
             releases_loading: false,
             releases_error: None,
+            releases_warnings: Vec::new(),
             charts: None,
             charts_loading: false,
             charts_error: None,
@@ -2684,6 +2686,14 @@ impl App {
         {
             self.refresh_local_home();
             self.scroll_to_top = true;
+        }
+        if self.settings.preferred_provider != before.preferred_provider
+            && let Some(shelves) = self.releases.as_mut()
+        {
+            ui::releases::order_releases(
+                Arc::make_mut(shelves).as_mut_slice(),
+                self.settings.preferred_provider,
+            );
         }
         if self.settings.account_page_id != before.account_page_id {
             self.backend
@@ -3860,20 +3870,26 @@ impl App {
         if self.update_search_providers() {
             self.refresh_search_results();
         }
-        if !self
-            .available_providers()
-            .contains(&crate::model::Provider::YouTubeMusic)
+        let route = self.current_route();
+        let providers = self.available_providers();
+        if !providers.contains(&crate::model::Provider::YouTubeMusic)
             && matches!(
-                self.current_route(),
+                route,
                 Route::Explore
-                    | Route::NewReleases
                     | Route::Charts(_)
                     | Route::Moods
                     | Route::Mood(_)
                     | Route::HomeShelf(_)
             )
         {
-            self.replace_route(Route::Home);
+            let destination = if route == Route::Explore
+                && providers.contains(&crate::model::Provider::Spotify)
+            {
+                Route::NewReleases
+            } else {
+                Route::Home
+            };
+            self.replace_route(destination);
             return;
         }
         self.load_spotify_profile();
@@ -4495,6 +4511,7 @@ impl App {
             }
             Route::NewReleases => {
                 self.releases_error = None;
+                self.releases_warnings.clear();
                 self.releases = None;
             }
             Route::Charts(_) => {
@@ -6164,9 +6181,14 @@ impl App {
                     self.explore_loading = false;
                     self.explore_error = Some(error);
                 }
-                Event::ReleasesLoaded { shelves } => {
+                Event::ReleasesLoaded {
+                    mut shelves,
+                    warnings,
+                } => {
                     self.releases_loading = false;
+                    ui::releases::order_releases(&mut shelves, self.settings.preferred_provider);
                     self.releases = Some(Arc::new(shelves));
+                    self.releases_warnings = warnings;
                 }
                 Event::ReleasesFailed { error } => {
                     self.releases_loading = false;
@@ -7624,6 +7646,10 @@ impl App {
         self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
         self.backend.set_browsing_epoch(self.browsing_epoch);
         self.artist_sources.clear();
+        self.releases = None;
+        self.releases_loading = false;
+        self.releases_error = None;
+        self.releases_warnings.clear();
         self.liked_music = ui::liked_music::State::default();
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();
@@ -8269,13 +8295,18 @@ impl App {
         self.backend.fetch_explore();
     }
 
-    /// Fetch New releases once. Works signed out, so no auth gate.
     fn load_new_releases(&mut self) {
-        if self.releases.is_some() || self.releases_loading || self.releases_error.is_some() {
+        if self.releases.is_some()
+            || self.releases_loading
+            || self.releases_error.is_some()
+            || matches!(self.auth, crate::auth::AuthState::Checking)
+        {
             return;
         }
         self.releases_loading = true;
-        self.backend.fetch_new_releases();
+        let spotify = crate::spotify::is_signed_in();
+        self.backend
+            .fetch_new_releases(self.signed_in() || !spotify, spotify);
     }
 
     /// Fetch Charts once per params. Works signed out, so no auth gate.

@@ -53,24 +53,28 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     } else {
         ui.add_space(8.0);
     }
+    let providers = app.available_providers();
+    let (discovery, discovery_label) = if providers.contains(&crate::model::Provider::YouTubeMusic)
+    {
+        (Route::Explore, "Explore")
+    } else {
+        (Route::NewReleases, "New releases")
+    };
     for (route, icon, label) in [
         (Route::Home, Icon::House, "Home"),
         // Explore rather than Search: searching happens in the field at the top of the window,
         // and the nav slot is better spent on the page YouTube puts there.
-        (Route::Explore, Icon::Compass, "Explore"),
+        (discovery, Icon::Compass, discovery_label),
         (Route::Library, Icon::Library, "Library"),
         (Route::Queue, Icon::ListMusic, "Queue"),
         (Route::History, Icon::History, "Listening history"),
         (Route::Listening, Icon::TrendingUp, "Listening stats"),
     ] {
-        if route == Route::Explore
-            && !app
-                .available_providers()
-                .contains(&crate::model::Provider::YouTubeMusic)
-        {
+        if route == Route::NewReleases && !providers.contains(&crate::model::Provider::Spotify) {
             continue;
         }
-        let selected = app.current_route() == route;
+        let current = app.current_route();
+        let selected = current == route || route == Route::Explore && current == Route::NewReleases;
         let response = widgets::nav_item(ui, &app.palette, icon, label, selected, rail);
         if route == Route::Library
             && let Some(action) = super::organizer::root_drop(

@@ -196,6 +196,23 @@ pub async fn home() -> Result<HomeFeed> {
     })
 }
 
+pub async fn new_releases() -> Result<Vec<Shelf>> {
+    let items: Vec<_> = transport()
+        .await?
+        .search_catalog("tag:new", moosik_spotify::SearchKind::Albums)
+        .await?
+        .into_iter()
+        .filter(|item| matches!(item, CatalogItem::Album(_)))
+        .collect();
+    if items.is_empty() {
+        bail!("Spotify returned an empty New releases feed");
+    }
+    Ok(vec![shelf(moosik_spotify::Section {
+        title: "New albums & singles".to_owned(),
+        items,
+    })])
+}
+
 pub async fn playlist(id: &str) -> Result<Playlist> {
     let playlist = transport().await?.playlist(id).await?;
     let summary = playlist.summary;

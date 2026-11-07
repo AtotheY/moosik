@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Api, LibrarySection, LibrarySortParam};
 use crate::innertube::Page;
-use crate::model::{HomeFeed, HomeFetch, Library, Paged, Track};
+use crate::model::{Entry, HomeFeed, HomeFetch, Library, Paged, Shelf, Track};
 
 const CURSOR_PREFIX: &str = "providers:";
 
@@ -340,9 +340,129 @@ fn merge_home(
     })
 }
 
+pub async fn new_releases(api: &Api, youtube: bool, spotify: bool) -> Result<Loaded<Vec<Shelf>>> {
+    let (youtube, spotify) = tokio::join!(
+        async {
+            if youtube {
+                Some(api.new_releases().await)
+            } else {
+                None
+            }
+        },
+        async {
+            if spotify {
+                Some(crate::spotify::new_releases().await)
+            } else {
+                None
+            }
+        },
+    );
+    let (youtube, spotify, warnings) = collect(youtube, spotify)?;
+    Ok(Loaded {
+        value: merge_release_shelves(youtube.into_iter().chain(spotify)),
+        warnings,
+    })
+}
+
+fn merge_release_shelves(shelves: impl IntoIterator<Item = Shelf>) -> Vec<Shelf> {
+    let mut releases = Vec::new();
+    let mut other = Vec::new();
+    let mut ids = HashSet::new();
+    for shelf in shelves {
+        if shelf.items.is_empty() {
+            continue;
+        }
+        if shelf
+            .items
+            .iter()
+            .all(|entry| matches!(entry, Entry::Album(_)))
+        {
+            releases.extend(shelf.items.into_iter().filter(
+                |entry| matches!(entry, Entry::Album(album) if ids.insert(album.id.clone())),
+            ));
+        } else {
+            other.push(shelf);
+        }
+    }
+    if !releases.is_empty() {
+        other.insert(
+            0,
+            Shelf {
+                title: "New albums & singles".to_owned(),
+                strapline: None,
+                items: releases,
+                more_params: None,
+                more_browse_id: None,
+                expanded: false,
+            },
+        );
+    }
+    other
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_releases_keep_both_album_sources_and_a_separate_video_shelf() {
+        fn album(id: &str, title: &str) -> Entry {
+            Entry::Album(crate::model::AlbumRef {
+                id: id.to_owned(),
+                title: title.to_owned(),
+                artist: "Artist".to_owned(),
+                artists: vec![crate::model::ArtistLink::plain("Artist")],
+                explicit: None,
+                year: Some("2026".to_owned()),
+                kind: Some("Album".to_owned()),
+                thumbnail: None,
+            })
+        }
+        let mut youtube = home_feed("New albums & singles").shelves.remove(0);
+        let yt_match = album("MPREbNew", "Matched release");
+        youtube.items = vec![
+            yt_match.clone(),
+            yt_match,
+            album("MPREbOnly", "YouTube only"),
+        ];
+        let mut spotify = home_feed("New albums & singles").shelves.remove(0);
+        spotify.items = vec![
+            album("spotify:album:0000000000000000000001", "Matched release"),
+            album("spotify:album:0000000000000000000002", "Spotify only"),
+        ];
+        let mut videos = home_feed("New music videos").shelves.remove(0);
+        videos.items.push(Entry::Video(song("video", "New video")));
+
+        let mut shelves = merge_release_shelves([youtube, videos.clone(), spotify]);
+        assert_eq!(shelves.len(), 2);
+        assert_eq!(shelves[0].title, "New albums & singles");
+        assert_eq!(shelves[0].items.len(), 4);
+        assert_eq!(shelves[1], videos);
+        let preferred = crate::model::Provider::Spotify;
+        crate::source_groups::prioritize_entries(&mut shelves[0].items, Some(preferred));
+        let groups = crate::source_groups::group_entries(&shelves[0].items, true);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].variants.len(), 2);
+        assert_eq!(
+            groups[1].preferred_entry(preferred, None).unwrap().title(),
+            "Spotify only"
+        );
+        assert_eq!(
+            groups[2].preferred_entry(preferred, None).unwrap().title(),
+            "YouTube only"
+        );
+        let preferred = crate::model::Provider::YouTubeMusic;
+        crate::source_groups::prioritize_entries(&mut shelves[0].items, Some(preferred));
+        let groups = crate::source_groups::group_entries(&shelves[0].items, true);
+        assert_eq!(
+            groups[0].preferred_entry(preferred, None).unwrap().title(),
+            "Matched release"
+        );
+        assert_eq!(
+            groups[1].preferred_entry(preferred, None).unwrap().title(),
+            "YouTube only"
+        );
+    }
 
     fn home_feed(source: &str) -> HomeFeed {
         HomeFeed {

@@ -314,6 +314,7 @@ pub enum Event {
     },
     ReleasesLoaded {
         shelves: Vec<Shelf>,
+        warnings: Vec<String>,
     },
     ReleasesFailed {
         error: String,
@@ -2496,17 +2497,20 @@ impl Backend {
         });
     }
 
-    /// New releases, behind Explore's first button. Works signed out.
-    pub fn fetch_new_releases(&self) {
+    pub fn fetch_new_releases(&self, youtube: bool, spotify: bool) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.new_releases().await {
-                Ok(shelves) => Event::ReleasesLoaded { shelves },
+            let event = match crate::providers::new_releases(&api, youtube, spotify).await {
+                Ok(loaded) => Event::ReleasesLoaded {
+                    shelves: loaded.value,
+                    warnings: loaded.warnings,
+                },
                 Err(e) => Event::ReleasesFailed {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
