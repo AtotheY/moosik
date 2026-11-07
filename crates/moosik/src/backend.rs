@@ -21,8 +21,8 @@ use crate::auth::{self, AuthState};
 use crate::downloads;
 use crate::images;
 use crate::model::{
-    Album, Artist, Entry, Library, MoodPlaylists, Playlist, SearchResults, SearchScope, Shelf,
-    Track,
+    Album, Artist, Entry, Library, MoodPlaylists, Playlist, Provider, SearchResults, SearchScope,
+    Shelf, Track,
 };
 use crate::player;
 
@@ -91,19 +91,29 @@ pub enum Event {
         error: String,
     },
     SearchDone {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         results: SearchResults,
+        warnings: Vec<String>,
     },
     SearchFailed {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         error: String,
     },
     ScopedSearchDone {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         scope: crate::model::SearchScope,
         results: Vec<Entry>,
+        warnings: Vec<String>,
     },
     ScopedSearchFailed {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         scope: crate::model::SearchScope,
         error: String,
@@ -111,12 +121,16 @@ pub enum Event {
     /// Autocomplete for the search field. `query` is the staleness guard: the app drops a reply
     /// whose query is no longer in the box.
     SuggestionsDone {
+        provider: Option<Provider>,
         query: String,
         items: Vec<String>,
+        source_revision: u64,
     },
     SuggestionsFailed {
+        provider: Option<Provider>,
         query: String,
         error: String,
+        source_revision: u64,
     },
     /// A download in progress: `percent` is 0–100.
     DownloadProgress {
@@ -334,11 +348,14 @@ pub enum Event {
         next: Option<String>,
         /// See `LibraryLoaded::epoch`'s own doc comment.
         epoch: u64,
+        request: u64,
+        warnings: Vec<String>,
     },
     HomeFailed {
         filter: Option<String>,
         error: String,
         epoch: u64,
+        request: u64,
     },
     /// The next page of the home feed, loaded on scroll.
     HomeMore {
@@ -346,20 +363,24 @@ pub enum Event {
         shelves: Vec<Shelf>,
         next: Option<String>,
         epoch: u64,
+        request: u64,
     },
     HomeMoreFailed {
         filter: Option<String>,
         error: String,
         epoch: u64,
+        request: u64,
     },
     /// The full list behind a Home shelf's "Show all", from that shelf's own "more" target.
     HomeShelfLoaded {
         title: String,
         items: Vec<crate::model::Entry>,
+        request: u64,
     },
     HomeShelfFailed {
         title: String,
         error: String,
+        request: u64,
     },
     MoodPlaylistsLoaded {
         params: String,
@@ -545,6 +566,9 @@ impl Event {
     /// Whether this event carries what a big response was parsed into: a feed, a library, a page.
     /// The parse tree behind it is already freed, and the memory it used is worth handing back.
     fn follows_big_parse(&self) -> bool {
+        if let Self::BrowseScoped { event, .. } = self {
+            return event.follows_big_parse();
+        }
         matches!(
             self,
             Event::HomeLoaded { .. }
@@ -575,6 +599,8 @@ impl Event {
             self,
             Event::SearchDone { .. }
                 | Event::SearchFailed { .. }
+                | Event::SpotifyProfileLoaded { .. }
+                | Event::SpotifyProfileFailed { .. }
                 | Event::ScopedSearchDone { .. }
                 | Event::ScopedSearchFailed { .. }
                 | Event::ArtistLoaded { .. }
@@ -613,6 +639,7 @@ impl Event {
     pub fn error(&self) -> Option<&str> {
         match self {
             Event::SearchFailed { error, .. }
+            | Event::SpotifyProfileFailed { error }
             | Event::ScopedSearchFailed { error, .. }
             | Event::SuggestionsFailed { error, .. }
             | Event::DownloadFailed { error, .. }
@@ -1116,6 +1143,17 @@ impl Backend {
     /// Download one track to `~/Music/moosik`, reporting progress, then write its tags and cover.
     /// Completion carries the `Track` back so the app can add it to the index.
     pub fn download_track(&self, track: Track, format: &'static str) {
+        if track.is_spotify() {
+            Self::emit(
+                &self.tx,
+                &self.ctx,
+                Event::DownloadFailed {
+                    video_id: track.video_id,
+                    error: "Spotify downloads are unavailable".to_owned(),
+                },
+            );
+            return;
+        }
         let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
         let session = self.api.ytdlp_session();
         self.rt.spawn(async move {
@@ -1160,6 +1198,9 @@ impl Backend {
         let session = self.api.ytdlp_session();
         self.rt.spawn(async move {
             for track in tracks {
+                if track.is_spotify() {
+                    continue;
+                }
                 let video_id = track.video_id.clone();
                 match run_download(&track, &session, format, &tx, &ctx).await {
                     Ok(path) => {
@@ -1203,6 +1244,78 @@ impl Backend {
         if big {
             crate::memory::trim_after_parse();
         }
+    }
+
+    pub fn set_browsing_epoch(&self, epoch: u64) {
+        if self.browse_epoch.swap(epoch, Ordering::AcqRel) != epoch {
+            self.invalidate_search_cache();
+        }
+    }
+
+    pub fn invalidate_search_cache(&self) {
+        self.search_cache.invalidate();
+    }
+
+    pub fn set_local_search_tracks(&self, tracks: Vec<Track>) {
+        let mut current = self
+            .local_search_tracks
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.as_ref() != &tracks {
+            *current = Arc::new(tracks);
+            self.search_cache.invalidate_local();
+        }
+    }
+
+    pub fn set_search_providers(&self, providers: Vec<Provider>) -> bool {
+        let mut current = self
+            .search_providers
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.replace(providers) {
+            self.search_cache.invalidate();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn search_sources_revision(&self) -> u64 {
+        self.search_providers
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .revision
+    }
+
+    fn search_context(&self) -> SearchContext {
+        let tracks = self
+            .local_search_tracks
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = self
+            .search_providers
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        SearchContext {
+            api: Arc::clone(&self.api),
+            cache: Arc::clone(&self.search_cache),
+            snapshot: self.search_cache.snapshot(),
+            local_tracks: Arc::clone(&tracks),
+            allowed: providers.allowed.clone(),
+            source_revision: providers.revision,
+            sources: Arc::clone(&self.search_providers),
+        }
+    }
+
+    fn emit_browse(tx: &Sender<Event>, ctx: &egui::Context, epoch: u64, event: Event) {
+        Self::emit(
+            tx,
+            ctx,
+            Event::BrowseScoped {
+                epoch,
+                event: Box::new(event),
+            },
+        );
     }
 
     /// Ask GitHub whether a newer release is out, after `delay`: the launch check waits until
@@ -1362,31 +1475,57 @@ impl Backend {
         });
     }
 
+    pub fn fetch_spotify_profile(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let event = match crate::spotify::account_profile().await {
+                Ok(profile) => Event::SpotifyProfileLoaded { profile },
+                Err(error) => Event::SpotifyProfileFailed {
+                    error: format!("{error:#}"),
+                },
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
     pub fn fetch_artist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.get_artist(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::artist(&id).await
+            } else {
+                api.get_artist(&id).await
+            };
+            let event = match result {
                 Ok(artist) => Event::ArtistLoaded { id, artist },
                 Err(e) => Event::ArtistFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
     pub fn fetch_album(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.get_album(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::album(&id).await
+            } else {
+                api.get_album(&id).await
+            };
+            let event = match result {
                 Ok(album) => Event::AlbumLoaded { id, album },
                 Err(e) => Event::AlbumFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1395,11 +1534,15 @@ impl Backend {
     /// page's own Play button, which never waits for pagination either.
     pub fn play_album(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            match api.get_album(&id).await {
-                Ok(album) => Self::emit(
-                    &tx,
-                    &ctx,
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::album(&id).await
+            } else {
+                api.get_album(&id).await
+            };
+            match result {
+                Ok(album) => Self::emit_browse(&tx, &ctx, epoch,
                     Event::CardTracksReady {
                         id,
                         tracks: album.tracks,
@@ -1415,11 +1558,15 @@ impl Backend {
     /// [`Self::play_album`], for a playlist card.
     pub fn play_playlist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            match api.playlist(&id).await {
-                Ok(playlist) => Self::emit(
-                    &tx,
-                    &ctx,
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::playlist(&id).await
+            } else {
+                api.playlist(&id).await
+            };
+            match result {
+                Ok(playlist) => Self::emit_browse(&tx, &ctx, epoch,
                     Event::CardTracksReady {
                         id,
                         tracks: playlist.tracks.items,
@@ -1432,11 +1579,26 @@ impl Backend {
         });
     }
 
-    pub fn fetch_library(&self, sort: crate::api::LibrarySortParam, epoch: u64) {
+    pub fn fetch_library(&self, sort: crate::api::LibrarySortParam, epoch: u64, youtube: bool) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library(sort).await {
-                Ok(library) => Event::LibraryLoaded { library, epoch },
+            let event = match crate::providers::library(
+                &api,
+                sort,
+                youtube,
+                crate::spotify::is_signed_in(),
+            )
+            .await
+            {
+                Ok(loaded) => {
+                    for message in loaded.warnings {
+                        Self::emit(&tx, &ctx, Event::ProviderBrowseWarning { message, epoch });
+                    }
+                    Event::LibraryLoaded {
+                        library: loaded.value,
+                        epoch,
+                    }
+                }
                 Err(e) => Event::LibraryFailed {
                     error: format!("{e:#}"),
                     epoch,
@@ -1534,6 +1696,7 @@ impl Backend {
     /// flaky page killed the whole chain and the sort silently never happened.
     pub fn fetch_playlist_more(&self, id: String, token: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             const ATTEMPTS: u32 = 3;
             let mut last_err = None;
@@ -1547,7 +1710,12 @@ impl Backend {
                     ))
                     .await;
                 }
-                match api.playlist_more(token.clone()).await {
+                let result = if id.starts_with("spotify:") {
+                    crate::spotify::playlist_more(&token).await
+                } else {
+                    api.playlist_more(token.clone()).await
+                };
+                match result {
                     Ok(p) => {
                         page = Some(p);
                         break;
@@ -1565,7 +1733,7 @@ impl Backend {
                     error: format!("{:#}", last_err.expect("loop always sets this on failure")),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1620,11 +1788,25 @@ impl Backend {
     }
 
     /// The first page of your playlists, for the sidebar.
-    pub fn fetch_library_playlists(&self, epoch: u64) {
+    pub fn fetch_library_playlists(&self, epoch: u64, youtube: bool) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library_playlists().await {
-                Ok(page) => Event::SidebarPlaylists { page, epoch },
+            let event = match crate::providers::sidebar_playlists(
+                &api,
+                youtube,
+                crate::spotify::is_signed_in(),
+            )
+            .await
+            {
+                Ok(loaded) => {
+                    for message in loaded.warnings {
+                        Self::emit(&tx, &ctx, Event::ProviderBrowseWarning { message, epoch });
+                    }
+                    Event::SidebarPlaylists {
+                        page: loaded.value,
+                        epoch,
+                    }
+                }
                 Err(e) => Event::SidebarPlaylistsFailed {
                     error: format!("{e:#}"),
                     epoch,
@@ -1643,11 +1825,11 @@ impl Backend {
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library_more(section, token).await {
+            let event = match crate::providers::library_more(&api, section, &token).await {
                 Ok(page) => Event::LibraryMore {
-                    epoch,
                     section,
                     page,
+                    epoch,
                 },
                 Err(e) => Event::LibraryMoreFailed {
                     epoch,
@@ -1730,15 +1912,21 @@ impl Backend {
 
     pub fn fetch_playlist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.playlist(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::playlist(&id).await
+            } else {
+                api.playlist(&id).await
+            };
+            let event = match result {
                 Ok(playlist) => Event::PlaylistLoaded { id, playlist },
                 Err(e) => Event::PlaylistFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1749,6 +1937,7 @@ impl Backend {
     /// own section — see [`crate::api::Api::artist_albums`].
     pub fn fetch_artist_albums(&self, browse_id: String, params: String, title: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             let event = match api.artist_albums(&browse_id, &params, &title).await {
                 Ok(items) => Event::ArtistAlbumsLoaded {
@@ -1760,7 +1949,7 @@ impl Backend {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1904,21 +2093,35 @@ impl Backend {
         });
     }
 
-    pub fn fetch_home(&self, filter: Option<String>, epoch: u64, fetch: crate::model::HomeFetch) {
+    pub fn fetch_home(
+        &self,
+        filter: Option<String>,
+        epoch: u64,
+        request: u64,
+        fetch: crate::model::HomeFetch,
+        sources: crate::providers::HomeSources,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.home(filter.as_deref(), &fetch).await {
-                Ok(feed) => Event::HomeLoaded {
-                    filter,
-                    shelves: feed.shelves,
-                    chips: feed.chips,
-                    next: feed.next,
-                    epoch,
-                },
+            let event = match crate::providers::home(&api, filter.as_deref(), &fetch, sources).await
+            {
+                Ok(loaded) => {
+                    let feed = loaded.value;
+                    Event::HomeLoaded {
+                        filter,
+                        shelves: feed.shelves,
+                        chips: feed.chips,
+                        next: feed.next,
+                        epoch,
+                        request,
+                        warnings: loaded.warnings,
+                    }
+                }
                 Err(e) => Event::HomeFailed {
                     filter,
                     error: format!("{e:#}"),
                     epoch,
+                    request,
                 },
             };
             Self::emit(&tx, &ctx, event);
@@ -1926,7 +2129,7 @@ impl Backend {
     }
 
     /// The next page of the home feed; see `Api::home_more`.
-    pub fn fetch_home_more(&self, token: String, filter: Option<String>, epoch: u64) {
+    pub fn fetch_home_more(&self, token: String, filter: Option<String>, epoch: u64, request: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.home_more(token).await {
@@ -1935,11 +2138,13 @@ impl Backend {
                     shelves,
                     next,
                     epoch,
+                    request,
                 },
                 Err(e) => Event::HomeMoreFailed {
                     filter,
                     error: format!("{e:#}"),
                     epoch,
+                    request,
                 },
             };
             Self::emit(&tx, &ctx, event);
@@ -1949,17 +2154,23 @@ impl Backend {
     /// The full list behind a Home shelf's "Show all". The request is the one an artist shelf's
     /// "Show all" makes — `Api::artist_albums` takes any shelf's (browse id, params) pair and
     /// picks that shelf's own section out of whatever page answers.
-    pub fn fetch_home_shelf(&self, browse_id: String, params: String, title: String) {
+    pub fn fetch_home_shelf(&self, browse_id: String, params: String, title: String, request: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             let event = match api.artist_albums(&browse_id, &params, &title).await {
-                Ok(items) => Event::HomeShelfLoaded { title, items },
+                Ok(items) => Event::HomeShelfLoaded {
+                    title,
+                    items,
+                    request,
+                },
                 Err(e) => Event::HomeShelfFailed {
                     title,
                     error: format!("{e:#}"),
+                    request,
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1979,6 +2190,9 @@ impl Backend {
 
     /// Radio for a song: the `next` endpoint's watch queue.
     pub fn start_mix(&self, video_id: String) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.mix(&video_id).await {
@@ -2018,6 +2232,9 @@ impl Backend {
     /// appended rather than replacing what is playing. The same `next` call as `start_mix`,
     /// with a landing the app can tell apart.
     pub fn seed_mix(&self, seed: String) {
+        if crate::model::is_spotify_id(&seed) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.mix(&seed).await {
@@ -2060,6 +2277,9 @@ impl Backend {
         status: crate::model::LikeStatus,
         previous: crate::model::LikeStatus,
     ) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.rate(&video_id, status).await {
@@ -2161,6 +2381,10 @@ impl Backend {
     /// Save several videos to one playlist with a single summary event. One `add_to_playlist`
     /// per song would toast per song; a page saves dozens, so the page gets one verdict.
     pub fn add_many_to_playlist(&self, playlist_id: String, video_ids: Vec<String>) {
+        let video_ids: Vec<String> = video_ids
+            .into_iter()
+            .filter(|id| !crate::model::is_spotify_id(id))
+            .collect();
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let total = video_ids.len();
@@ -2195,6 +2419,9 @@ impl Backend {
     /// Flip a song's library membership with its own bookmark token. `in_library` is the state
     /// being asked for, so the reply can revert to `!in_library` on refusal.
     pub fn toggle_library(&self, token: String, video_id: String, in_library: bool) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.feedback(&token).await {
@@ -2215,6 +2442,9 @@ impl Backend {
     /// Save a video to one of your playlists. A song already there comes back as
     /// `PlaylistDuplicate` rather than being added twice, unless `allow_duplicate`.
     pub fn add_to_playlist(&self, playlist_id: String, video_id: String, allow_duplicate: bool) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let reply = api
@@ -2457,11 +2687,17 @@ impl Backend {
     pub fn play(
         &self,
         track: Track,
-        mpv: Arc<Mpv>,
+        handle: crate::player::PlaybackHandle,
         volume: f64,
         normalise: bool,
         start_at: Option<f64>,
     ) -> u64 {
+        let mpv = match handle {
+            crate::player::PlaybackHandle::Spotify(handle) => {
+                return self.play_spotify(track, handle, volume, start_at);
+            }
+            crate::player::PlaybackHandle::Mpv(mpv) => mpv,
+        };
         let downloads = Arc::clone(&self.downloads);
         let (resolver, api, tx, ctx) = (
             Arc::clone(&self.resolver),
@@ -2472,7 +2708,7 @@ impl Backend {
         // A new play supersedes any scrobble task still running for the old track, and — via the
         // `generation` stamped on every event below — any `Resolving`/`Playing`/`PlaybackFailed`
         // reply still in flight for a previous, now-superseded `play`/`play_video` call.
-        let generation = self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.cancel_play();
         let scrobble = Scrobble {
             api: Arc::clone(&self.api),
             http: self.tracking_http.clone(),
@@ -2812,6 +3048,7 @@ impl Backend {
             let video_id = track.video_id.clone();
             let lyrics = match lrclib(&http, &track).await {
                 Some(lyrics) => Some(lyrics),
+                None if track.is_spotify() => None,
                 None => api.lyrics(&track.video_id).await.unwrap_or(None),
             };
             let event = match lyrics {
@@ -2885,6 +3122,9 @@ impl Scrobble {
     /// Fire-and-forget per play. Reads the toggle here so flipping it takes effect on the
     /// next track; the anonymous gate lives one layer down, in `playback_tracking`.
     fn maybe_start(&self, track: Track, mpv: Arc<Mpv>, generation: u64) {
+        if track.is_spotify() {
+            return;
+        }
         if !crate::settings::load().scrobble {
             return;
         }
@@ -3153,7 +3393,7 @@ mod folder_tests {
                     _ => anyhow::bail!("unavailable"),
                 }
             },
-            |_| async { anyhow::bail!("bad continuation") },
+            |_, _| async { anyhow::bail!("bad continuation") },
         )
         .await;
         assert_eq!(tracks, ["private", "first page", "last playlist"]);

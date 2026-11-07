@@ -7,10 +7,21 @@ use crate::api::LibrarySection;
 use crate::app::{App, LibrarySort, RailFilter, Route};
 use crate::auth::AuthState;
 use crate::theme;
-use crate::ui::{ListClick, art_texture, card_is_visible, centered, failed, track_rows};
+use crate::ui::{ListClick, centered, failed, track_rows};
 use crate::widgets;
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    let local = app.has_local_music();
+    let downloads = !app.downloads.entries.is_empty();
+    if (app.rail_filter == RailFilter::Local && !local)
+        || (app.rail_filter == RailFilter::Downloads && !downloads)
+    {
+        app.rail_filter = if app.local_playlists.is_empty() {
+            RailFilter::Songs
+        } else {
+            RailFilter::Playlists
+        };
+    }
     // The title scrolls away with the page rather than staying pinned over it.
     crate::ui::page_scroll(app, "library").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Your library");
@@ -19,6 +30,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         let mut picked = None;
         ui.horizontal_wrapped(|ui| {
             for filter in RailFilter::ALL {
+                if (filter == RailFilter::Local && !local)
+                    || (filter == RailFilter::Downloads && !downloads)
+                {
+                    continue;
+                }
                 if widgets::chip(ui, &app.palette, filter.label(), app.rail_filter == filter)
                     .clicked()
                 {
@@ -114,12 +130,17 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         && app.library.artists.is_empty()
         && app.library.albums.is_empty()
         && app.library.playlists.is_empty();
-    if empty && app.rail_filter != RailFilter::Playlists {
+    if empty
+        && app.rail_filter != RailFilter::Playlists
+        && app.library.songs.next.is_none()
+        && app.library.artists.next.is_none()
+        && app.library.albums.next.is_none()
+        && app.library.playlists.next.is_none()
+    {
         centered(
             app,
             ui,
-            "Nothing here yet: songs, albums and playlists you save on YouTube Music \
-             will show up here.",
+            "Songs, artists, albums and playlists saved with your connected accounts appear here.",
         );
         return;
     }
@@ -153,6 +174,33 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         RailFilter::Local => unreachable!("Local is intercepted in page() before content()"),
         RailFilter::Downloads => {
             unreachable!("Downloads is intercepted in page() before content()")
+        }
+    }
+    let section = match app.rail_filter {
+        RailFilter::Songs => LibrarySection::Songs,
+        RailFilter::Artists => LibrarySection::Artists,
+        RailFilter::Albums => LibrarySection::Albums,
+        RailFilter::Playlists => LibrarySection::Playlists,
+        _ => return,
+    };
+    if let Some((_, error)) = app
+        .library_paging_errors
+        .iter()
+        .find(|(failed, _)| *failed == section)
+    {
+        ui.label(egui::RichText::new(error).color(app.palette.danger));
+        if widgets::outline_button(ui, &app.palette, "Try again").clicked() {
+            app.retry_library_more(section);
+        }
+    } else {
+        let empty = match section {
+            LibrarySection::Songs => app.library.songs.is_empty(),
+            LibrarySection::Artists => app.library.artists.is_empty(),
+            LibrarySection::Albums => app.library.albums.is_empty(),
+            LibrarySection::Playlists => app.library.playlists.is_empty(),
+        };
+        if empty {
+            app.load_more_library(section);
         }
     }
 }
@@ -429,17 +477,12 @@ fn album_grid(app: &mut App, ui: &mut egui::Ui) {
 /// nothing to page, the whole scan already sits in memory.
 fn local_folder_browser(app: &mut App, ui: &mut egui::Ui) {
     if app.settings.local_folders.is_empty() {
-        centered(
-            app,
-            ui,
-            "No folders added yet. Add one in Settings to see your local music here.",
-        );
-        ui.add_space(8.0);
-        ui.vertical_centered(|ui| {
-            if widgets::pill_button(ui, &app.palette, "Open Settings").clicked() {
-                app.navigate(Route::Settings);
-            }
-        });
+        if app.local_tracks.is_empty() {
+            prompt(app, ui);
+        } else {
+            let tracks = app.local_tracks.clone();
+            local_track_list(app, ui, &tracks);
+        }
         return;
     }
     if app.local_scanning {

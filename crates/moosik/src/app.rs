@@ -3964,8 +3964,9 @@ impl App {
     }
 
     /// The signed-in library, once per session. Signed out, the page shows a prompt instead.
-    fn load_library(&mut self) {
-        if !matches!(self.auth, crate::auth::AuthState::SignedIn { .. })
+    pub(crate) fn load_library(&mut self) {
+        if matches!(self.auth, crate::auth::AuthState::Checking)
+            || !self.has_library_account()
             || self.library_loaded
             || self.library_loading
             || self.library_error.is_some()
@@ -3973,8 +3974,11 @@ impl App {
             return;
         }
         self.library_loading = true;
-        self.backend
-            .fetch_library(self.library_sort.param(), self.account_epoch);
+        self.backend.fetch_library(
+            self.library_sort.param(),
+            self.browsing_epoch,
+            self.signed_in(),
+        );
     }
 
     /// The home feed loads once per filter and stays cached while it is selected.
@@ -4315,12 +4319,14 @@ impl App {
         }
         self.library_sort = sort;
         self.library = crate::model::Library::default();
+        self.library_paging_errors.clear();
         self.library_loaded = false;
         self.library_error = None;
         self.resync_local_playlists();
-        if matches!(self.auth, crate::auth::AuthState::SignedIn { .. }) {
+        if self.has_library_account() {
             self.library_loading = true;
-            self.backend.fetch_library(sort.param(), self.account_epoch);
+            self.backend
+                .fetch_library(sort.param(), self.browsing_epoch, self.signed_in());
         }
     }
 
@@ -4724,6 +4730,13 @@ impl App {
 
     /// Ask for the next page of one library section, if there is one and none is in flight.
     pub(crate) fn load_more_library(&mut self, section: crate::api::LibrarySection) {
+        if self
+            .library_paging_errors
+            .iter()
+            .any(|(failed, _)| *failed == section)
+        {
+            return;
+        }
         let (can, token) = match section {
             crate::api::LibrarySection::Songs => (
                 self.library.songs.can_load_more(),
@@ -4752,7 +4765,13 @@ impl App {
             crate::api::LibrarySection::Playlists => self.library.playlists.loading = true,
         }
         self.backend
-            .fetch_library_more(section, token, self.account_epoch);
+            .fetch_library_more(section, token, self.browsing_epoch);
+    }
+
+    pub(crate) fn retry_library_more(&mut self, section: crate::api::LibrarySection) {
+        self.library_paging_errors
+            .retain(|(failed, _)| *failed != section);
+        self.load_more_library(section);
     }
 
     /// A load the page on screen is waiting for — what its skeletons stand in for. Not the song
@@ -4876,22 +4895,25 @@ impl App {
     /// A stored cookie counts: the fetch fires while the session is still `Checking`, and a
     /// refusal simply leaves the rail empty — the state that would have shown anyway.
     fn load_sidebar_playlists(&mut self) {
-        if !matches!(
+        let youtube = matches!(
             self.auth,
             crate::auth::AuthState::SignedIn { .. } | crate::auth::AuthState::Checking
-        ) || self.library_loaded
+        );
+        if (!youtube && !crate::spotify::is_signed_in())
+            || self.library_loaded
             || self
                 .library
                 .playlists
                 .items
                 .iter()
-                .any(|p| p.source == crate::model::PlaylistSource::YouTube)
+                .any(|p| p.source != crate::model::PlaylistSource::Local)
             || self.library.playlists.loading
         {
             return;
         }
         self.library.playlists.loading = true;
-        self.backend.fetch_library_playlists(self.account_epoch);
+        self.backend
+            .fetch_library_playlists(self.browsing_epoch, youtube);
     }
 
     /// Mirrors `local_playlists` into `library.playlists.items` as `PlaylistRef`s, so the
@@ -4909,6 +4931,7 @@ impl App {
             .items
             .extend(self.local_playlists.iter().map(local_playlist_ref));
         self.apply_playlist_order();
+        self.refresh_local_home();
     }
 
     // ------------------------------------------------------------------------------------------
