@@ -1562,7 +1562,14 @@ mod tests {
         assert_eq!(SettingsTab::default(), SettingsTab::ALL[0]);
         assert_eq!(
             labels,
-            ["Appearance", "Playback", "Providers", "System", "About"]
+            [
+                "Appearance",
+                "Playback",
+                "Providers",
+                "System",
+                "Discord",
+                "About"
+            ]
         );
     }
 }
