@@ -1665,7 +1665,7 @@ pub fn paint_subtitle_marquee<'a>(
         let mut underlined = false;
         if let Some(target) = part.target {
             let hit = Rect::from_min_size(egui::pos2(x, pos.y - 8.0), vec2(w, 16.0));
-            let r = ui.interact(hit, ui.id().with((id, i)), Sense::click());
+            let r = ui.interact(hit.intersect(clip), ui.id().with((id, i)), Sense::click());
             if r.hovered() {
                 link_hovered = true;
                 colour = palette.text;
@@ -2307,6 +2307,15 @@ fn badge_font() -> egui::FontId {
 ///
 /// Returns the response so the caller decides what a click means.
 pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowClick<'a> {
+    track_row_with_listening_time(ui, palette, row, None)
+}
+
+pub(crate) fn track_row_with_listening_time<'a>(
+    ui: &mut Ui,
+    palette: &Palette,
+    row: TrackRow<'a>,
+    listening_time: Option<&str>,
+) -> RowClick<'a> {
     let TrackRow {
         number,
         rank,
@@ -2412,6 +2421,23 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         68.0
     } else {
         0.0
+    };
+
+    // Top songs swaps its listening total for the row actions in one fixed slot.
+    // Keep both text lines clear of the larger of the label and the actual buttons.
+    let has_thumbs = show_rating && menu.as_ref().is_some_and(|m| m.signed_in);
+    let rating_icon = match like {
+        crate::model::LikeStatus::Like if has_thumbs => Some(Icon::ThumbsUpFilled),
+        crate::model::LikeStatus::Dislike if has_thumbs => Some(Icon::ThumbsDownFilled),
+        _ => None,
+    };
+    let text_right = if let Some(time) = listening_time {
+        let actions_left = more_rect.left() - if has_thumbs { 66.0 } else { 0.0 };
+        let time_left = rect.right() - 12.0 - text_width(ui, time, &theme::regular(12.0));
+        let label_left = time_left - if rating_icon.is_some() { 22.0 } else { 0.0 };
+        actions_left.min(label_left) - 8.0
+    } else {
+        rect.right() - right_pad - duration_w - thumb_w
     };
 
     // A narrow row — the open queue on a small window — compresses instead of starving: the
@@ -2649,7 +2675,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             );
             title_x += 19.0;
         }
-        let text_w = (rect.right() - right_pad - duration_w - thumb_w - title_x).max(0.0);
+        let text_w = (text_right - title_x).max(0.0);
 
         let title_color = if active {
             palette.accent_text()
@@ -2685,8 +2711,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // Subtitle pieces, laid out left to right so each linked piece gets its own hit area.
         // The play-count tail rides the same line and scrolls with it. The pair's ±9.5 split
         // (was ±9 at the old 13pt title) keeps the same gap between the two lines.
-        let sub_right = rect.right() - right_pad - duration_w - thumb_w;
-        let sub_w = (sub_right - text_x).max(0.0);
+        let sub_w = (text_right - text_x).max(0.0);
         if let Some(target) = paint_subtitle_marquee(
             ui,
             palette,
@@ -2726,7 +2751,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
                         vec2(16.0, 16.0),
                     ),
                 );
-        } else if !share_corner {
+        } else if listening_time.is_none() && !share_corner {
             if let Some(d) = duration {
                 ui.painter().text(
                     egui::pos2(rect.right() - right_pad, rect.center().y),
@@ -2755,6 +2780,13 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         .as_ref()
         .filter(|_| show_rating)
         .map(|m| (m.track.video_id.clone(), m.signed_in));
+    let thumb_focused = listening_time.is_some()
+        && has_thumbs
+        && ui.memory(|mem| {
+            ["like", "dislike"]
+                .iter()
+                .any(|label| mem.has_focus(ui.id().with(("ytm-row-thumb", id_salt, label))))
+        });
     if let (Some(m), Some(more)) = (menu.as_ref(), more_response.as_ref()) {
         let open = egui::Popup::is_id_open(
             ui.ctx(),
@@ -2766,7 +2798,26 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         more.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "More options")
         });
-        if ui.is_rect_visible(rect) && (over || more.hovered() || more.has_focus() || open) {
+        let show_actions = over || thumb_focused || more.hovered() || more.has_focus() || open;
+        if let Some(time) = listening_time
+            && !show_actions
+            && ui.is_rect_visible(rect)
+        {
+            let label = ui.painter().text(
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                time,
+                theme::regular(12.0),
+                palette.secondary,
+            );
+            if let Some(icon) = rating_icon {
+                icon.image(palette.accent, 16.0).paint_at(
+                    ui,
+                    Rect::from_center_size(label.left_center() - vec2(14.0, 0.0), vec2(16.0, 16.0)),
+                );
+            }
+        }
+        if ui.is_rect_visible(rect) && show_actions {
             let lit = lit(ui, more);
             if lit > 0.001 || open {
                 ui.painter().circle_filled(
@@ -2815,7 +2866,9 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // Wide rows reserve a 68pt zone left of the duration and anchor the thumbs there.
         // Corner-sharing rows have no zone to anchor to — the thumbs take the duration's corner
         // instead, where the duration itself has stepped aside for them.
-        let thumb_right = if share_corner {
+        let thumb_right = if listening_time.is_some() {
+            more_rect.left()
+        } else if share_corner {
             rect.right() - 17.0 - more_w
         } else {
             rect.right() - right_pad - duration_w
@@ -2828,7 +2881,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             like,
             &id,
             id_salt,
-            over,
+            over || thumb_focused,
             quiet_like,
         ) {
             action = Some(rate);
@@ -6017,6 +6070,75 @@ mod tests {
         // Exactly at the threshold the zone still fits; sharing starts below it.
         assert!(corner_shares_duration(519.0, true, true, true));
         assert!(!corner_shares_duration(520.0, true, true, true));
+    }
+
+    #[test]
+    fn top_song_hover_keeps_the_title_viewport_and_swaps_the_time_for_actions() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let track = crate::listening::Metadata {
+            id: "stats-test".into(),
+            title: "A long title with featured artists and a live recording credit".repeat(2),
+            liked: true,
+            ..Default::default()
+        }
+        .to_track();
+        let mut title_id = egui::Id::NULL;
+        let mut frame = |pointer| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 100.0))),
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                },
+                |ui| {
+                    title_id = ui.id().with(("ytm-row-title", 0_usize));
+                    track_row_with_listening_time(
+                        ui,
+                        &Palette::dark(),
+                        TrackRow {
+                            number: Some(1),
+                            rank: None,
+                            trend: track.trend,
+                            title: &track.title,
+                            album_id: None,
+                            subtitle: plain_subtitle("Artist"),
+                            duration: Some(180),
+                            plays: None,
+                            explicit: true,
+                            active: false,
+                            playing: false,
+                            badge: None,
+                            art: None,
+                            shape: ArtShape::Square,
+                            hide_art: false,
+                            id_salt: 0,
+                            menu: Some(RowMenu {
+                                track: &track,
+                                playlist_id: None,
+                                playlists: &[],
+                                signed_in: true,
+                                queue_index: None,
+                            }),
+                            like: track.like,
+                            show_rating: true,
+                            quiet_like: true,
+                            add_to: None,
+                        },
+                        Some("21m 07s"),
+                    );
+                },
+            );
+            let time_visible = output.shapes.iter().any(|shape|
+                matches!(&shape.shape, egui::Shape::Text(t) if t.galley.text() == "21m 07s"));
+            output.drop_without_applying_deltas();
+            (ctx.read_response(title_id).unwrap().rect, time_visible)
+        };
+        let (rest, time_visible) = frame(egui::pos2(260.0, 90.0));
+        assert!(time_visible && rest.width() > 120.0);
+        let (hover, time_visible) = frame(egui::pos2(265.0, 28.0));
+        assert_eq!(rest, hover);
+        assert!(!time_visible);
     }
 
     /// The cover's play button is a control of its own: a click inside a square row's artwork
