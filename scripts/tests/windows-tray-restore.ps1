@@ -1,5 +1,5 @@
 # Exercise the same action queue as the tray menu against a taskbar-minimized window.
-param([Parameter(Mandatory)][string]$Exe)
+param([Parameter(Mandatory)][Diagnostics.Process]$App)
 $ErrorActionPreference = 'Stop'
 
 Add-Type -TypeDefinition @'
@@ -15,31 +15,31 @@ public static class TrayWindow {
 function Wait-For([scriptblock]$Condition, [string]$Description, [int]$Seconds) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
-        if ($app.HasExited) { throw "Moosik exited while waiting for $Description" }
+        if ($App.HasExited) { throw "Moosik exited while waiting for $Description" }
         if (& $Condition) { return }
         Start-Sleep -Milliseconds 75
     } while ($timer.Elapsed.TotalSeconds -lt $Seconds)
     throw "Timed out waiting for $Description"
 }
 
-$start = [Diagnostics.ProcessStartInfo]::new($Exe, '--tray-test stdin')
-$start.UseShellExecute = $false
-$start.RedirectStandardInput = $true
-$app = [Diagnostics.Process]::Start($start)
+# Use the player window the installer smoke test has already verified on the taskbar.
+$window = $App.MainWindowHandle
 try {
-    Wait-For { $app.Refresh(); $app.MainWindowHandle -ne 0 } 'the player window' 30
-    $window = $app.MainWindowHandle
     [void][TrayWindow]::ShowWindowAsync($window, 6) # SW_MINIMIZE
     Wait-For { [TrayWindow]::IsIconic($window) } 'Windows to minimize the player' 3
-    $app.StandardInput.WriteLine('toggle')
+    $App.StandardInput.WriteLine('toggle')
     Wait-For {
         [TrayWindow]::IsWindowVisible($window) -and ![TrayWindow]::IsIconic($window)
     } 'the first tray toggle to restore the player' 15
-    $app.StandardInput.WriteLine('toggle')
+    $App.StandardInput.WriteLine('toggle')
     Wait-For { ![TrayWindow]::IsWindowVisible($window) } 'the second toggle to hide the player' 6
-    $app.StandardInput.WriteLine('quit')
-    if (!$app.WaitForExit(10000) -or $app.ExitCode -ne 0) { throw 'Tray Quit failed' }
+    $App.StandardInput.WriteLine('quit')
+    if (!$App.WaitForExit(10000) -or $App.ExitCode -ne 0) { throw 'Tray Quit failed' }
     Write-Output 'Verified tray restore, hide and quit on Windows.'
+} catch {
+    Write-Output "Player HWND $window visible=$([TrayWindow]::IsWindowVisible($window)) minimized=$([TrayWindow]::IsIconic($window))"
+    Get-Content (Join-Path $env:APPDATA 'moosik/config/moosik.log') -Tail 25 -ErrorAction SilentlyContinue
+    throw
 } finally {
-    if (!$app.HasExited) { Stop-Process -Id $app.Id -Force }
+    if (!$App.HasExited) { Stop-Process -Id $App.Id -Force }
 }
