@@ -1079,9 +1079,12 @@ fn song_row(app: &mut App, ui: &mut egui::Ui, row: &listening::Row, index: usize
     if !ui.is_rect_visible(rect) {
         return;
     }
+    let listened = clock(row.listen_ms);
     let wide = table && rect.width() > 650.0;
     let medium = table && rect.width() > 460.0;
-    let reserve = if wide {
+    let reserve = if !table {
+        0.0
+    } else if wide {
         285.0
     } else if medium {
         180.0
@@ -1089,18 +1092,23 @@ fn song_row(app: &mut App, ui: &mut egui::Ui, row: &listening::Row, index: usize
         95.0
     };
     let cell = Rect::from_min_max(rect.min, pos2(rect.right() - reserve - 32.0, rect.bottom()));
-    regular_song(app, ui, &track, cell, index, true);
+    let style = if table {
+        SongRow::Ranked
+    } else {
+        SongRow::Top(&listened)
+    };
+    regular_song(app, ui, &track, cell, index, style);
     let right = rect.right() - 44.0;
     if wide {
-        value_at(ui, &p, rect, right - 210.0, &clock(row.listen_ms));
+        value_at(ui, &p, rect, right - 210.0, &listened);
         value_at(ui, &p, rect, right - 138.0, &row.plays.to_string());
         value_at(ui, &p, rect, right - 72.0, &row.skips.to_string());
         value_at(ui, &p, rect, right, &row.completed.to_string());
     } else if medium {
-        value_at(ui, &p, rect, right - 80.0, &clock(row.listen_ms));
+        value_at(ui, &p, rect, right - 80.0, &listened);
         value_at(ui, &p, rect, right, &row.plays.to_string());
-    } else {
-        value_at(ui, &p, rect, right, &clock(row.listen_ms));
+    } else if table {
+        value_at(ui, &p, rect, right, &listened);
     }
     if details_button(ui, &p, rect, index, "View listening details").clicked() {
         select_song(app, row);
@@ -1124,13 +1132,19 @@ fn details_button(
     .inner
 }
 
+pub(crate) enum SongRow<'a> {
+    Unnumbered,
+    Ranked,
+    Top(&'a str),
+}
+
 pub(crate) fn regular_song(
     app: &mut App,
     ui: &mut egui::Ui,
     track: &crate::model::Track,
     rect: Rect,
     index: usize,
-    numbered: bool,
+    style: SongRow<'_>,
 ) {
     use crate::ui::{ListClick, RowSpec, is_active, track_subtitle};
     let signed_in = app.signed_in();
@@ -1143,7 +1157,7 @@ pub(crate) fn regular_song(
         rect,
         index,
         RowSpec {
-            number: numbered.then_some(index + 1),
+            number: (!matches!(style, SongRow::Unnumbered)).then_some(index + 1),
             rank: None,
             trend: track.trend,
             title: &track.title,
@@ -1168,8 +1182,12 @@ pub(crate) fn regular_song(
             }),
             like: track.like,
             show_rating: true,
-            quiet_like: false,
+            quiet_like: matches!(style, SongRow::Top(_)),
             add_to: None,
+        },
+        match style {
+            SongRow::Top(time) => Some(time),
+            _ => None,
         },
     );
     if let Some(action) = action {
@@ -1682,7 +1700,7 @@ fn history(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         let wide = rect.width() > 620.0;
         let reserve = if wide { 250.0 } else { 100.0 };
         let cell = Rect::from_min_max(rect.min, pos2(rect.right() - reserve - 32.0, rect.bottom()));
-        regular_song(app, ui, &track, cell, i, false);
+        regular_song(app, ui, &track, cell, i, SongRow::Unnumbered);
         let right = rect.right() - 44.0;
         if wide {
             value_at(ui, &p, rect, right - 150.0, &clock(row.listen_ms));

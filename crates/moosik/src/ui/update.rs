@@ -20,6 +20,8 @@ pub(crate) struct State {
     pub(crate) open: bool,
     /// A check is in flight.
     pub(crate) checking: bool,
+    pub(crate) install_requested: bool,
+    pub(crate) refreshing: bool,
     /// Next automatic check for an interactive session.
     pub(crate) next_check: Option<std::time::Instant>,
     /// A check found nothing newer, which About says until the next one.
@@ -46,7 +48,8 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     };
     let p = app.palette;
     let installable = release.installable();
-    let busy = app.update.progress.is_some();
+    let busy =
+        app.update.progress.is_some() || app.update.refreshing || app.update.install_requested;
     let width = 580.0_f32.min(screen.width() - 40.0);
     // Four buttons need about 540 points. Below that, "Skip this version" takes its own line
     // above the others rather than running off the card's left edge.
@@ -105,7 +108,9 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
             body.add_space(4.0);
             // An install that would have worked but for a release still missing its file or
             // checksums falls back to the manual text, which is what the user can do now.
-            let how = if installable {
+            let how = if release.native {
+                "Moosik checks for the latest release, then installs it and restarts."
+            } else if installable {
                 Install::current().how()
             } else {
                 Install::Manual.how()
@@ -116,7 +121,9 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
                     .color(p.secondary),
             );
             body.add_space(8.0);
-            if let Some(percent) = app.update.progress {
+            if app.update.refreshing || app.update.install_requested {
+                body.label("Checking for the latest release…");
+            } else if let Some(percent) = app.update.progress {
                 body.label(
                     egui::RichText::new(format!("Downloading… {percent:.0}%"))
                         .font(theme::medium(12.0))
@@ -168,10 +175,14 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
         });
 
     if page {
-        crate::open_url(&release.page);
+        if installable {
+            crate::open_url(&release.page);
+        } else {
+            crate::open_url(crate::update::LATEST_PAGE);
+        }
     }
     if install {
-        app.install_update();
+        app.activate_update();
     }
     if skip {
         let ctx = ui.ctx().clone();

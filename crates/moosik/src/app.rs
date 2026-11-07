@@ -5,6 +5,7 @@
 //! currently is, what has been fetched for it, and how playback advances.
 
 mod together;
+pub(crate) use together::Member as SessionMember;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -271,6 +272,7 @@ struct MediaKey {
 }
 
 struct PresenceKey {
+    listeners: usize,
     id: String,
     title: String,
     artists: Vec<crate::model::ArtistLink>,
@@ -1424,6 +1426,8 @@ fn hide_command_for(wayland: bool, hide: bool) -> egui::ViewportCommand {
 }
 
 pub struct App {
+    #[cfg(target_os = "macos")]
+    _scroll_monitor: Option<crate::ui::scroll_gesture::Monitor>,
     pub(crate) palette: Palette,
     /// The themes folder as last read. Settings lists these; `settings.custom_theme` picks one.
     pub(crate) custom_themes: theme::custom::Themes,
@@ -1923,7 +1927,7 @@ pub struct App {
     /// The Discord Rich Presence worker, while the setting is on and an application id is set.
     /// Dropping it tells the worker to clear the presence and stop.
     discord: Option<crate::discord::Discord>,
-    together: together::Together,
+    pub(crate) together: together::Together,
     /// What was last handed to Discord — the track's id, whether it was playing, and its title —
     /// so the presence is only resent when something material changes rather than every frame.
     presence_key: Option<PresenceKey>,
@@ -2163,6 +2167,8 @@ impl App {
         // fetch fires immediately, and a dead cookie fails it into the empty rail — the state
         // that would have shown anyway.
         let mut app = Self {
+            #[cfg(target_os = "macos")]
+            _scroll_monitor: crate::ui::scroll_gesture::Monitor::install(cc.egui_ctx.clone()),
             palette,
             custom_themes,
             theme_watch,
@@ -2794,7 +2800,7 @@ impl App {
     /// Ask GitHub for the latest release. `manual` is the About tab's "Check now": it asks at
     /// once, and answers even when there is nothing new.
     pub(crate) fn check_for_update(&mut self, manual: bool) {
-        if self.update.checking || self.update.progress.is_some() {
+        if self.update.checking || self.update.refreshing || self.update.progress.is_some() {
             return;
         }
         #[cfg(target_os = "macos")]
@@ -2820,37 +2826,70 @@ impl App {
         self.backend.check_for_update(delay, manual);
     }
 
-    /// Both the toolbar and About act on the release already offered to the user.
+    /// Every install action resolves the release again, including manual installs.
     pub(crate) fn activate_update(&mut self) {
-        if let Some(release) = &self.update.available {
-            if release.installable() {
-                self.install_update();
-            } else {
-                self.update.open = true;
-            }
+        #[cfg(target_os = "macos")]
+        if crate::update::macos::install_in_progress() {
+            return;
+        }
+        if self.update.progress.is_none() && !self.update.refreshing {
+            self.update.install_requested = true;
+        }
+        self.refresh_update_if_requested();
+    }
+
+    fn refresh_update_if_requested(&mut self) {
+        if self.update.install_requested && !self.update.checking {
+            self.update.install_requested = false;
+            self.update.refreshing = true;
+            self.update.error = None;
+            #[cfg(target_os = "macos")]
+            let feed = crate::update::macos::feed_url();
+            #[cfg(not(target_os = "macos"))]
+            let feed = None;
+            self.backend.refresh_update(feed);
         }
     }
 
-    /// Download and install the release the check found. The window closes once it is ready.
-    pub(crate) fn install_update(&mut self) {
-        let Some(release) = self.update.available.clone() else {
-            return;
-        };
-        if self.update.progress.is_some() || !release.installable() {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        if release.native {
-            if !crate::update::macos::install_prepared() {
-                // Bring Sparkle's existing offer or download to the front, even if
-                // a previous manual check is still marked in progress.
-                crate::update::macos::check();
+    fn use_latest_update(&mut self, result: Result<crate::update::Check, String>) {
+        use crate::update::Check;
+        self.update.refreshing = false;
+        self.update.not_published = false;
+        self.update.up_to_date = false;
+        match result {
+            Ok(Check::Available(release)) => {
+                self.update.available = Some(release.clone());
+                self.update.notice = true;
+                #[cfg(target_os = "macos")]
+                if release.native {
+                    self.update.open = false;
+                    crate::update::macos::install_latest(release.version);
+                    return;
+                }
+                if release.installable() {
+                    self.update.progress = Some(0.0);
+                    self.backend.install_update(release);
+                } else {
+                    self.update.open = true;
+                }
             }
-            return;
+            Ok(status) => {
+                self.update.available = None;
+                self.update.notice = false;
+                self.update.open = false;
+                self.update.up_to_date = matches!(status, Check::Current);
+                self.update.not_published = matches!(status, Check::NotPublished);
+                self.toast(if self.update.up_to_date {
+                    "Moosik is up to date"
+                } else {
+                    "Updates aren’t published yet"
+                });
+            }
+            Err(error) => {
+                self.update.error = Some(error.clone());
+                self.toast_error(&failure_text("Could not check for updates", &error));
+            }
         }
-        self.update.progress = Some(0.0);
-        self.update.error = None;
-        self.backend.install_update(release);
     }
 
     /// The titlebar's own close button was clicked: hide to the tray if that's configured,
@@ -3192,6 +3231,7 @@ impl App {
         } else {
             track.duration.unwrap_or(0) as i64
         };
+        let listeners = self.room_snapshot().map_or(0, |room| room.members.len());
         if let Some(last) = &self.presence_key {
             let expected = self.presence_position
                 + if last.playing {
@@ -3199,7 +3239,8 @@ impl App {
                 } else {
                     0.0
                 };
-            if last.id == track.video_id
+            if last.listeners == listeners
+                && last.id == track.video_id
                 && last.title == track.title
                 && last.artists == track.artists
                 && last.playing == playing
@@ -3221,6 +3262,7 @@ impl App {
             youtube_id: (provider == crate::model::Provider::YouTubeMusic)
                 .then(|| track.video_id.clone()),
             room: self.room_id().map(str::to_owned),
+            listeners,
             title: track.title.clone(),
             artist: track.artist_line(),
             thumbnail: track.thumbnail.as_deref().map(str::to_owned),
@@ -3229,6 +3271,7 @@ impl App {
             timeline,
         });
         self.presence_key = Some(PresenceKey {
+            listeners,
             id: track.video_id.clone(),
             playing,
             title: track.title.clone(),
@@ -3246,7 +3289,7 @@ impl App {
             self.leave_room();
         }
         self.discord = if self.settings.discord_rich_presence {
-            Some(crate::discord::Discord::spawn())
+            Some(crate::discord::Discord::spawn(self.ctx.clone()))
         } else {
             None
         };
@@ -3422,7 +3465,9 @@ impl App {
                 IdleEnd::Ended if self.following() => self.listening.finish("ended"),
                 IdleEnd::Ended => {
                     self.listening.finish("ended");
-                    if self.repeat == RepeatMode::One {
+                    if self.repeat == RepeatMode::One
+                        && self.room_snapshot().is_none_or(|s| s.queue.is_empty())
+                    {
                         if let Some(current) = self.q.current() {
                             self.play_index(current);
                         }
@@ -3499,6 +3544,7 @@ impl App {
         // Hand the OS widget the current transport. After the advance/autoplay above, so a track
         // that just changed is what the OS shows.
         self.poll_together();
+        crate::widgets::set_session_queue_menu(ctx, self.room_snapshot().map(|room| room.you == 0));
         self.publish_media();
         // Same snapshot, said to Discord.
         self.publish_presence();
@@ -4078,7 +4124,7 @@ impl App {
     /// see `Event::CardTracksReady`'s own doc comment for why this is a separate fetch from
     /// `load_album`'s.
     pub(crate) fn play_album(&mut self, id: String) {
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.pending_card_play = Some(id.clone());
         self.backend.play_album(id);
     }
@@ -4089,7 +4135,7 @@ impl App {
             self.navigate(Route::LikedMusic);
             return;
         }
-        self.note_playback_choice();
+        self.choose_personal_playback();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
                 self.navigate(Route::Playlist(id.clone()));
@@ -5871,6 +5917,7 @@ impl App {
                     self.local_scan_error = Some(error);
                 }
 
+                Event::LatestUpdate(result) => self.use_latest_update(result),
                 Event::UpdateChecked { release, manual } => {
                     self.update.checking = false;
                     self.update.error = None;
@@ -6822,6 +6869,7 @@ impl App {
                     }
                 }
                 Event::Playing(..) => {}
+                Event::MixLoaded { .. } if self.following() => {}
                 Event::MixLoaded { seed, mut queue } => {
                     // The player overlay is the now-playing song's own rating and the only like
                     // state a mix carries; write it onto the first row so the bar's thumbs show
@@ -7292,7 +7340,7 @@ impl App {
         if index >= tracks.len() {
             return;
         }
-        self.note_playback_choice();
+        self.choose_personal_playback();
         // The clicked row is already the loaded track *and* this is the queue it is in:
         // pause/resume it, the same convention an album/playlist header's own Play button
         // follows, rather than restarting it from the top. The whole-list comparison matters:
@@ -7388,7 +7436,15 @@ impl App {
     /// up next first (`PlayQueue::bring_up_next`), so the songs between it and the playing one
     /// still play, after it; off, it is a plain jump to that place in the queue.
     pub(crate) fn play_from_queue(&mut self, index: usize) {
-        self.note_playback_choice();
+        if self.following() && self.together.backup.is_some() {
+            // A legacy room can still show local additions. This index belongs to the
+            // displayed queue, which leaving the room replaces with the personal queue.
+            if let Some(track) = self.q.get(index).cloned() {
+                self.start_from(vec![track], 0);
+            }
+            return;
+        }
+        self.choose_personal_playback();
         if self.settings.queue_click_keeps_order && self.q.current() != Some(index) {
             // Clicked to play, so it is the listener's choice now: a radio song moved in among
             // their own must not end Repeat All's loop early (see `PlayQueue::tail_start`).
@@ -7512,6 +7568,9 @@ impl App {
     }
 
     fn advance_queue(&mut self) {
+        if self.play_session_next() {
+            return;
+        }
         let next = self
             .q
             .next(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
@@ -8009,10 +8068,12 @@ impl App {
     /// is self-correcting every frame instead, at the cost of not noticing once playback has
     /// moved on to radio tracks past the end of a shorter list.
     pub(crate) fn queue_matches(&self, tracks: &[Track]) -> bool {
-        self.now
-            .track
-            .as_ref()
-            .is_some_and(|t| tracks.iter().any(|x| x.video_id == t.video_id))
+        !self.following()
+            && self
+                .now
+                .track
+                .as_ref()
+                .is_some_and(|t| tracks.iter().any(|x| x.video_id == t.video_id))
     }
 
     /// [`Self::queue_matches`], and actually playing right now rather than paused or stopped —
@@ -8047,14 +8108,14 @@ impl App {
                     self.toast_error("Spotify radio is unavailable");
                     return;
                 }
-                self.note_playback_choice();
+                self.choose_personal_playback();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
                 self.upnext_open = true;
                 self.backend.start_mix(id);
             }
             RowAction::StartMixPlaylist(id) => {
-                self.note_playback_choice();
+                self.choose_personal_playback();
                 self.upnext_open = true;
                 self.backend.start_playlist_mix(id);
             }
@@ -8065,6 +8126,7 @@ impl App {
                 self.play_next(track);
                 self.toast("Song will play next");
             }
+            RowAction::AddToSession(track) => self.add_session_song(&track),
             RowAction::AddToQueue(track) => {
                 self.add_to_queue(track);
                 self.toast("Song added to queue");
@@ -8253,7 +8315,7 @@ impl App {
                 then,
             } => {
                 if matches!(then, ui::PageThen::StartMix | ui::PageThen::Shuffle) {
-                    self.note_playback_choice();
+                    self.choose_personal_playback();
                 }
                 if self.page_tracks(&page_id).is_some() {
                     // The fetch landed while the menu was open.
@@ -8460,6 +8522,15 @@ impl App {
         self.playback_choice = self.playback_choice.wrapping_add(1);
     }
 
+    /// A guest choosing music locally hands playback back to their personal queue.
+    fn choose_personal_playback(&mut self) {
+        self.note_playback_choice();
+        if self.following() {
+            self.leave_room();
+            self.toast("Left listening session");
+        }
+    }
+
     pub(crate) fn shuffle_folder(&mut self, name: &str) {
         let layout = &self.settings.playlist_layout;
         let ids: std::collections::BTreeSet<_> = layout
@@ -8496,7 +8567,7 @@ impl App {
                 remote.push((id.clone(), title));
             }
         }
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.pending_card_play = None;
         self.backend.folder_tracks(
             remote,
@@ -8623,7 +8694,7 @@ impl App {
 
     /// Start whatever YouTube handed over as something to play — an artist's shuffle or mix.
     pub(crate) fn play_target(&mut self, seed: String, target: crate::model::WatchTarget) {
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.upnext_open = true;
         self.backend.play_target(seed, target);
     }
@@ -9779,6 +9850,7 @@ impl eframe::App for App {
     /// minimized window played its song out and stopped there, and answered no media key.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
+        self.refresh_update_if_requested();
         if (self.update.native || self.settings.check_for_updates)
             && let Some(next) = self.update.next_check
         {
@@ -9828,6 +9900,7 @@ impl eframe::App for App {
         while let Some(event) = crate::update::macos::poll() {
             use crate::update::macos::Event;
             match event {
+                Event::ShowOffer => self.update.open = true,
                 Event::Available(version) => {
                     self.update.not_published = false;
                     self.update.available = Some(crate::update::native_release(version));

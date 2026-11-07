@@ -1805,7 +1805,7 @@ pub fn paint_subtitle_marquee<'a>(
         let mut underlined = false;
         if let Some(target) = part.target {
             let hit = Rect::from_min_size(egui::pos2(x, pos.y - 8.0), vec2(w, 16.0));
-            let r = ui.interact(hit, ui.id().with((id, i)), Sense::click());
+            let r = ui.interact(hit.intersect(clip), ui.id().with((id, i)), Sense::click());
             if r.hovered() {
                 link_hovered = true;
                 colour = palette.text;
@@ -2462,6 +2462,25 @@ pub(crate) fn track_row_with_slot<'a>(
     row: TrackRow<'a>,
     slot: RowSlot,
 ) -> (RowClick<'a>, Option<Rect>) {
+    track_row_inner(ui, palette, row, slot, None)
+}
+
+pub(crate) fn track_row_with_listening_time<'a>(
+    ui: &mut Ui,
+    palette: &Palette,
+    row: TrackRow<'a>,
+    listening_time: Option<&str>,
+) -> RowClick<'a> {
+    track_row_inner(ui, palette, row, RowSlot::Trailing(0.0), listening_time).0
+}
+
+fn track_row_inner<'a>(
+    ui: &mut Ui,
+    palette: &Palette,
+    row: TrackRow<'a>,
+    slot: RowSlot,
+    listening_time: Option<&str>,
+) -> (RowClick<'a>, Option<Rect>) {
     let TrackRow {
         source,
         number,
@@ -2535,6 +2554,7 @@ pub(crate) fn track_row_with_slot<'a>(
         egui::pos2(rect.right() - 27.0, rect.center().y),
         vec2(30.0, 30.0),
     );
+    let queue_remove = queue_index.map(|index| (index, more_rect.translate(vec2(-36.0, 0.0))));
     // A narrow row — the open queue on a small window — compresses instead of starving:
     // the number column and the art yield first, and what they give back is the title's
     // room. A full-size art and a 30pt number column left 21pt of it on a 215pt card,
@@ -2546,8 +2566,7 @@ pub(crate) fn track_row_with_slot<'a>(
     // artist page's side-by-side "Popular" column is exactly this width.
     let corner_thumbs = rect.width() < 520.0;
     // Whether the thumbs really do share that corner. They can only where they will be drawn:
-    // a ratable, signed-in row. Where they cannot — the queue, a signed-out list — the duration
-    // is not stepping aside for anything and stays put at every width.
+    // a ratable, signed-in row. Queue rows handle their remove button separately.
     let share_corner = corner_shares_duration(
         rect.width(),
         show_rating,
@@ -2565,6 +2584,7 @@ pub(crate) fn track_row_with_slot<'a>(
     let duration_w = match (duration, badge) {
         (Some(d), _) => (text_width(ui, &fmt_duration(d), &theme::regular(12.0)) + 12.0).max(44.0),
         (None, Some(b)) => (text_width(ui, b, &badge_font()) + 12.0).max(44.0),
+        (None, None) if queue_remove.is_some() => 30.0,
         (None, None) => 0.0,
     }
     .max(if share_corner { 76.0 } else { 0.0 });
@@ -2593,6 +2613,31 @@ pub(crate) fn track_row_with_slot<'a>(
         0.0
     };
 
+    // Top songs swaps its listening total for the row actions in one fixed slot.
+    // Keep both text lines clear of the larger of the label and the actual buttons.
+    let has_thumbs = show_rating && menu.as_ref().is_some_and(|m| m.signed_in);
+    let rating_icon = match like {
+        crate::model::LikeStatus::Like if has_thumbs => Some(Icon::ThumbsUpFilled),
+        crate::model::LikeStatus::Dislike if has_thumbs => Some(Icon::ThumbsDownFilled),
+        _ => None,
+    };
+    let actions_right = rect.right() - right_pad - duration_w;
+    let listening_label_left = listening_time.map(|time| {
+        let time_left = rect.right() - 12.0 - text_width(ui, time, &theme::regular(12.0));
+        time_left - if rating_icon.is_some() { 22.0 } else { 0.0 }
+    });
+    let spotify_actions_right = listening_label_left.map_or(actions_right, |label_left| {
+        actions_right.min(label_left - 6.0)
+    });
+    let text_right = if spotify_actions.is_some() {
+        spotify_actions_right - spotify_action_w
+    } else if let Some(label_left) = listening_label_left {
+        let actions_left = more_rect.left() - if has_thumbs { 66.0 } else { 0.0 };
+        actions_left.min(label_left) - 8.0
+    } else {
+        rect.right() - right_pad - duration_w - thumb_w
+    };
+
     // A narrow row — the open queue on a small window — compresses instead of starving: the
     // number column and the art yield first, and what they give back is the title's room. A
     // full-size art and a 30pt number column left 21pt of it on a 215pt card, which is one
@@ -2619,8 +2664,7 @@ pub(crate) fn track_row_with_slot<'a>(
         vec2(art_w, row_art),
     );
     let text_x = art_rect.right() + 12.0;
-    let sub_right = rect.right() - right_pad - duration_w - thumb_w;
-    let sub_w = (sub_right - text_x).max(0.0);
+    let sub_w = (text_right - text_x).max(0.0);
     let subtitle_y = rect.center().y
         + if matches!(slot, RowSlot::Subtitle(_)) {
             12.0
@@ -2637,21 +2681,28 @@ pub(crate) fn track_row_with_slot<'a>(
     let custom_slot = subtitle_slot.or(trailing);
     let spotify_slot = spotify_actions.map(|_| {
         Rect::from_min_size(
-            egui::pos2(sub_right, rect.center().y - 15.0),
+            egui::pos2(
+                spotify_actions_right - spotify_action_w,
+                rect.center().y - 15.0,
+            ),
             vec2(spotify_action_w, 30.0),
         )
     });
-    let on_child_slot = [subtitle_slot, spotify_slot]
-        .into_iter()
-        .flatten()
-        .any(|slot| {
-            ui.input(|input| {
-                [input.pointer.interact_pos(), input.pointer.press_origin()]
-                    .into_iter()
-                    .flatten()
-                    .any(|pos| slot.contains(pos))
-            })
-        });
+    let on_child_slot = [
+        subtitle_slot,
+        spotify_slot,
+        queue_remove.map(|(_, rect)| rect),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|slot| {
+        ui.input(|input| {
+            [input.pointer.interact_pos(), input.pointer.press_origin()]
+                .into_iter()
+                .flatten()
+                .any(|pos| slot.contains(pos))
+        })
+    });
     let response = ui.interact(
         rect,
         row_id,
@@ -2666,6 +2717,12 @@ pub(crate) fn track_row_with_slot<'a>(
             more_rect,
             ui.id().with(("ytm-row-more", id_salt)),
             Sense::click(),
+        )
+    });
+    let remove_button = queue_remove.map(|(index, rect)| {
+        (
+            index,
+            ui.interact(rect, row_id.with("remove"), Sense::click()),
         )
     });
 
@@ -2693,7 +2750,9 @@ pub(crate) fn track_row_with_slot<'a>(
             && response
                 .interact_pointer_pos()
                 .is_some_and(|p| more_rect.contains(p)));
+    let remove_clicked = remove_button.as_ref().is_some_and(|(_, b)| b.clicked());
     let queue_suppress = !on_child_slot
+        && !remove_clicked
         && menu
             .as_ref()
             .and_then(|m| m.queue_index)
@@ -2717,7 +2776,8 @@ pub(crate) fn track_row_with_slot<'a>(
     if song_suppress {
         link = None;
     }
-    let activate = if on_more || on_child_slot || queue_suppress || song_suppress {
+    let activate = if on_more || on_child_slot || remove_clicked || queue_suppress || song_suppress
+    {
         false
     } else if (!hide_art
         && on_cover(
@@ -2887,7 +2947,7 @@ pub(crate) fn track_row_with_slot<'a>(
             );
             title_x += 19.0;
         }
-        let text_w = (rect.right() - right_pad - duration_w - thumb_w - title_x).max(0.0);
+        let text_w = (text_right - title_x).max(0.0);
 
         let title_color = if active {
             palette.accent_text()
@@ -2961,9 +3021,26 @@ pub(crate) fn track_row_with_slot<'a>(
         // Where the corner is shared with the rating thumbs it holds the thumb and nothing else —
         // for *every* row, so a list never mixes rows that show a duration with rows that show a
         // thumb. (Letting unrated rows keep the duration was exactly that inconsistency: rated
-        // rows lost it, unrated ones did not, purely by width.) With no corner to share — wide
-        // rows, the queue, signed-out lists — the duration is always painted.
-        if !share_corner {
+        // rows lost it, unrated ones did not, purely by width.)
+        if let Some((_, button)) = &remove_button
+            && (over || button.hovered() || button.has_focus())
+        {
+            if let Some(fill) = shell_state_fill(ui, palette, button) {
+                ui.painter().circle_filled(button.rect.center(), 15.0, fill);
+            }
+            Icon::X
+                .image(
+                    mix(palette.secondary, palette.danger, lit(ui, button)),
+                    16.0,
+                )
+                .paint_at(
+                    ui,
+                    Rect::from_center_size(
+                        button.rect.center() + press_offset(button),
+                        vec2(16.0, 16.0),
+                    ),
+                );
+        } else if listening_time.is_none() && !share_corner {
             if let Some(d) = duration {
                 ui.painter().text(
                     egui::pos2(rect.right() - right_pad, rect.center().y),
@@ -2992,6 +3069,13 @@ pub(crate) fn track_row_with_slot<'a>(
         .as_ref()
         .filter(|_| show_rating)
         .map(|m| (m.track.video_id.clone(), m.signed_in));
+    let thumb_focused = listening_time.is_some()
+        && has_thumbs
+        && ui.memory(|mem| {
+            ["like", "dislike"]
+                .iter()
+                .any(|label| mem.has_focus(ui.id().with(("ytm-row-thumb", id_salt, label))))
+        });
     if let (Some(m), Some(more)) = (menu.as_ref(), more_response.as_ref()) {
         let open = egui::Popup::is_id_open(
             ui.ctx(),
@@ -3003,7 +3087,26 @@ pub(crate) fn track_row_with_slot<'a>(
         more.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "More options")
         });
-        if ui.is_rect_visible(rect) && (over || more.hovered() || more.has_focus() || open) {
+        let show_actions = over || thumb_focused || more.hovered() || more.has_focus() || open;
+        if let Some(time) = listening_time
+            && !show_actions
+            && ui.is_rect_visible(rect)
+        {
+            let label = ui.painter().text(
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                time,
+                theme::regular(12.0),
+                palette.secondary,
+            );
+            if let Some(icon) = rating_icon {
+                icon.image(palette.accent, 16.0).paint_at(
+                    ui,
+                    Rect::from_center_size(label.left_center() - vec2(14.0, 0.0), vec2(16.0, 16.0)),
+                );
+            }
+        }
+        if ui.is_rect_visible(rect) && show_actions {
             let lit = lit(ui, more);
             if lit > 0.001 || open {
                 ui.painter().circle_filled(
@@ -3059,6 +3162,18 @@ pub(crate) fn track_row_with_slot<'a>(
     let mut action = action.or_else(|| {
         menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m))
     });
+    if let Some((index, button)) = remove_button {
+        let label = "Remove from queue";
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        if button.clicked() {
+            action = Some(crate::ui::RowAction::RemoveFromQueue(index));
+        }
+        button
+            .on_hover_text(label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     // Rating thumbs are interacted whenever the row is visible — never gated on drawn — for
     // the reason documented on `rate_thumbs`. A click is only reachable where they are
     // visible anyway, since their zone sits inside the row.
@@ -3068,7 +3183,9 @@ pub(crate) fn track_row_with_slot<'a>(
         // Wide rows reserve a 68pt zone left of the duration and anchor the thumbs there.
         // Corner-sharing rows have no zone to anchor to — the thumbs take the duration's corner
         // instead, where the duration itself has stepped aside for them.
-        let thumb_right = if share_corner {
+        let thumb_right = if listening_time.is_some() {
+            more_rect.left()
+        } else if share_corner {
             rect.right() - 17.0 - more_w
         } else {
             rect.right() - right_pad - duration_w
@@ -3081,7 +3198,7 @@ pub(crate) fn track_row_with_slot<'a>(
             like,
             &id,
             id_salt,
-            over,
+            over || thumb_focused,
             quiet_like,
         ) {
             action = Some(rate);
@@ -3211,6 +3328,13 @@ fn add_button(ui: &mut Ui, palette: &Palette, rect: Rect, id: egui::Id) -> egui:
     response.on_hover_text("Add to playlist")
 }
 
+const SESSION_QUEUE: &str = "session-queue-available";
+
+/// A host has both a personal queue and a shared queue. Guests add to the shared one.
+pub(crate) fn set_session_queue_menu(ctx: &egui::Context, is_host: Option<bool>) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(SESSION_QUEUE), is_host));
+}
+
 /// A song's right-click menu, reporting the choice. Shared by every row and the player bar.
 ///
 /// The popup id is the video id, not the row index: indices shift as the virtualised range
@@ -3309,8 +3433,21 @@ fn row_menu_with_button(
                 }
                 mui.close();
             }
-            if menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked() {
+            let session_host = mui.ctx().data(|d| {
+                d.get_temp::<Option<bool>>(egui::Id::new(SESSION_QUEUE))
+                    .flatten()
+            });
+            if session_host != Some(false)
+                && menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked()
+            {
                 choice = Some(RowAction::AddToQueue(t.clone()));
+                mui.close();
+            }
+            if t.local_path.is_none()
+                && session_host.is_some()
+                && menu_item(mui, palette, Icon::ListPlus, "Add to session queue", None).clicked()
+            {
+                choice = Some(RowAction::AddToSession(t.clone()));
                 mui.close();
             }
             if let Some(i) = menu.queue_index
@@ -5231,7 +5368,9 @@ pub fn tab_strip(
     let left = ui.cursor().min.x;
     let right = ui.max_rect().right();
     let mut x = left;
-    let top = ui.cursor().min.y;
+    let first_top = ui.cursor().min.y;
+    let mut top = first_top;
+    let mut active = None;
     for (i, label) in labels.iter().enumerate() {
         let font = if i == selected {
             theme::semibold(14.0)
@@ -5240,7 +5379,14 @@ pub fn tab_strip(
         };
         let galley =
             ui.fonts_mut(|f| f.layout_no_wrap((*label).to_owned(), font, Color32::PLACEHOLDER));
+        if x > left && x + galley.size().x > right {
+            x = left;
+            top += HEIGHT;
+        }
         let rect = Rect::from_min_size(egui::pos2(x, top), vec2(galley.size().x, HEIGHT));
+        if i == selected {
+            active = Some(rect);
+        }
         let response = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
         let t = lit(ui, &response);
         let colour = if i == selected {
@@ -5266,32 +5412,14 @@ pub fn tab_strip(
         base,
         egui::Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
-    // The bar under the open tab, over the hairline.
-    let mut x = left;
-    for (i, label) in labels.iter().enumerate() {
-        let w = ui.fonts_mut(|f| {
-            f.layout_no_wrap(
-                (*label).to_owned(),
-                if i == selected {
-                    theme::semibold(14.0)
-                } else {
-                    theme::medium(14.0)
-                },
-                Color32::PLACEHOLDER,
-            )
-            .size()
-            .x
-        });
-        if i == selected {
-            ui.painter().rect_filled(
-                Rect::from_min_size(egui::pos2(x, base - 2.0), vec2(w, 2.0)),
-                CornerRadius::same(1),
-                palette.accent,
-            );
-        }
-        x += w + GAP;
+    if let Some(rect) = active {
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.left_bottom() - vec2(0.0, 2.0), vec2(rect.width(), 2.0)),
+            CornerRadius::same(1),
+            palette.accent,
+        );
     }
-    ui.allocate_space(vec2(right - left, HEIGHT + 1.0));
+    ui.allocate_space(vec2(right - left, base - first_top + 1.0));
     clicked
 }
 
@@ -6819,6 +6947,76 @@ mod tests {
             pass(vec![click(pos, false)]);
             assert!(activated.get());
         }
+    }
+
+    #[test]
+    fn top_song_hover_keeps_the_title_viewport_and_swaps_the_time_for_actions() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let track = crate::listening::Metadata {
+            id: "stats-test".into(),
+            title: "A long title with featured artists and a live recording credit".repeat(2),
+            liked: true,
+            ..Default::default()
+        }
+        .to_track();
+        let mut title_id = egui::Id::NULL;
+        let mut frame = |pointer| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(320.0, 100.0))),
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                },
+                |ui| {
+                    title_id = ui.id().with(("ytm-row-title", 0_usize));
+                    track_row_with_listening_time(
+                        ui,
+                        &Palette::dark(),
+                        TrackRow {
+                            source: None,
+                            number: Some(1),
+                            rank: None,
+                            trend: track.trend,
+                            title: &track.title,
+                            album_id: None,
+                            subtitle: plain_subtitle("Artist"),
+                            duration: Some(180),
+                            plays: None,
+                            explicit: true,
+                            active: false,
+                            playing: false,
+                            badge: None,
+                            art: None,
+                            shape: ArtShape::Square,
+                            hide_art: false,
+                            id_salt: 0,
+                            menu: Some(RowMenu {
+                                track: &track,
+                                playlist_id: None,
+                                playlists: &[],
+                                signed_in: true,
+                                queue_index: None,
+                            }),
+                            like: track.like,
+                            show_rating: true,
+                            quiet_like: true,
+                            add_to: None,
+                        },
+                        Some("21m 07s"),
+                    );
+                },
+            );
+            let time_visible = output.shapes.iter().any(|shape|
+                matches!(&shape.shape, egui::Shape::Text(t) if t.galley.text() == "21m 07s"));
+            output.drop_without_applying_deltas();
+            (ctx.read_response(title_id).unwrap().rect, time_visible)
+        };
+        let (rest, time_visible) = frame(egui::pos2(260.0, 90.0));
+        assert!(time_visible && rest.width() > 120.0);
+        let (hover, time_visible) = frame(egui::pos2(265.0, 28.0));
+        assert_eq!(rest, hover);
+        assert!(!time_visible);
     }
 
     /// The cover's play button is a control of its own: a click inside a square row's artwork
