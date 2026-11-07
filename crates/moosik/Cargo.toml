@@ -36,6 +36,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ytmapi-rs.workspace = true
 moosik-resolve.workspace = true
+moosik-spotify = { path = "../moosik-spotify" }
+rand = "0.9"
 libmpv2.workspace = true
 # The software render API for the in-app music video. `libmpv2`'s safe wrapper only exposes the
 # OpenGL render params, so the video view drives mpv's `sw` render context directly through these
