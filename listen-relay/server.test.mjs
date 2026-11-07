@@ -42,18 +42,21 @@ test('session members share an attributed FIFO queue, while only the host contro
   const bob = { 'X-Moosik-Listener': 'b'.repeat(32) };
   const sync = (auth, body) => fetch(room, { method: 'PUT', headers: { ...auth, 'X-Moosik-Session': session }, body: JSON.stringify(body) });
   const song = { id: 'dQw4w9WgXcQ', title: 'Track', artist: 'Artist', playing: false, position: 0 };
-  const first = { name: 'Alice', add: { seq: 1, song } };
+  const first = { name: 'Alice', avatar: 'default/2', add: { seq: 1, song } };
   assert.equal((await sync(alice, first)).status, 409);
   assert.equal((await sync(host, { name: 'DJ', state: song })).status, 200);
   assert.equal((await fetch(room)).headers.get('X-Moosik-Session'), '1');
   assert.equal((await sync(alice, { name: 'DJ', state: null })).status, 400);
   assert.equal((await sync(alice, { name: 'DJ', played: 42 })).status, 400);
   assert.equal((await sync(alice, { ...first, add: { seq: 1, song: { ...song, id: 'file:///tmp' } } })).status, 400);
-  const [a, b] = await Promise.all([sync(alice, first), sync(bob, { ...first, name: 'Bob' })]);
+  const [a, b] = await Promise.all([sync(alice, first), sync(bob, { ...first, name: 'Bob', avatar: 'https://example.com/image.png' })]);
   assert.equal(a.status, 200);
   assert.equal(b.status, 200);
   const view = await (await sync(alice, first)).json();
   assert.equal(view.queue.length, 2);
+  assert.equal(view.members.find(m => m.name === 'Alice').avatar, 'default/2');
+  assert.equal(view.queue.find(e => e.by.name === 'Alice').by.avatar, 'default/2');
+  assert.equal(view.members.find(m => m.name === 'Bob').avatar, undefined);
   assert.deepEqual(view.queue.map(e => e.entry), [1, 2]);
   assert.deepEqual(view.queue.map(e => e.by.name).sort(), ['Alice', 'Bob']);
   assert.deepEqual(view.members.map(m => m.name).sort(), ['Alice', 'Bob', 'DJ']);
@@ -61,7 +64,7 @@ test('session members share an attributed FIFO queue, while only the host contro
   assert.ok(!JSON.stringify(view).includes(alice['X-Moosik-Listener']));
   const current = await (await sync(host, { name: 'DJ', state: song, played: 1,
     add: { seq: 1, song: { ...song, title: 'Host pick' } } })).json();
-  assert.equal(current.current_by.name, view.queue[0].by.name);
+  assert.deepEqual(current.current_by, view.queue[0].by);
   assert.deepEqual(current.queue.map(e => e.entry), [2, 3]);
   assert.equal(current.queue[1].by.name, 'DJ');
   assert.equal((await sync(bob, { name: '', leave: true })).status, 204);
@@ -69,7 +72,7 @@ test('session members share an attributed FIFO queue, while only the host contro
   now += 16000;
   const after = await (await sync(host, { name: 'DJ', state: song, played: 1 })).json();
   assert.deepEqual(after.members, [{ id: 0, name: 'DJ' }]);
-  assert.equal(after.queue[0].by.name, view.queue[1].by.name);
+  assert.deepEqual(after.queue[0].by, view.queue[1].by);
   assert.deepEqual(await (await fetch(room)).json(), song);
   now += 46000;
   assert.equal((await sync(alice, first)).status, 404);

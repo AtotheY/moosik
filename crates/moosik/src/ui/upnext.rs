@@ -5,10 +5,11 @@
 //! No rating thumbs here (`show_rating: false`). This is a list of what happens next, and a
 //! column of controls repeated down it is noise; rating a queued song is one right-click away.
 
-use crate::app::App;
+use crate::app::{App, SessionMember};
 use crate::theme;
 use crate::ui::{ListClick, RowSpec, centered, is_active, spec_rows, track_subtitle_no_album};
 use crate::widgets::{self, ArtShape};
+use crate::{backend::Backend, images::Images};
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     // The card's own rect, before the list consumes the ui: the corner repaint at the end
@@ -89,36 +90,131 @@ fn section(app: &App, ui: &mut egui::Ui, gap: f32, label: &str) {
     ui.add_space(4.0);
 }
 
-/// The panel's own title, a hair right of the rows below it by eye.
-fn header(app: &App, ui: &mut egui::Ui, label: &str) {
+const AVATAR: f32 = 24.0;
+const AVATAR_GAP: f32 = 4.0;
+
+fn avatar(
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    images: &mut Images,
+    backend: &Backend,
+    member: &SessionMember,
+    label: &str,
+) {
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(AVATAR), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        if let Some(tex) =
+            crate::ui::art_texture(images, backend, ui.ctx(), member.photo.as_ref(), AVATAR)
+        {
+            widgets::paint_art(ui, p, rect, Some(tex), ArtShape::Circle);
+        } else {
+            ui.painter()
+                .circle_filled(rect.center(), AVATAR / 2.0, p.surface_active);
+            let initial = member
+                .name
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                initial,
+                theme::semibold(12.0),
+                p.text,
+            );
+        }
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, label));
+    response.on_hover_text(label);
+}
+
+fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
+    if page {
+        ui.add_space(20.0);
+    }
+    let p = app.palette;
     ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(label)
-                .font(theme::semibold(12.0))
-                .color(app.palette.secondary),
-        );
+        if !page {
+            ui.add_space(2.0);
+        }
+        let text = egui::RichText::new(title);
+        ui.label(if page {
+            text.font(theme::bold(theme::SECTION_PT)).color(p.text)
+        } else {
+            text.font(theme::semibold(12.0)).color(p.secondary)
+        });
+        let Some(room) = app.together.snapshot() else {
+            return;
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = AVATAR_GAP;
+            let slots =
+                ((ui.available_width() + AVATAR_GAP) / (AVATAR + AVATAR_GAP)).floor() as usize;
+            let members = &room.members;
+            let visible = if members.len() <= slots {
+                members.len()
+            } else {
+                slots.saturating_sub(1)
+            };
+            let label = |member: &SessionMember| {
+                let role = match (member.id == 0, member.id == room.you) {
+                    (true, true) => " (you, host)",
+                    (true, false) => " (host)",
+                    (false, true) => " (you)",
+                    _ => "",
+                };
+                format!("{}{role}", member.name)
+            };
+            if visible < members.len() {
+                let names = members[visible..]
+                    .iter()
+                    .map(label)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ui.label(
+                    egui::RichText::new(format!("+{}", members.len() - visible))
+                        .font(theme::semibold(12.0))
+                        .color(p.secondary),
+                )
+                .on_hover_text(names);
+            }
+            for member in members[..visible].iter().rev() {
+                avatar(
+                    ui,
+                    &p,
+                    &mut app.images,
+                    &app.backend,
+                    member,
+                    &label(member),
+                );
+            }
+        });
     });
-    ui.add_space(4.0);
+    ui.add_space(if page { 8.0 } else { 4.0 });
 }
 
 /// The track the transport is on, above the list of what follows it.
 fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
     let Some(track) = app.q.current_track().cloned() else {
+        if app.room_snapshot().is_some() {
+            playing_header(app, ui, "Listening session", page);
+        }
         return;
     };
-    if page {
-        crate::ui::section(ui, &app.palette, "Now playing");
-    } else {
-        header(app, ui, "Now playing");
-    }
+    playing_header(app, ui, "Now playing", page);
+    let credit = app
+        .room_snapshot()
+        .and_then(|room| room.playing_credit(&track.video_id))
+        .map(|(member, label)| (member.clone(), label));
     // Namespaced under its own id: this row and "Next up"'s first row both start their own
     // `spec_rows` call at index 0, so without this their title/artist links resolve to the
     // exact same widget id (`ui.id()` is the same parent for both — they're sequential calls on
     // the same `Ui`, not separately salted children) and neither one's link reliably works.
     let signed_in = app.signed_in();
-    let clicked = ui
-        .push_id("now-playing", |ui| {
+    let row = |app: &mut App, ui: &mut egui::Ui| {
+        ui.push_id("now-playing", |ui| {
             let App {
                 palette,
                 images,
@@ -162,7 +258,32 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
                 add_to: None,
             })
         })
-        .inner;
+        .inner
+    };
+    let clicked = if let Some((member, label)) = credit {
+        ui.horizontal(|ui| {
+            let width = ui.available_width() - AVATAR - ui.spacing().item_spacing.x;
+            let clicked = ui
+                .allocate_ui_with_layout(
+                    egui::vec2(width.max(0.0), theme::ROW_HEIGHT),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| row(app, ui),
+                )
+                .inner;
+            avatar(
+                ui,
+                &app.palette,
+                &mut app.images,
+                &app.backend,
+                &member,
+                &label,
+            );
+            clicked
+        })
+        .inner
+    } else {
+        row(app, ui)
+    };
     if let Some(action) = clicked.action {
         app.row_action(action);
     }
@@ -182,6 +303,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         crate::ui::page_title(ui, &app.palette, "Queue");
         if app.q.current_track().is_none() && app.q.tracks().is_empty() {
             if app.room_snapshot().is_some() {
+                playing_header(app, ui, "Listening session", true);
                 session_queue(app, ui, true);
                 return;
             }
@@ -242,38 +364,11 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         return;
     };
     let p = app.palette;
-    if let Some(by) = &room.current_by {
-        ui.label(
-            egui::RichText::new(format!("Added by {}", by.name))
-                .font(theme::regular(12.0))
-                .color(p.secondary),
-        );
-    }
     if page {
-        crate::ui::section(ui, &p, "Listening session");
+        crate::ui::section(ui, &p, "Session queue");
     } else {
-        section(app, ui, 8.0, "Listening session");
+        section(app, ui, 8.0, "Session queue");
     }
-    let names = room
-        .members
-        .iter()
-        .map(|m| {
-            let role = match (m.id == 0, m.id == room.you) {
-                (true, true) => " (you, host)",
-                (true, false) => " (host)",
-                (false, true) => " (you)",
-                _ => "",
-            };
-            format!("{}{role}", m.name)
-        })
-        .collect::<Vec<_>>()
-        .join("   ·   ");
-    ui.label(
-        egui::RichText::new(names)
-            .font(theme::medium(13.0))
-            .color(p.text),
-    );
-    section(app, ui, 8.0, "Session queue");
     if room.queue.is_empty() {
         ui.label(
             egui::RichText::new("Use a song’s menu to add it to the session queue.")
@@ -296,29 +391,35 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                 theme::ART_SIZE,
             );
             widgets::paint_art(ui, &p, rect, art, ArtShape::Square);
-            ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&entry.song.title)
-                            .font(theme::medium(theme::ROW_TITLE_PT))
-                            .color(p.text),
-                    )
-                    .truncate(),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                avatar(
+                    ui,
+                    &p,
+                    &mut app.images,
+                    &app.backend,
+                    &entry.by,
+                    &format!("Added by {}", entry.by.name),
                 );
-                let credit = if entry.song.artist.is_empty() {
-                    format!("Added by {}", entry.by.name)
-                } else {
-                    format!("{}  ·  Added by {}", entry.song.artist, entry.by.name)
-                };
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&credit)
-                            .font(theme::regular(12.0))
-                            .color(p.secondary),
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&entry.song.title)
+                                .font(theme::medium(theme::ROW_TITLE_PT))
+                                .color(p.text),
+                        )
+                        .truncate(),
                     )
-                    .truncate(),
-                )
-                .on_hover_text(credit);
+                    .on_hover_text(&entry.song.title);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&entry.song.artist)
+                                .font(theme::regular(12.0))
+                                .color(p.secondary),
+                        )
+                        .truncate(),
+                    );
+                });
             });
         });
     }

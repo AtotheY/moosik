@@ -5,6 +5,7 @@
 //! currently is, what has been fetched for it, and how playback advances.
 
 mod together;
+pub(crate) use together::Member as SessionMember;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

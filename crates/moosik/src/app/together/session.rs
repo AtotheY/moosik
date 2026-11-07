@@ -1,4 +1,5 @@
 use super::*;
+use crate::discord::SessionProfile;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -6,6 +7,13 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Member {
     pub id: u64,
     pub name: String,
+    #[serde(default, rename = "avatar", deserialize_with = "read_avatar")]
+    pub photo: Option<Arc<str>>,
+}
+
+fn read_avatar<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Option<Arc<str>>, D::Error> {
+    let key = Option::<String>::deserialize(reader)?;
+    Ok(key.as_deref().and_then(crate::discord::avatar_url))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -27,6 +35,20 @@ pub(crate) struct Snapshot {
     pub(super) added: bool,
 }
 
+impl Snapshot {
+    pub(crate) fn playing_credit(&self, id: &str) -> Option<(&Member, String)> {
+        if self.state.as_ref()?.id != id {
+            return None;
+        }
+        if let Some(member) = &self.current_by {
+            Some((member, format!("Added by {}", member.name)))
+        } else {
+            let host = self.members.iter().find(|m| m.id == 0)?;
+            Some((host, format!("From {}’s queue", host.name)))
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct Addition {
     seq: u64,
@@ -36,12 +58,12 @@ struct Addition {
 #[derive(Default)]
 struct Commands {
     room: String,
-    name: String,
+    profile: SessionProfile,
     sequence: u64,
     pending: VecDeque<Addition>,
     played: u64,
     sent_played: u64,
-    sent_name: String,
+    sent_profile: SessionProfile,
 }
 
 /// UI writes into a room-scoped outbox. Each heartbeat retries its oldest unacknowledged
@@ -60,8 +82,8 @@ impl Outbox {
         }
     }
 
-    pub(super) fn set_name(&self, name: String) {
-        self.0.lock().unwrap().name = name;
+    pub(super) fn set_profile(&self, profile: SessionProfile) {
+        self.0.lock().unwrap().profile = profile;
     }
 
     pub(super) fn add(&self, id: &str, song: Song) -> bool {
@@ -84,7 +106,7 @@ impl Outbox {
 
     pub(super) fn has_changes(&self) -> bool {
         let cmd = self.0.lock().unwrap();
-        !cmd.pending.is_empty() || cmd.played != cmd.sent_played || cmd.name != cmd.sent_name
+        !cmd.pending.is_empty() || cmd.played != cmd.sent_played || cmd.profile != cmd.sent_profile
     }
 
     pub(super) fn last_played(&self) -> u64 {
@@ -96,9 +118,9 @@ impl Outbox {
         request: reqwest::RequestBuilder,
         host_state: Option<&Option<Song>>,
     ) -> anyhow::Result<Snapshot> {
-        let (body, seq) = {
+        let (body, seq, profile) = {
             let cmd = self.0.lock().unwrap();
-            let mut body = serde_json::json!({ "name": cmd.name });
+            let mut body = serde_json::to_value(&cmd.profile)?;
             if let Some(state) = host_state {
                 body["state"] = serde_json::to_value(state)?;
                 body["played"] = cmd.played.into();
@@ -107,7 +129,7 @@ impl Outbox {
             if let Some(add) = add {
                 body["add"] = serde_json::to_value(add)?;
             }
-            (body, add.map(|a| a.seq))
+            (body, add.map(|a| a.seq), cmd.profile.clone())
         };
         let res = request
             .header("X-Moosik-Session", "1")
@@ -125,7 +147,7 @@ impl Outbox {
         );
         let mut cmd = self.0.lock().unwrap();
         cmd.sent_played = body["played"].as_u64().unwrap_or(0);
-        cmd.sent_name = body["name"].as_str().unwrap_or_default().to_owned();
+        cmd.sent_profile = profile;
         if let Some(seq) = seq {
             snapshot.added = snapshot.error.is_none();
             if cmd.pending.front().is_some_and(|a| a.seq == seq) {

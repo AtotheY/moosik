@@ -11,6 +11,11 @@ export function playback(room, now) {
   return s && { ...s, position: s.position + (s.playing ? Math.max(0, now - room.seen) / 1000 : 0) };
 }
 
+// Store compact CDN keys only. Older clients omit this field.
+function publicMember({ id, name, avatar }) {
+  return avatar ? { id, name, avatar } : { id, name };
+}
+
 export function syncRoom(room, token, host, body, now) {
   if (!body || typeof body !== 'object' || typeof body.name !== 'string' || body.name.length > 128
     || (host ? !validState(body.state) : ('state' in body || 'played' in body))
@@ -32,6 +37,8 @@ export function syncRoom(room, token, host, body, now) {
   member.seen = now;
   const name = Array.from(body.name.replace(/[\p{Cc}\p{Cf}]/gu, '').trim()).slice(0, 32).join('');
   member.name = name || (host ? 'Host' : 'Listener ' + member.id);
+  member.avatar = typeof body.avatar === 'string' && body.avatar.length <= 55
+    && /^(?:default\/[0-5]|[0-9]{1,20}\/(?:a_)?[0-9a-f]{32})$/.test(body.avatar) ? body.avatar : null;
   if (host) {
     room.state = publicState(body.state);
     room.seen = now;
@@ -51,12 +58,12 @@ export function syncRoom(room, token, host, body, now) {
       const song = publicState(body.add.song);
       song.title = Array.from(song.title).slice(0, 128).join('');
       song.artist = Array.from(song.artist).slice(0, 128).join('');
-      s.queue.push({ entry: s.nextEntry++, song, by: { id: member.id, name: member.name } });
+      s.queue.push({ entry: s.nextEntry++, song, by: publicMember(member) });
     }
   }
   const members = Object.values(s.members)
     .filter(m => m.id === 0 || now - m.seen < memberTTL)
-    .map(({ id, name }) => ({ id, name }))
+    .map(publicMember)
     .sort((a, b) => a.id - b.id);
   const currentBy = room.state && room.state.id === s.current?.id ? s.current.by : null;
   return { status: 200, value: {

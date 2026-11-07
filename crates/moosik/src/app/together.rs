@@ -2,6 +2,7 @@
 use super::*;
 mod session;
 use serde::{Deserialize, Serialize};
+pub(crate) use session::Member;
 use session::{Outbox, Snapshot};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::watch;
@@ -280,8 +281,8 @@ async fn follow(
     loop {
         let result: anyhow::Result<Option<Song>> = async {
             if session {
-                let mut snapshot = outbox.sync(guest(), None).await?;
-                let song = snapshot.state.take();
+                let snapshot = outbox.sync(guest(), None).await?;
+                let song = snapshot.state.clone();
                 notify(&tx, &ctx, Update::Snapshot(snapshot));
                 Ok(song)
             } else {
@@ -326,20 +327,21 @@ async fn follow(
 }
 
 impl App {
-    fn room_name(&self) -> String {
-        if self.settings.session_name.trim().is_empty() {
-            self.discord
-                .as_ref()
-                .map(|d| d.display_name())
-                .unwrap_or_default()
-        } else {
-            self.settings.session_name.chars().take(32).collect()
+    fn room_profile(&self) -> crate::discord::SessionProfile {
+        let mut profile = self
+            .discord
+            .as_ref()
+            .map(|d| d.session_profile())
+            .unwrap_or_default();
+        if !self.settings.session_name.trim().is_empty() {
+            profile.name = self.settings.session_name.chars().take(32).collect();
         }
+        profile
     }
 
     fn room_outbox(&self) -> Outbox {
         let outbox = Outbox::default();
-        outbox.set_name(self.room_name());
+        outbox.set_profile(self.room_profile());
         outbox
     }
 
@@ -547,18 +549,18 @@ impl App {
             self.start_hosting();
         }
         let position = self.saved_position();
-        let name = self
+        let profile = self
             .together
             .session
             .as_ref()
             .filter(|s| Instant::now() >= s.next_sample)
-            .map(|_| self.room_name());
+            .map(|_| self.room_profile());
         let Some(session) = self.together.session.as_mut() else {
             return;
         };
-        if let Some(name) = name {
+        if let Some(profile) = profile {
             session.next_sample = Instant::now() + Duration::from_secs(1);
-            session.outbox.set_name(name);
+            session.outbox.set_profile(profile);
             if let Some(publish) = &session.publish {
                 let sample = self
                     .now
@@ -793,7 +795,10 @@ mod tests {
         };
         let (tx, rx) = channel();
         let guest_commands = Outbox::default();
-        guest_commands.set_name("Guest".into());
+        guest_commands.set_profile(crate::discord::SessionProfile {
+            name: "Guest".into(),
+            ..Default::default()
+        });
         let guest = tokio::spawn(follow(room.clone(), guest_commands.clone(), tx, ctx));
         let Update::Follow(first, _) = rx.recv_timeout(Duration::from_secs(8)).unwrap() else {
             panic!("missing snapshot")

@@ -747,7 +747,7 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
         g.row(
             ui,
             "Session name",
-            "Shown to everyone in the listening session.",
+            "Shown with your Discord picture in the listening session.",
             |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut name)

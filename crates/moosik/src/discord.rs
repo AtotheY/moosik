@@ -175,12 +175,81 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
     Some(format!("https://i.ytimg.com/vi/{id}/{still}.jpg"))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SessionProfile {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+fn valid_avatar_hash(hash: &str) -> bool {
+    let hash = hash.strip_prefix("a_").unwrap_or(hash);
+    hash.len() == 32
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A participant may only select a Discord CDN avatar, never an arbitrary image URL.
+pub(crate) fn avatar_url(key: &str) -> Option<Arc<str>> {
+    let path = if let Some(index) = key.strip_prefix("default/") {
+        if !matches!(index, "0" | "1" | "2" | "3" | "4" | "5") {
+            return None;
+        }
+        format!("embed/avatars/{index}")
+    } else {
+        let (id, hash) = key.split_once('/')?;
+        if id.is_empty()
+            || id.len() > 20
+            || !id.bytes().all(|b| b.is_ascii_digit())
+            || !valid_avatar_hash(hash)
+        {
+            return None;
+        }
+        format!("avatars/{id}/{hash}")
+    };
+    Some(format!("https://cdn.discordapp.com/{path}.png?size=64").into())
+}
+
+impl SessionProfile {
+    fn from_ready(user: &serde_json::Value) -> Self {
+        let name = user["global_name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| user["username"].as_str())
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect();
+        let avatar = user["id"]
+            .as_str()
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(|id| {
+                if let Some(hash) = user["avatar"].as_str().filter(|s| valid_avatar_hash(s)) {
+                    format!("{id}/{hash}")
+                } else {
+                    let discriminator = user["discriminator"]
+                        .as_str()
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .unwrap_or(0);
+                    let index = if discriminator == 0 {
+                        (id >> 22) % 6
+                    } else {
+                        u64::from(discriminator % 5)
+                    };
+                    format!("default/{index}")
+                }
+            });
+        Self { name, avatar }
+    }
+}
+
 /// A live integration: the channel to its worker thread. Dropping this stops the worker (and
 /// clears the presence), so the handle is held for as long as the setting is on.
 pub struct Discord {
     connected: Arc<AtomicBool>,
     tx: Sender<Cmd>,
-    display_name: Arc<Mutex<String>>,
+    profile: Arc<Mutex<SessionProfile>>,
 }
 
 impl Discord {
@@ -189,21 +258,21 @@ impl Discord {
     pub fn spawn(ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
         let connected = Arc::new(AtomicBool::new(false));
-        let display_name = Arc::new(Mutex::new(String::new()));
-        let worker_name = display_name.clone();
+        let profile = Arc::new(Mutex::new(SessionProfile::default()));
+        let worker_profile = profile.clone();
         let worker_connected = Arc::clone(&connected);
         let _ = std::thread::Builder::new()
             .name("discord-rpc".into())
-            .spawn(move || run(rx, worker_connected, worker_name, ctx));
+            .spawn(move || run(rx, worker_connected, worker_profile, ctx));
         Self {
             tx,
             connected,
-            display_name,
+            profile,
         }
     }
 
-    pub fn display_name(&self) -> String {
-        self.display_name.lock().unwrap().clone()
+    pub(crate) fn session_profile(&self) -> SessionProfile {
+        self.profile.lock().unwrap().clone()
     }
 
     pub fn connected(&self) -> bool {
@@ -241,7 +310,7 @@ enum Cmd {
 fn run(
     rx: mpsc::Receiver<Cmd>,
     connected: Arc<AtomicBool>,
-    name: Arc<Mutex<String>>,
+    profile: Arc<Mutex<SessionProfile>>,
     ctx: egui::Context,
 ) {
     let mut client: Option<DiscordIpcClient> = None;
@@ -293,7 +362,7 @@ fn run(
 
         // Connect (or reconnect) whenever there is something to show and it is time to try.
         if wanted.is_some() && client.is_none() && Instant::now() >= next_try {
-            client = connect(&name);
+            client = connect(&profile);
             next_try = Instant::now() + RETRY_EVERY;
             if client.is_some() {
                 // Whatever happened while we were away has to be re-said.
@@ -320,7 +389,7 @@ fn run(
                     if connected.swap(false, Ordering::Relaxed) {
                         ctx.request_repaint();
                     }
-                    name.lock().unwrap().clear();
+                    *profile.lock().unwrap() = SessionProfile::default();
                     client = None;
                     next_try = Instant::now() + RETRY_EVERY;
                 }
@@ -333,7 +402,7 @@ fn run(
 
 /// One connection attempt. A failure is expected whenever Discord is not running, so it is logged
 /// at debug and retried rather than surfaced.
-fn connect(name: &Mutex<String>) -> Option<DiscordIpcClient> {
+fn connect(profile: &Mutex<SessionProfile>) -> Option<DiscordIpcClient> {
     let mut client = DiscordIpcClient::new(APPLICATION_ID);
     // The crate's default handshake discards READY, which carries the local display name.
     let ready = client
@@ -349,15 +418,7 @@ fn connect(name: &Mutex<String>) -> Option<DiscordIpcClient> {
         .and_then(|_| client.recv());
     match ready {
         Ok((1, event)) if event["evt"] == "READY" => {
-            let user = &event["data"]["user"];
-            *name.lock().unwrap() = user["global_name"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .or_else(|| user["username"].as_str())
-                .unwrap_or_default()
-                .chars()
-                .take(32)
-                .collect();
+            *profile.lock().unwrap() = SessionProfile::from_ready(&event["data"]["user"]);
             tracing::debug!("connected to Discord");
             Some(client)
         }
@@ -372,6 +433,36 @@ fn connect(name: &Mutex<String>) -> Option<DiscordIpcClient> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_pictures_use_discord_avatar_keys_only() {
+        let hash = "a_0123456789abcdef0123456789abcdef";
+        let user = serde_json::json!({ "id": "4194304", "global_name": "Sky", "avatar": hash });
+        let profile = SessionProfile::from_ready(&user);
+        assert_eq!(profile.name, "Sky");
+        assert_eq!(
+            avatar_url(profile.avatar.as_deref().unwrap()).as_deref(),
+            Some(
+                "https://cdn.discordapp.com/avatars/4194304/a_0123456789abcdef0123456789abcdef.png?size=64"
+            )
+        );
+        for (discriminator, expected) in [("0", "default/1"), ("0009", "default/4")] {
+            let user = serde_json::json!({ "id": "4194304", "discriminator": discriminator, "avatar": null });
+            assert_eq!(
+                SessionProfile::from_ready(&user).avatar.as_deref(),
+                Some(expected)
+            );
+        }
+        for invalid in [
+            "https://example.com/image",
+            "default/6",
+            "default/1?redirect=x",
+            "../0",
+            "12/abcd",
+        ] {
+            assert!(avatar_url(invalid).is_none());
+        }
+    }
 
     fn presence() -> Presence {
         Presence {
