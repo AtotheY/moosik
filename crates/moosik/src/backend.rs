@@ -2612,6 +2612,43 @@ impl Backend {
         generation
     }
 
+    fn play_spotify(
+        &self,
+        track: Track,
+        handle: crate::spotify_drm::Handle,
+        volume: f64,
+        start_at: Option<f64>,
+    ) -> u64 {
+        let generation = self.cancel_play();
+        let (tx, ctx, current) = (
+            self.tx.clone(),
+            self.ctx.clone(),
+            Arc::clone(&self.scrobble_generation),
+        );
+        Self::emit(&tx, &ctx, Event::Resolving(track.clone(), generation));
+        self.rt.spawn(async move {
+            let superseded = async {
+                while current.load(Ordering::SeqCst) == generation {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            let result = tokio::select! {
+                result = crate::spotify::play(&track.video_id, handle.clone(), volume, start_at) => result,
+                _ = superseded => { handle.stop(); return; }
+            };
+            if current.load(Ordering::SeqCst) != generation {
+                handle.stop();
+                return;
+            }
+            let event = match result {
+                Ok(()) => Event::Playing(track, generation),
+                Err(error) => Event::PlaybackFailed { track, error: error.to_string(), generation },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
+        generation
+    }
+
     /// Play a music video. Unlike `play`, mpv fetches the video itself through its yt-dlp hook —
     /// the resolver only returns audio-only streams. `track` is `wide`, so its id is the video's.
     ///
@@ -2625,7 +2662,19 @@ impl Backend {
         volume: f64,
         start_at: Option<f64>,
     ) -> u64 {
-        let generation = self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.cancel_play();
+        if track.is_spotify() {
+            Self::emit(
+                &self.tx,
+                &self.ctx,
+                Event::PlaybackFailed {
+                    track,
+                    error: "Spotify video playback is unavailable".to_owned(),
+                    generation,
+                },
+            );
+            return generation;
+        }
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let resolver = Arc::clone(&self.video_resolver);
         let scrobble = Scrobble {
@@ -2692,6 +2741,9 @@ impl Backend {
     /// Warm the video resolver's cache for a track the queue is about to reach, so Next in the
     /// video view starts on the cached URLs instead of paying yt-dlp at that moment.
     pub fn prefetch_video(&self, track: Track) {
+        if track.is_spotify() {
+            return;
+        }
         let resolver = Arc::clone(&self.video_resolver);
         self.rt.spawn(async move {
             if let Ok(id) = VideoId::new(track.video_id) {
@@ -2705,6 +2757,9 @@ impl Backend {
     /// With yt-dlp at ~2-3s per resolve this is what makes the *next* track start instantly, and
     /// it is a prerequisite for gapless: mpv needs the next URL before the current track ends.
     pub fn prefetch(&self, track: Track) {
+        if track.is_spotify() {
+            return;
+        }
         // On disk already: there is nothing to resolve, and with no yt-dlp that futile call is
         // the only thing it would log.
         if self

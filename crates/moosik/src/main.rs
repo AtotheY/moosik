@@ -8,6 +8,27 @@ use eframe::egui;
 use moosik::{app, mark_start, window_icon};
 
 fn main() -> eframe::Result {
+    let early_args: Vec<String> = std::env::args().collect();
+    if let Some(at) = early_args
+        .iter()
+        .position(|arg| arg == moosik::spotify_drm_child::ARG)
+    {
+        let result = early_args
+            .get(at + 1)
+            .ok_or_else(|| anyhow::anyhow!("Missing protected player URL"))
+            .and_then(|url| moosik::spotify_drm_child::run(url));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+    if let Some(at) = early_args
+        .iter()
+        .position(|arg| arg == moosik::spotify_web_login::ARG)
+    {
+        let result = early_args
+            .get(at + 1)
+            .ok_or_else(|| anyhow::anyhow!("Missing sign-in transfer path"))
+            .and_then(|path| moosik::spotify_web_login::capture_here(std::path::Path::new(path)));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     mark_start();
     // Before any other thread exists: how glibc treats freed memory (see `memory.rs`).
     moosik::memory::tune();

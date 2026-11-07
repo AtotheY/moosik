@@ -3533,7 +3533,7 @@ impl App {
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        let Some(handle) = player.handle() else {
+        let Some(handle) = player.playback_handle(track.is_spotify(), self.ctx.clone()) else {
             return;
         };
         // The old file is still loaded for an instant; without clearing this, `poll_playback`
