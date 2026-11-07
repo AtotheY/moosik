@@ -95,9 +95,16 @@ impl Presence {
         let youtube_id = (self.provider == Provider::YouTubeMusic)
             .then_some(self.youtube_id.as_deref())
             .flatten();
+        let badge = if self.playing {
+            "https://moosik.dev/assets/discord/playing.gif"
+        } else {
+            "https://moosik.dev/assets/discord/paused.png"
+        };
+        let mut assets = Assets::new().small_image(badge).small_text("Moosik.dev");
         if let Some(image) = cover_url(youtube_id, self.thumbnail.as_deref(), self.wide) {
-            activity = activity.assets(Assets::new().large_image(image));
+            assets = assets.large_image(image);
         }
+        activity = activity.assets(assets);
         let mut buttons = Vec::new();
         if let Some(id) = youtube_id
             && moosik_resolve::VideoId::new(id).is_ok()
@@ -345,6 +352,10 @@ mod tests {
             json["assets"]["large_image"],
             "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj"
         );
+        assert_eq!(
+            json["assets"]["small_image"],
+            "https://moosik.dev/assets/discord/playing.gif"
+        );
         assert!(json["assets"].get("large_text").is_none());
         assert_eq!(
             json["buttons"],
@@ -427,7 +438,6 @@ mod tests {
                 "label": "Listen along", "url": format!("https://moosik.dev/#join/{room}")
             })
         );
-        assert!(json["assets"].get("small_image").is_none());
     }
 
     /// Paused means no timestamps at all — the bar must not keep counting while the track is
@@ -440,7 +450,10 @@ mod tests {
         };
         let json = serde_json::to_value(paused.activity()).unwrap();
         assert!(json.get("timestamps").is_none());
-        assert!(json["assets"].get("small_image").is_none());
+        assert_eq!(
+            json["assets"]["small_image"],
+            "https://moosik.dev/assets/discord/paused.png"
+        );
         assert_eq!(json["details"], "Never Gonna Give You Up");
     }
 

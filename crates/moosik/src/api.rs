@@ -217,7 +217,7 @@ impl Api {
                     return Ok(None);
                 };
                 let http = self.http().await;
-                let token = match BrowserToken::from_str(&cookie, &http).await {
+                let token = match BrowserToken::from_str(&auth::for_token(&cookie), &http).await {
                     Ok(token) => token,
                     // Building the token is a request of its own, so with no connection it fails too —
                     // and that is no reason to tell someone offline that their sign-in is gone.
@@ -319,10 +319,12 @@ impl Api {
         })?;
 
         let http = self.http().await;
-        let token = BrowserToken::from_str(&cookie, &http).await.context(
-            "YouTube rejected the cookie; paste only the cookie value, on a single \
+        let token = BrowserToken::from_str(&auth::for_token(&cookie), &http)
+            .await
+            .context(
+                "YouTube rejected the cookie; paste only the cookie value, on a single \
                  line. It may also have expired since you copied it.",
-        )?;
+            )?;
         let yt = ytmapi_rs::builder::YtMusicBuilder::new_with_client(http)
             .with_auth_token(token)
             .build()

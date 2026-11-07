@@ -159,8 +159,12 @@ fn main() -> eframe::Result {
         .iter()
         .position(|a| a == "--tray-test")
         .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(std::time::Duration::from_secs_f64);
+        .and_then(|s| match s.as_str() {
+            "stdin" => Some(app::TrayTest::Stdin),
+            seconds => std::time::Duration::try_from_secs_f64(seconds.parse().ok()?)
+                .ok()
+                .map(app::TrayTest::Timed),
+        });
     // Passed by the autostart entry (`autostart::ARG`): login launched this, so once the window
     // is up it should ask the compositor to bring it forward — Wayland starts it behind whatever
     // window already has focus, and nothing can raise a window that has not asked.

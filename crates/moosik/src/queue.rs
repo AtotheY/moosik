@@ -532,20 +532,30 @@ impl PlayQueue {
         self.tracks = tracks;
         self.current = current.filter(|&i| i < self.tracks.len());
         self.resume = self.current.zip(resume);
-        self.shuffle = None;
-        self.set_shuffle(shuffle, chosen);
+        // Not `set_shuffle`: a shuffled session's list order says nothing of what played, so
+        // the whole queue is drawn again, as it was.
+        self.shuffle = shuffle.then(|| {
+            let mut order = self.draw(self.current, chosen);
+            order.pos = self.current.map(|_| 0);
+            order
+        });
     }
 
-    /// Turn shuffle on or off. On, the playing track stays and the rest are drawn into an order,
-    /// the listener's own songs before the radio's; off, the list order goes on from the track
-    /// playing.
+    /// Turn shuffle on or off. On, the songs before the playing one have played and stay behind
+    /// it, where Previous finds them in list order; the playing track stays and the rest are
+    /// drawn into an order, the listener's own songs before the radio's. Off, the list order goes
+    /// on from the track playing.
     pub(crate) fn set_shuffle(&mut self, on: bool, chosen: Chosen) {
         if on == self.shuffle.is_some() {
             return;
         }
         self.shuffle = on.then(|| {
             let mut order = self.draw(self.current, chosen);
-            order.pos = self.current.map(|_| 0);
+            if let Some(current) = self.current {
+                order.order.retain(|&i| i >= current);
+                order.order.splice(0..0, 0..current);
+                order.pos = Some(current);
+            }
             order
         });
     }
@@ -1412,6 +1422,24 @@ mod tests {
         all.push("a".into());
         all.sort();
         assert_eq!(all, ["a", "b", "c", "d", "e", "f"]);
+    }
+
+    #[test]
+    fn enabling_shuffle_mid_queue_keeps_history_through_restart() {
+        let mut q = queue(&["a", "b", "c", "d", "e", "r"], 2);
+        let chosen = set(&["a", "b", "c", "d", "e"]);
+        q.set_shuffle(true, Some(&chosen));
+        let upcoming = q.upcoming(RepeatMode::Off, Some(&chosen));
+        assert_eq!(upcoming.len(), 3);
+        assert!(upcoming.contains(&3) && upcoming.contains(&4));
+        assert_eq!(upcoming.last(), Some(&5));
+        let mut restored = PlayQueue::new(7);
+        restored.restore_session(q.tracks.clone(), q.current, None, true, Some(&chosen));
+        restored.restore_shuffle_order(q.saved_shuffle_order());
+        assert_eq!(restored.upcoming(RepeatMode::Off, Some(&chosen)), upcoming);
+        assert_eq!(restored.previous_in_order(), Some(1));
+        restored.set_current(1);
+        assert_eq!(restored.previous_in_order(), Some(0));
     }
 
     /// What Up next shows under shuffle is what Next then plays, in order.

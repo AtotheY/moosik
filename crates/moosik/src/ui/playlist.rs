@@ -49,7 +49,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         crate::ui::info_popup(app, ui);
         // Breathing room between the header and the first row.
         ui.add_space(10.0);
-        track_list(app, ui, grouped_tracks.is_some());
+        // Both lists number their row controls from zero. Keep the playlist's
+        // hover, click and drag targets separate from the suggestions below.
+        ui.push_id("playlist-tracks", |ui| {
+            track_list(app, ui, grouped_tracks.is_some());
+        });
         suggestions(app, ui);
         if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
             let id = pl.id.clone();

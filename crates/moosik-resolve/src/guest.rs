@@ -2,7 +2,7 @@
 //!
 //! Borrowed from Sonora's `ytmusic-rs` (2026-09): as the VISIONOS client, `player` answers with
 //! direct stream URLs — no signature cipher, no `n` challenge, no PO token — so there is no
-//! JavaScript to run and nothing to spawn. One HTTPS round trip, ~0.4 s warm, against yt-dlp's
+//! JavaScript to run and nothing to spawn. The player request measured ~0.4 s warm, against yt-dlp's
 //! ~8 s and ~380 MB (Python plus the Deno it starts for the player challenges).
 //!
 //! YouTube's "Sign in to confirm you're not a bot" is tied to the *visitor* as much as to the
@@ -122,6 +122,40 @@ impl GuestResolver {
         }
     }
 
+    /// Ask the stream for its first byte, as the proxy will ask for its ranges. The media server
+    /// now and then refuses a URL `player` has just handed out; found here, the chain still
+    /// falls through to yt-dlp, where found in mpv the song would simply fail. The connection it
+    /// opens is the one the proxy's first range then reuses, as for the `player` request.
+    async fn probe(&self, url: &Url) -> Result<()> {
+        let started = std::time::Instant::now();
+        let mut response = self
+            .http
+            .get(url.as_str())
+            .header("Range", "bytes=0-0")
+            .header("User-Agent", GUEST_USER_AGENT)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("the stream did not answer")?;
+        let status = response.status().as_u16();
+        if !matches!(status, 200 | 206) {
+            bail!("the stream answered {status}");
+        }
+        // Some hosts ignore Range. Read just the first chunk on those responses.
+        response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .filter(|chunk| !chunk.is_empty())
+            .context("the stream returned no audio bytes")?;
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "guest stream probe succeeded"
+        );
+        Ok(())
+    }
+
     async fn player(&self, id: &VideoId, visitor: Option<&str>) -> Result<Value> {
         let mut request = self
             .http
@@ -187,7 +221,12 @@ impl StreamResolver for GuestResolver {
             );
         }
         let quality = self.quality.lock().map(|q| *q).unwrap_or_default();
-        pick(&response, quality).with_context(|| format!("no direct audio stream for {id}"))
+        let stream =
+            pick(&response, quality).with_context(|| format!("no direct audio stream for {id}"))?;
+        self.probe(&stream.url)
+            .await
+            .with_context(|| format!("guest stream for {id}"))?;
+        Ok(stream)
     }
 }
 
@@ -327,7 +366,7 @@ mod tests {
 
     /// The shape of a real VISIONOS answer (2026-09-23), trimmed: two Opus and one AAC stream
     /// with direct URLs, one ciphered stream, and a video stream.
-    fn response() -> Value {
+    fn response(base: &str) -> Value {
         let format = |itag: u64, mime: &str, bitrate: u64, url: bool| {
             let mut f = json!({
                 "itag": itag,
@@ -338,7 +377,7 @@ mod tests {
             });
             if url {
                 f["url"] = json!(format!(
-                    "https://rr1.googlevideo.com/videoplayback?itag={itag}&expire=4102444800"
+                    "{base}/videoplayback?itag={itag}&expire=4102444800"
                 ));
             } else {
                 f["signatureCipher"] = json!("s=abc&url=https%3A%2F%2Fx");
@@ -363,7 +402,7 @@ mod tests {
 
     #[test]
     fn picks_the_best_direct_opus_and_carries_what_the_player_needs() {
-        let s = pick(&response(), GuestQuality::Best).unwrap();
+        let s = pick(&response("https://rr1.googlevideo.com"), GuestQuality::Best).unwrap();
         assert_eq!(s.itag, 251, "the ciphered 400 kbps stream is not reachable");
         assert_eq!(s.codec, Codec::Opus);
         assert_eq!(s.content_length, Some(2_900_000));
@@ -387,11 +426,9 @@ mod tests {
 
     #[test]
     fn quality_follows_the_setting() {
-        assert_eq!(
-            pick(&response(), GuestQuality::AtMost(128)).unwrap().itag,
-            250
-        );
-        assert_eq!(pick(&response(), GuestQuality::Smallest).unwrap().itag, 250);
+        let formats = response("https://rr1.googlevideo.com");
+        assert_eq!(pick(&formats, GuestQuality::AtMost(128)).unwrap().itag, 250);
+        assert_eq!(pick(&formats, GuestQuality::Smallest).unwrap().itag, 250);
         assert_eq!(
             GuestQuality::from_ytdlp_format("bestaudio[acodec=opus]/bestaudio"),
             GuestQuality::Best
@@ -420,16 +457,18 @@ mod tests {
         );
     }
 
-    /// A minimal HTTP server answering each connection with the next canned body, recording
-    /// the requests it saw.
-    async fn fake_youtube(bodies: Vec<Value>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+    /// Serve canned player and stream replies, recording the requests to both.
+    async fn fake_server(
+        replies: impl FnOnce(&str) -> Vec<(u16, Value)>,
+    ) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
+        let replies = replies(&base);
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let log = std::sync::Arc::clone(&seen);
         tokio::spawn(async move {
-            for body in bodies {
+            for (code, body) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut buf = [0u8; 8192];
@@ -457,7 +496,7 @@ mod tests {
                     .push(String::from_utf8_lossy(&request).to_string());
                 let body = body.to_string();
                 let reply = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(reply.as_bytes()).await.unwrap();
@@ -474,7 +513,8 @@ mod tests {
             "playabilityStatus": { "status": "LOGIN_REQUIRED", "reason": "Sign in to confirm you’re not a bot" },
             "responseContext": { "visitorData": "ISSUED" },
         });
-        let (base, seen) = fake_youtube(vec![refused, response()]).await;
+        let (base, seen) =
+            fake_server(|base| vec![(200, refused), (200, response(base)), (206, json!(0))]).await;
         let file = std::env::temp_dir().join(format!("moosik-visitor-{}", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let guest = GuestResolver::new(reqwest::Client::new())
@@ -487,7 +527,7 @@ mod tests {
             .unwrap();
         assert_eq!(stream.itag, 251);
         let requests = seen.lock().unwrap().clone();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert!(
             !requests[0]
                 .to_ascii_lowercase()
@@ -502,13 +542,33 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
+    /// A stream the media server refuses is an error the chain falls through on; one that hands
+    /// out its first byte goes through, asked for as a range.
+    #[tokio::test]
+    async fn a_refused_stream_is_found_before_it_is_handed_on() {
+        for (code, plays) in [(403, false), (410, false), (200, true), (206, true)] {
+            let (base, seen) =
+                fake_server(|base| vec![(200, response(base)), (code, json!(0))]).await;
+            let guest = GuestResolver::new(reqwest::Client::new()).with_base(&base);
+            let stream = guest.resolve(&VideoId::new("dQw4w9WgXcQ").unwrap()).await;
+            assert_eq!(stream.is_ok(), plays, "{code}: {stream:?}");
+            let requests = seen.lock().unwrap().clone();
+            assert!(
+                requests[1]
+                    .to_ascii_lowercase()
+                    .contains("range: bytes=0-0"),
+                "{code}"
+            );
+        }
+    }
+
     /// Anything but OK is an error the chain can fall through on, worded so a gate stays the
     /// video's problem.
     #[tokio::test]
     async fn an_unplayable_answer_is_an_error() {
         let gone =
             json!({ "playabilityStatus": { "status": "ERROR", "reason": "Video unavailable" } });
-        let (base, _) = fake_youtube(vec![gone]).await;
+        let (base, _) = fake_server(|_| vec![(200, gone)]).await;
         let guest = GuestResolver::new(reqwest::Client::new()).with_base(&base);
         let err = guest
             .resolve(&VideoId::new("dQw4w9WgXcQ").unwrap())
