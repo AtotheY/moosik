@@ -1582,6 +1582,9 @@ pub struct App {
     pub(crate) library_loading: bool,
     pub(crate) library_error: Option<String>,
     pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
+    pub(crate) library_failed_provider: Option<(crate::model::Provider, String)>,
+    pub(crate) library_source_retry: Option<(crate::model::Provider, u64)>,
+    library_source_retry_id: u64,
     pub(crate) library_loaded: bool,
     pub(crate) library_sort: LibrarySort,
     /// Every song the account has liked, built by a background page-through of Liked Music and
@@ -2225,6 +2228,9 @@ impl App {
             library_loading: false,
             library_error: None,
             library_paging_errors: Vec::new(),
+            library_failed_provider: None,
+            library_source_retry: None,
+            library_source_retry_id: 0,
             library_loaded: false,
             library_sort: LibrarySort::Latest,
             liked: crate::liked::Index::default(),
@@ -4110,6 +4116,7 @@ impl App {
             return;
         }
         self.library_loading = true;
+        self.library_source_retry = None;
         self.backend.fetch_library(
             self.library_sort.param(),
             self.browsing_epoch,
@@ -4576,6 +4583,8 @@ impl App {
         self.library_sort = sort;
         self.library = crate::model::Library::default();
         self.library_paging_errors.clear();
+        self.library_failed_provider = None;
+        self.library_source_retry = None;
         self.library_loaded = false;
         self.library_error = None;
         self.resync_local_playlists();
@@ -4986,10 +4995,11 @@ impl App {
 
     /// Ask for the next page of one library section, if there is one and none is in flight.
     pub(crate) fn load_more_library(&mut self, section: crate::api::LibrarySection) {
-        if self
-            .library_paging_errors
-            .iter()
-            .any(|(failed, _)| *failed == section)
+        if self.library_source_retry.is_some()
+            || self
+                .library_paging_errors
+                .iter()
+                .any(|(failed, _)| *failed == section)
         {
             return;
         }
@@ -5028,6 +5038,35 @@ impl App {
         self.library_paging_errors
             .retain(|(failed, _)| *failed != section);
         self.load_more_library(section);
+    }
+
+    pub(crate) fn can_retry_library_provider(&self) -> bool {
+        self.library_loaded
+            && !self.library_loading
+            && self.library_source_retry.is_none()
+            && !self.library.songs.loading
+            && !self.library.artists.loading
+            && !self.library.albums.loading
+            && !self.library.playlists.loading
+    }
+
+    pub(crate) fn retry_library_provider(&mut self) {
+        if !self.can_retry_library_provider() {
+            return;
+        }
+        let Some((provider, _)) = self.library_failed_provider.as_ref() else {
+            return;
+        };
+        let provider = *provider;
+        self.library_source_retry_id = self.library_source_retry_id.wrapping_add(1);
+        let request = self.library_source_retry_id;
+        self.library_source_retry = Some((provider, request));
+        self.backend.retry_library_provider(
+            provider,
+            self.library_sort.param(),
+            self.browsing_epoch,
+            request,
+        );
     }
 
     /// A load the page on screen is waiting for — what its skeletons stand in for. Not the song
@@ -5993,11 +6032,16 @@ impl App {
 
                 // See `App::account_epoch`'s own doc comment: a reply for an account already
                 // switched away from is dropped rather than repopulating cleared state.
-                Event::LibraryLoaded { library, epoch } if epoch == self.browsing_epoch => {
+                Event::LibraryLoaded {
+                    library,
+                    failed_provider,
+                    epoch,
+                } if epoch == self.browsing_epoch => {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
                     self.library = library;
                     self.library_paging_errors.clear();
+                    self.library_failed_provider = failed_provider;
                     self.library_loaded = true;
                     self.resync_local_playlists();
                     self.apply_playlist_order();
@@ -6012,6 +6056,37 @@ impl App {
                     }
                 }
                 Event::LibraryLoaded { .. } => {}
+                Event::LibraryProviderRetried {
+                    epoch,
+                    request,
+                    provider,
+                    result,
+                } if epoch == self.browsing_epoch
+                    && self.library_source_retry == Some((provider, request)) =>
+                {
+                    self.library_source_retry = None;
+                    match result {
+                        Ok(loaded) => {
+                            crate::providers::merge_recovered_library(
+                                &mut self.library,
+                                loaded.value,
+                                provider,
+                            );
+                            self.library_failed_provider = None;
+                            self.organizer.page_failed = false;
+                            self.resync_local_playlists();
+                            for warning in loaded.warnings {
+                                self.toast_error(&warning);
+                            }
+                            if let Some(mut track) = self.now.track.take() {
+                                self.reconcile_state(&mut track);
+                                self.now.track = Some(track);
+                            }
+                        }
+                        Err(error) => self.library_failed_provider = Some((provider, error)),
+                    }
+                }
+                Event::LibraryProviderRetried { .. } => {}
                 // The liked scan: pages accumulate, then a completed full scan swaps in (so an
                 // unlike made elsewhere is dropped, not merged back) and the index is written
                 // out. A quick refresh merges as pages arrive. Epoch-guarded like the library's.
@@ -7650,6 +7725,8 @@ impl App {
         self.releases_loading = false;
         self.releases_error = None;
         self.releases_warnings.clear();
+        self.library_failed_provider = None;
+        self.library_source_retry = None;
         self.liked_music = ui::liked_music::State::default();
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();

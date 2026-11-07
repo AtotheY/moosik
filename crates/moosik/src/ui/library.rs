@@ -138,6 +138,28 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         skeletons(app, ui);
         return;
     }
+    if let Some((provider, error)) = &app.library_failed_provider {
+        let retrying = app.library_source_retry.is_some();
+        let retry = ui
+            .horizontal_wrapped(|ui| {
+                let label = if retrying {
+                    format!("Retrying {}…", provider.name())
+                } else {
+                    format!("{} library couldn’t load", provider.name())
+                };
+                ui.label(egui::RichText::new(label).color(app.palette.secondary))
+                    .on_hover_text(error);
+                ui.add_enabled_ui(app.can_retry_library_provider(), |ui| {
+                    widgets::outline_button(ui, &app.palette, "Retry").clicked()
+                })
+                .inner
+            })
+            .inner;
+        if retry {
+            app.retry_library_provider();
+        }
+        ui.add_space(8.0);
+    }
 
     let empty = app.library.songs.is_empty()
         && app.library.artists.is_empty()

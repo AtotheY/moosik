@@ -267,7 +267,14 @@ pub enum Event {
     /// doc comment for why a reply whose epoch has since moved on must be dropped.
     LibraryLoaded {
         library: Library,
+        failed_provider: Option<(Provider, String)>,
         epoch: u64,
+    },
+    LibraryProviderRetried {
+        epoch: u64,
+        request: u64,
+        provider: Provider,
+        result: Result<crate::providers::Loaded<Library>, String>,
     },
     LibraryMore {
         epoch: u64,
@@ -585,6 +592,7 @@ impl Event {
                 | Event::HomeShelfLoaded { .. }
                 | Event::SidebarPlaylists { .. }
                 | Event::LibraryLoaded { .. }
+                | Event::LibraryProviderRetried { result: Ok(_), .. }
                 | Event::LibraryMore { .. }
                 | Event::LikedPage { .. }
                 | Event::LikedMusicPage { result: Ok(_), .. }
@@ -665,6 +673,9 @@ impl Event {
             }
             | Event::SidebarPlaylistsFailed { error, .. }
             | Event::LibraryFailed { error, .. }
+            | Event::LibraryProviderRetried {
+                result: Err(error), ..
+            }
             | Event::SubscriptionFailed { error, .. }
             | Event::ExploreFailed { error, .. }
             | Event::ReleasesFailed { error, .. }
@@ -2008,6 +2019,7 @@ impl Backend {
                     }
                     Event::LibraryLoaded {
                         library: loaded.value,
+                        failed_provider: loaded.failed_provider,
                         epoch,
                     }
                 }
@@ -2017,6 +2029,31 @@ impl Backend {
                 },
             };
             Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    pub(crate) fn retry_library_provider(
+        &self,
+        provider: Provider,
+        sort: crate::api::LibrarySortParam,
+        epoch: u64,
+        request: u64,
+    ) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = crate::providers::retry_library_provider(&api, provider, sort)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::LibraryProviderRetried {
+                    epoch,
+                    request,
+                    provider,
+                    result,
+                },
+            );
         });
     }
 

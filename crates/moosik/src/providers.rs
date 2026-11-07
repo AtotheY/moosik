@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Api, LibrarySection, LibrarySortParam};
 use crate::innertube::Page;
-use crate::model::{Entry, HomeFeed, HomeFetch, Library, Paged, Shelf, Track};
+use crate::model::{Entry, HomeFeed, HomeFetch, Library, Paged, Provider, Shelf, Track};
 
 const CURSOR_PREFIX: &str = "providers:";
 
@@ -82,8 +82,15 @@ impl Cursor {
     }
 }
 
+#[derive(Debug)]
 pub struct Loaded<T> {
     pub value: T,
+    pub warnings: Vec<String>,
+}
+
+pub struct LibraryLoad {
+    pub value: Library,
+    pub failed_provider: Option<(Provider, String)>,
     pub warnings: Vec<String>,
 }
 
@@ -151,7 +158,7 @@ pub async fn library(
     sort: LibrarySortParam,
     youtube: bool,
     spotify: bool,
-) -> Result<Loaded<Library>> {
+) -> Result<LibraryLoad> {
     let sort_merged_songs = spotify && sort != LibrarySortParam::RecentlySaved;
     let (youtube, spotify) = tokio::join!(
         async {
@@ -174,21 +181,108 @@ pub async fn library(
         Some(Err(error)) => (Some(Err(error)), Vec::new()),
         None => (None, Vec::new()),
     };
-    let (youtube, spotify, mut warnings) = collect(youtube, spotify)?;
-    let mut value = merge_library(youtube, spotify);
+    let mut loaded = assemble_library(youtube, spotify, section_warnings)?;
     if sort_merged_songs {
-        ensure!(
-            warnings.is_empty(),
-            "Could not load the complete library for sorting:\n{}",
-            warnings.join("\n")
-        );
-        value.songs = sorted_songs(value.songs, sort, |token| async move {
+        if let Some((provider, error)) = &loaded.failed_provider {
+            bail!(
+                "Could not load the complete library for sorting:\n{}: {error}",
+                provider.name()
+            );
+        }
+        loaded.value.songs = sorted_songs(loaded.value.songs, sort, |token| async move {
             library_more(api, LibrarySection::Songs, &token).await
         })
         .await?;
     }
-    warnings.extend(section_warnings);
+    Ok(loaded)
+}
+
+fn assemble_library(
+    youtube: Option<Result<Library>>,
+    spotify: Option<Result<Library>>,
+    warnings: Vec<String>,
+) -> Result<LibraryLoad> {
+    let failed_provider = [
+        (Provider::YouTubeMusic, youtube.as_ref()),
+        (Provider::Spotify, spotify.as_ref()),
+    ]
+    .into_iter()
+    .find_map(|(provider, result)| {
+        result?
+            .as_ref()
+            .err()
+            .map(|error| (provider, format!("{error:#}")))
+    });
+    let (youtube, spotify, _) = collect(youtube, spotify)?;
+    Ok(LibraryLoad {
+        value: merge_library(youtube, spotify),
+        failed_provider,
+        warnings,
+    })
+}
+
+pub(crate) async fn retry_library_provider(
+    api: &Api,
+    provider: Provider,
+    sort: LibrarySortParam,
+) -> Result<Loaded<Library>> {
+    let (value, warnings) = match provider {
+        Provider::YouTubeMusic => (api.library(sort).await?, Vec::new()),
+        Provider::Spotify => crate::spotify::library_with_warnings().await?,
+        Provider::Local => bail!("Local music does not use the online library"),
+    };
     Ok(Loaded { value, warnings })
+}
+
+pub(crate) fn merge_recovered_library(
+    library: &mut Library,
+    recovered: Library,
+    provider: Provider,
+) {
+    let source = match provider {
+        Provider::YouTubeMusic => Source::YouTubeMusic,
+        Provider::Spotify => Source::Spotify,
+        Provider::Local => return,
+    };
+    fn append<T>(
+        page: &mut Paged<T>,
+        recovered: Paged<T>,
+        source: Source,
+        id: impl Fn(&T) -> &str,
+    ) {
+        let mut cursor = page
+            .next
+            .as_deref()
+            .and_then(|token| Cursor::decode(token).ok())
+            .unwrap_or_default();
+        match source {
+            Source::YouTubeMusic => cursor.youtube = recovered.next,
+            Source::Spotify => cursor.spotify = recovered.next,
+        }
+        cursor.spotify_next = source == Source::Spotify;
+        let ids: HashSet<_> = page.items.iter().map(&id).collect();
+        let items = recovered
+            .items
+            .into_iter()
+            .filter(|item| !ids.contains(id(item)))
+            .collect();
+        page.extend(items, cursor.encode());
+    }
+    append(&mut library.songs, recovered.songs, source, |track| {
+        &track.video_id
+    });
+    append(&mut library.artists, recovered.artists, source, |artist| {
+        &artist.id
+    });
+    append(&mut library.albums, recovered.albums, source, |album| {
+        &album.id
+    });
+    append(
+        &mut library.playlists,
+        recovered.playlists,
+        source,
+        |playlist| &playlist.id,
+    );
 }
 
 async fn sorted_songs<F, Fut>(
@@ -403,6 +497,58 @@ fn merge_release_shelves(shelves: impl IntoIterator<Item = Shelf>) -> Vec<Shelf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_initial_provider_can_recover_without_replacing_healthy_pages() {
+        let youtube = || Library {
+            songs: Paged::new(
+                vec![song("youtube", "YouTube song")],
+                Some("youtube-more".into()),
+            ),
+            ..Default::default()
+        };
+        let spotify = || Library {
+            songs: Paged::new(
+                vec![song("spotify:track:0000000000000000000001", "Spotify song")],
+                Some("spotify-more".into()),
+            ),
+            ..Default::default()
+        };
+        for failed in [Provider::YouTubeMusic, Provider::Spotify] {
+            let failure = || Err(anyhow::anyhow!("unavailable"));
+            let mut initial = assemble_library(
+                Some(if failed == Provider::YouTubeMusic {
+                    failure()
+                } else {
+                    Ok(youtube())
+                }),
+                Some(if failed == Provider::Spotify {
+                    failure()
+                } else {
+                    Ok(spotify())
+                }),
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                initial.failed_provider,
+                Some((failed, "unavailable".into()))
+            );
+            let healthy_track = initial.value.songs[0].clone();
+            let recovered = if failed == Provider::YouTubeMusic {
+                youtube()
+            } else {
+                spotify()
+            };
+            merge_recovered_library(&mut initial.value, recovered, failed);
+            assert_eq!(initial.value.songs.len(), 2);
+            assert_eq!(initial.value.songs[0], healthy_track);
+            let cursor = Cursor::decode(initial.value.songs.next.as_deref().unwrap()).unwrap();
+            assert_eq!(cursor.youtube.as_deref(), Some("youtube-more"));
+            assert_eq!(cursor.spotify.as_deref(), Some("spotify-more"));
+            assert_eq!(cursor.spotify_next, failed == Provider::Spotify);
+        }
+    }
 
     #[test]
     fn new_releases_keep_both_album_sources_and_a_separate_video_shelf() {
