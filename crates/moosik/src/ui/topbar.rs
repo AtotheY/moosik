@@ -11,6 +11,8 @@
 //! when the queue opens, and letting this bar run to the window's right edge is what keeps them
 //! there.
 
+use std::sync::Arc;
+
 use egui::{CornerRadius, Rect, Sense, Ui, vec2};
 
 use crate::app::{App, Route};
@@ -55,10 +57,8 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         }
         right.add_space(10.0);
     }
-    let signed_in = app.signed_in();
     let chip = account_chip(app, &mut right);
-    // Anchor to the button so keyboard activation has a position too.
-    account_menu(app, &mut right, &chip, signed_in);
+    account_menu(app, &mut right, &chip);
     right.add_space(2.0);
     // This group lays out right to left: put an available update directly beside the avatar.
     if app.update.notice
@@ -579,32 +579,77 @@ pub(crate) fn search_id() -> egui::Id {
     egui::Id::new("ytm-search-field")
 }
 
-/// The account chip: the signed-in account's avatar, opening the account menu. A generic glyph
-/// signed out.
 fn account_chip(app: &mut App, ui: &mut Ui) -> egui::Response {
-    let name = match &app.auth {
-        crate::auth::AuthState::SignedIn { account } => Some(account.clone()),
-        _ => None,
+    let connected = app.connected_providers();
+    let youtube = connected
+        .contains(&crate::model::Provider::YouTubeMusic)
+        .then(|| youtube_identity(app))
+        .flatten();
+    let spotify_connected = connected.contains(&crate::model::Provider::Spotify);
+    let spotify = app
+        .profile
+        .spotify
+        .as_ref()
+        .filter(|_| spotify_connected)
+        .map(|profile| (profile.name.clone(), profile.thumbnail.clone()));
+    let identity = if app.settings.preferred_provider == crate::model::Provider::Spotify {
+        spotify.as_ref().or(youtube.as_ref())
+    } else {
+        youtube.as_ref().or(spotify.as_ref())
     };
-    avatar_circle(app, ui, name.as_deref())
+    let mut accounts = Vec::new();
+    if let Some((name, _)) = &youtube {
+        accounts.push(format!("YouTube Music: {name}"));
+    }
+    if spotify_connected {
+        accounts.push(spotify.as_ref().map_or_else(
+            || "Spotify: Connected".to_owned(),
+            |(name, _)| format!("Spotify: {name}"),
+        ));
+    }
+    let tooltip = if accounts.is_empty() {
+        "Accounts".to_owned()
+    } else {
+        accounts.join("\n")
+    };
+    avatar_circle(
+        app,
+        ui,
+        identity.map(|(name, _)| name.as_str()),
+        identity.and_then(|(_, photo)| photo.as_ref()),
+        &tooltip,
+    )
 }
 
-/// The circular avatar on its own: the photo, the initial while it loads, a glyph signed out.
-fn avatar_circle(app: &mut App, ui: &mut Ui, name: Option<&str>) -> egui::Response {
+fn youtube_identity(app: &App) -> Option<(String, Option<Arc<str>>)> {
+    let crate::auth::AuthState::SignedIn { account } = &app.auth else {
+        return None;
+    };
+    let current = app
+        .accounts
+        .iter()
+        .find(|profile| profile.page_id == app.settings.account_page_id)
+        .or_else(|| app.accounts.iter().find(|profile| profile.selected))
+        .or(app.accounts.first());
+    Some((
+        current.map_or_else(|| account.clone(), |profile| profile.name.clone()),
+        current.and_then(|profile| profile.thumbnail.clone()),
+    ))
+}
+
+fn avatar_circle(
+    app: &mut App,
+    ui: &mut Ui,
+    name: Option<&str>,
+    thumbnail: Option<&Arc<str>>,
+    tooltip: &str,
+) -> egui::Response {
     let p = app.palette;
-    // The photo YouTube already sent with the channel list.
-    let photo = name.and_then(|_| {
-        let current = app
-            .accounts
-            .iter()
-            .find(|a| a.page_id == app.settings.account_page_id)
-            .or_else(|| app.accounts.iter().find(|a| a.selected))
-            .or(app.accounts.first());
-        let url = current?.thumbnail.clone()?;
+    let photo = thumbnail.and_then(|url| {
         let crate::app::App {
             images, backend, ..
         } = app;
-        crate::ui::art_texture(images, backend, ui.ctx(), Some(&url), 28.0)
+        crate::ui::art_texture(images, backend, ui.ctx(), Some(url), 28.0)
     });
     let d = 28.0;
     let (rect, response) = ui.allocate_exact_size(vec2(d, d), Sense::click());
@@ -648,7 +693,7 @@ fn avatar_circle(app: &mut App, ui: &mut Ui, name: Option<&str>) -> egui::Respon
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
-    response.on_hover_text(name.unwrap_or("Not signed in"))
+    response.on_hover_text(tooltip)
 }
 
 /// What the chip opens: signed in, the channels this Google account can browse as — each with

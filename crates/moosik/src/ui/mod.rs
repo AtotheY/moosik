@@ -22,6 +22,7 @@ pub(crate) mod organizer;
 pub mod paste_cookies;
 pub mod player_bar;
 pub mod playlist;
+pub mod profile;
 pub(crate) mod queue_edit;
 pub mod releases;
 pub mod search;

@@ -546,6 +546,7 @@ impl Route {
             "stats" => Some(Route::Listening),
             "queue" => Some(Route::Queue),
             "library" => Some(Route::Library),
+            "profile" => Some(Route::Profile),
             "settings" => Some(Route::Settings),
             other => match other.split_once(':') {
                 Some(("artist", id)) => Some(Route::Artist(id.to_owned())),
@@ -1783,6 +1784,7 @@ pub struct App {
     pub(crate) settings: crate::settings::Settings,
     /// The channels this account can browse as. Empty until Settings asks.
     pub(crate) accounts: Vec<crate::model::Account>,
+    pub(crate) profile: ui::profile::State,
     /// Channels opened from a link that names a person rather than an artist (a playlist's
     /// owner). The page cannot tell, before it loads, which kind of channel it is opening; this
     /// is how its skeleton takes the profile's shape instead of the artist's.
@@ -3815,6 +3817,7 @@ impl App {
         }
         self.load_spotify_profile();
         match self.current_route() {
+            Route::Profile => self.load_profile(),
             Route::Artist(id) => self.load_artist(id),
             Route::ArtistGroup { youtube, spotify } => self.load_artist_group(youtube, spotify),
             // The liked page draws the artist's own `from_library`, so it only needs that
@@ -4259,6 +4262,12 @@ impl App {
     /// lands at the failed attempt's offset.
     pub(crate) fn retry_route(&mut self) {
         match self.current_route() {
+            Route::Profile => self.retry_profile(),
+            Route::ArtistGroup { .. } => {
+                for id in self.artist_sources.retry() {
+                    self.backend.fetch_artist(id);
+                }
+            }
             Route::Artist(_) | Route::ArtistLiked(_) => {
                 self.artist_for = None;
                 self.artist_error = None;
@@ -4821,6 +4830,11 @@ impl App {
     fn loads(&self) -> impl Iterator<Item = Load> {
         [
             (self.searching, Load::Search),
+            (
+                matches!(self.current_route(), Route::Profile)
+                    && (self.profile.spotify_loading || self.profile.youtube_loading),
+                Load::Profile,
+            ),
             (self.artist_loading, Load::Artist),
             (self.album_loading, Load::Album),
             (self.playlist_loading, Load::Playlist),
