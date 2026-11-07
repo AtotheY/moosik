@@ -2753,6 +2753,10 @@ impl App {
     fn show_window(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         set_window_hidden(ctx, false);
+        // A visible taskbar-minimized window also needs an explicit restore.
+        if !is_wayland() && ctx.input(|i| i.viewport().minimized == Some(true)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        }
         request_foreground(ctx);
     }
 
@@ -2834,14 +2838,15 @@ impl App {
             let token = crate::tray::take_activation_token();
             match action {
                 crate::tray::TrayAction::ToggleVisible => {
-                    self.hidden = !self.hidden;
-                    set_window_hidden(ctx, self.hidden);
-                    if !self.hidden {
-                        request_foreground(ctx);
+                    if self.hidden || ctx.input(|i| i.viewport().minimized == Some(true)) {
+                        self.show_window(ctx);
                         #[cfg(target_os = "linux")]
                         if let Some(token) = &token {
                             self.activation.activate(token);
                         }
+                    } else {
+                        self.hidden = true;
+                        set_window_hidden(ctx, true);
                     }
                 }
                 crate::tray::TrayAction::Show => {

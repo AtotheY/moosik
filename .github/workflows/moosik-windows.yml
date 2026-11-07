@@ -132,6 +132,8 @@ jobs:
           python scripts/tests/windows-taskbar-image.py $icon "$env:RUNNER_TEMP/taskbar.png"
           if ($LASTEXITCODE -ne 0) { throw 'Taskbar artwork did not match the selected finish' }
           Stop-Process -Id $app.Id
+          $app.WaitForExit()
+          ./scripts/tests/windows-tray-restore.ps1 -Exe (Join-Path $dest 'moosik.exe')
           $uninstall = Start-Process "$dest/unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }
       - uses: actions/upload-artifact@v4
