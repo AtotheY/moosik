@@ -4982,23 +4982,77 @@ impl App {
         if query.is_empty() {
             return;
         }
+        self.update_search_providers();
         // Before the repeat check below: searching the same thing again still moves it up.
         self.search_history.record(&query);
         self.save_search_history();
-        if query == self.searched {
+        if let Some(uri) = crate::spotify::resource_uri(&query) {
+            if !crate::spotify::is_signed_in() {
+                self.settings_tab = ui::settings::SettingsTab::Providers;
+                self.settings_provider = crate::model::Provider::Spotify;
+                self.navigate(Route::Settings);
+                return;
+            }
+            let route = if uri.starts_with("spotify:album:") {
+                Some(Route::Album(uri))
+            } else if uri.starts_with("spotify:artist:") {
+                Some(Route::Artist(uri))
+            } else if uri.starts_with("spotify:playlist:") || uri == "spotify:collection:tracks" {
+                Some(Route::Playlist(uri))
+            } else {
+                None
+            };
+            if let Some(route) = route {
+                self.navigate(route);
+                return;
+            }
+            self.search_provider = Some(crate::model::Provider::Spotify);
+            self.search_scope = SearchScope::All;
+        }
+        if query == self.searched && self.search_provider == self.searched_provider {
             return;
         }
 
-        self.searched = query.clone();
-        self.searching = true;
-        self.status = None;
-        // Drop the previous query's rows so the page shows its skeleton instead of results that
-        // no longer answer what was asked.
+        self.start_search(query);
+    }
+
+    fn clear_search_results(&mut self) {
+        self.search_request = self.search_request.wrapping_add(1);
+        self.scoped_search_request = self.scoped_search_request.wrapping_add(1);
         self.results = SearchResults::default();
         self.results_generation += 1;
-        self.backend.search(query);
+        self.scoped_results_generation = self.scoped_results_generation.wrapping_add(1);
+        self.scoped_for = None;
+        self.scoped_results.clear();
+        self.scoped_error = None;
+        self.scoped_loading = false;
+        self.search_warnings.clear();
+        self.scoped_warnings.clear();
+        self.status = None;
+        self.search_failed = false;
+        self.searching = false;
+    }
+
+    fn start_search(&mut self, query: String) {
+        self.update_search_providers();
+        self.clear_search_results();
+        self.searched_provider = self.search_provider;
+        self.searched = query.clone();
+        self.searching = true;
+        self.backend
+            .search(self.search_request, self.search_provider, query);
         if self.search_scope != SearchScope::All {
             self.fetch_scoped_search(self.search_scope);
+        }
+    }
+
+    fn refresh_search_results(&mut self) {
+        let query = self.searched.clone();
+        self.clear_suggestions();
+        if query.is_empty() {
+            self.clear_search_results();
+        } else {
+            self.start_search(query);
         }
     }
 
@@ -5037,18 +5091,23 @@ impl App {
         if scope == SearchScope::All || self.searched.is_empty() {
             return;
         }
-        if self
-            .scoped_for
-            .as_ref()
-            .is_some_and(|(q, s)| q == &self.searched && *s == scope)
-        {
+        if self.scoped_for.as_ref().is_some_and(|(p, q, s)| {
+            *p == self.search_provider && q == &self.searched && *s == scope
+        }) {
             return;
         }
-        self.scoped_for = Some((self.searched.clone(), scope));
+        self.scoped_for = Some((self.search_provider, self.searched.clone(), scope));
+        self.scoped_search_request = self.scoped_search_request.wrapping_add(1);
         self.scoped_loading = true;
         self.scoped_error = None;
         self.scoped_results.clear();
-        self.backend.search_scoped(self.searched.clone(), scope);
+        self.scoped_warnings.clear();
+        self.backend.search_scoped(
+            self.scoped_search_request,
+            self.search_provider,
+            self.searched.clone(),
+            scope,
+        );
     }
 
     /// All sign-in entry points share the Account tab and its platform-aware choices.
@@ -5063,6 +5122,27 @@ impl App {
         self.sign_in_error = None;
         self.backend.sign_in_from_browser(browser.arg.clone());
         self.login_browser = Some(browser);
+    }
+
+    pub(crate) fn select_search_provider(&mut self, provider: Option<crate::model::Provider>) {
+        let available = self.available_providers();
+        let provider = if available.len() == 1 {
+            available.first().copied()
+        } else {
+            provider.filter(|provider| available.contains(provider))
+        };
+        if self.search_provider == provider {
+            return;
+        }
+        self.search_provider = provider;
+        self.search_scope = SearchScope::All;
+        self.clear_search_results();
+        self.clear_suggestions();
+        let query = self.query.clone();
+        self.searched.clear();
+        if !query.trim().is_empty() {
+            self.search_again(query);
+        }
     }
 
     /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
@@ -9965,6 +10045,8 @@ mod tests {
             id: "a".to_owned(),
             title: "A".to_owned(),
             artist: "A".to_owned(),
+            artists: Vec::new(),
+            explicit: None,
             year: None,
             kind: None,
             thumbnail: None,

@@ -25,6 +25,9 @@ use crate::model::{
     Shelf, Track,
 };
 use crate::player;
+use crate::search_cache::{
+    Key as SearchKey, SearchCache, Snapshot as SearchSnapshot, Value as SearchValue,
+};
 
 /// Commit each successful page to the queue before asking for the next one.
 async fn collect_folder_pages<T, FirstPage, NextPage>(
@@ -1000,7 +1003,330 @@ async fn cover_bytes(http: &reqwest::Client, track: &Track) -> Option<Vec<u8>> {
     Some(response.bytes().await.ok()?.to_vec())
 }
 
+struct SearchProviders {
+    allowed: Vec<Provider>,
+    revision: u64,
+}
+
+impl Default for SearchProviders {
+    fn default() -> Self {
+        Self {
+            allowed: vec![Provider::YouTubeMusic],
+            revision: 0,
+        }
+    }
+}
+
+impl SearchProviders {
+    fn replace(&mut self, allowed: Vec<Provider>) -> bool {
+        let allowed: Vec<_> = Provider::ALL
+            .into_iter()
+            .filter(|provider| allowed.contains(provider))
+            .collect();
+        if self.allowed == allowed {
+            return false;
+        }
+        self.allowed = allowed;
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+}
+
+struct SearchContext {
+    api: Arc<Api>,
+    cache: Arc<SearchCache>,
+    snapshot: SearchSnapshot,
+    local_tracks: Arc<Vec<Track>>,
+    allowed: Vec<Provider>,
+    source_revision: u64,
+    sources: Arc<std::sync::RwLock<SearchProviders>>,
+}
+
+impl SearchContext {
+    fn sources_current(&self) -> bool {
+        self.sources
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .revision
+            == self.source_revision
+    }
+
+    fn require_allowed(&self, provider: Provider) -> anyhow::Result<()> {
+        require_search_provider(&self.allowed, Some(provider))
+    }
+}
+
+fn require_search_provider(allowed: &[Provider], selected: Option<Provider>) -> anyhow::Result<()> {
+    if let Some(provider) = selected
+        && !allowed.contains(&provider)
+    {
+        anyhow::bail!("{} is not available for search", provider.name());
+    }
+    Ok(())
+}
+
+fn search_candidates(
+    allowed: &[Provider],
+    selected: Option<Provider>,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<Vec<Provider>> {
+    require_search_provider(allowed, selected)?;
+    Ok(Provider::ALL
+        .into_iter()
+        .filter(|provider| {
+            allowed.contains(provider)
+                && selected.is_none_or(|selected| selected == *provider)
+                && provider.search_scopes().contains(&scope)
+                && (selected.is_some() || *provider != Provider::Spotify || spotify_signed_in)
+        })
+        .collect())
+}
+
+async fn search_source(
+    context: &SearchContext,
+    provider: Provider,
+    query: &str,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<SearchResults> {
+    context.require_allowed(provider)?;
+    if provider == Provider::Spotify && !spotify_signed_in {
+        anyhow::bail!("Sign in to Spotify in Settings first");
+    }
+    let key = SearchKey::results(provider, query, scope, context.snapshot);
+    let value = context
+        .cache
+        .get_or_fetch(key, || async {
+            let results = match provider {
+                Provider::YouTubeMusic if scope == SearchScope::All => {
+                    context.api.search(query).await?
+                }
+                Provider::YouTubeMusic => {
+                    let items = context.api.search_scoped(query, scope).await?;
+                    SearchResults {
+                        no_results: items.is_empty(),
+                        items,
+                        ..Default::default()
+                    }
+                }
+                Provider::Spotify
+                    if matches!(scope, SearchScope::All | SearchScope::Songs)
+                        && crate::spotify::track_uri(query).is_some() =>
+                {
+                    let track = crate::spotify::metadata(query).await?;
+                    SearchResults {
+                        no_results: track.is_none(),
+                        items: track.into_iter().map(Entry::Song).collect(),
+                        ..Default::default()
+                    }
+                }
+                Provider::Spotify if scope == SearchScope::All => {
+                    crate::spotify::search(query).await?
+                }
+                Provider::Spotify => {
+                    let items = crate::spotify::search_scope(query, scope).await?;
+                    SearchResults {
+                        no_results: items.is_empty(),
+                        items,
+                        ..Default::default()
+                    }
+                }
+                Provider::Local => {
+                    let tracks = Arc::clone(&context.local_tracks);
+                    let query = query.to_owned();
+                    tokio::task::spawn_blocking(move || crate::local::search(&tracks, &query))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("Local search failed: {error}"))?
+                }
+            };
+            Ok(SearchValue::Results(results))
+        })
+        .await?;
+    match value.as_ref() {
+        SearchValue::Results(results) => Ok(results.clone()),
+        SearchValue::Suggestions(_) => anyhow::bail!("Search cache returned an invalid result"),
+    }
+}
+
+async fn search_sources(
+    context: &SearchContext,
+    selected: Option<Provider>,
+    query: &str,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<(SearchResults, Vec<String>)> {
+    let candidates = search_candidates(&context.allowed, selected, scope, spotify_signed_in)?;
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok((
+            SearchResults {
+                no_results: true,
+                ..Default::default()
+            },
+            Vec::new(),
+        ));
+    }
+    let fetch = |provider| {
+        let enabled = candidates.contains(&provider);
+        async move {
+            if enabled {
+                Some((
+                    provider,
+                    search_source(context, provider, query, scope, spotify_signed_in).await,
+                ))
+            } else {
+                None
+            }
+        }
+    };
+    let (youtube, spotify, local) = tokio::join!(
+        fetch(Provider::YouTubeMusic),
+        fetch(Provider::Spotify),
+        fetch(Provider::Local)
+    );
+    merge_search_results([youtube, spotify, local].into_iter().flatten().collect())
+}
+
+fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
+    let capacity = lists.iter().map(Vec::len).sum();
+    let mut lists: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut items = Vec::with_capacity(capacity);
+    loop {
+        let mut added = false;
+        for list in &mut lists {
+            if let Some(item) = list.next() {
+                items.push(item);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    items
+}
+
+fn merge_search_results(
+    responses: Vec<(Provider, anyhow::Result<SearchResults>)>,
+) -> anyhow::Result<(SearchResults, Vec<String>)> {
+    let mut results = Vec::new();
+    let mut warnings = Vec::new();
+    for (provider, response) in responses {
+        match response {
+            Ok(result) => results.push(result),
+            Err(error) => warnings.push(format!("{}: {error:#}", provider.name())),
+        }
+    }
+    if results.is_empty() && !warnings.is_empty() {
+        anyhow::bail!("{}", warnings.join("\n"));
+    }
+    let no_results = warnings.is_empty() && results.iter().all(|result| result.no_results);
+    let did_you_mean = results
+        .iter()
+        .find_map(|result| result.did_you_mean.clone());
+    let items = interleave(results.into_iter().map(|result| result.items).collect());
+    Ok((
+        SearchResults {
+            no_results: items.is_empty() && no_results,
+            items,
+            did_you_mean,
+        },
+        warnings,
+    ))
+}
+
+async fn source_suggestions(
+    context: &SearchContext,
+    provider: Provider,
+    query: &str,
+) -> anyhow::Result<Vec<String>> {
+    context.require_allowed(provider)?;
+    let key = SearchKey::suggestions(provider, query, context.snapshot);
+    let value = context
+        .cache
+        .get_or_fetch(key, || async {
+            let items = match provider {
+                Provider::YouTubeMusic => context.api.suggestions(query).await?,
+                Provider::Local => {
+                    let results =
+                        search_source(context, provider, query, SearchScope::All, false).await?;
+                    let mut titles = Vec::new();
+                    for entry in results.items {
+                        let title = entry.title().trim();
+                        if !title.is_empty()
+                            && !titles
+                                .iter()
+                                .any(|existing: &String| existing.eq_ignore_ascii_case(title))
+                        {
+                            titles.push(title.to_owned());
+                            if titles.len() == 8 {
+                                break;
+                            }
+                        }
+                    }
+                    titles
+                }
+                Provider::Spotify => Vec::new(),
+            };
+            Ok(SearchValue::Suggestions(items))
+        })
+        .await?;
+    match value.as_ref() {
+        SearchValue::Suggestions(items) => Ok(items.clone()),
+        SearchValue::Results(_) => anyhow::bail!("Search cache returned invalid suggestions"),
+    }
+}
+
+async fn search_suggestions(
+    context: &SearchContext,
+    selected: Option<Provider>,
+    query: &str,
+) -> anyhow::Result<Vec<String>> {
+    let candidates = search_candidates(&context.allowed, selected, SearchScope::All, true)?;
+    let query = query.trim();
+    if query.is_empty() || crate::spotify::resource_uri(query).is_some() {
+        return Ok(Vec::new());
+    }
+    let fetch = |provider| {
+        let enabled = candidates.contains(&provider);
+        async move {
+            if enabled {
+                Some(source_suggestions(context, provider, query).await)
+            } else {
+                None
+            }
+        }
+    };
+    let (youtube, local) = tokio::join!(fetch(Provider::YouTubeMusic), fetch(Provider::Local));
+    let mut lists = Vec::new();
+    let mut errors = Vec::new();
+    for response in [youtube, local].into_iter().flatten() {
+        match response {
+            Ok(items) => lists.push(items),
+            Err(error) => errors.push(format!("{error:#}")),
+        }
+    }
+    if lists.iter().all(Vec::is_empty) && !errors.is_empty() {
+        anyhow::bail!("{}", errors.join("\n"));
+    }
+    let mut items = Vec::new();
+    for item in interleave(lists) {
+        if !items
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&item))
+        {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
 pub struct Backend {
+    browse_epoch: AtomicU64,
+    search_cache: Arc<SearchCache>,
+    local_search_tracks: std::sync::RwLock<Arc<Vec<Track>>>,
+    search_providers: Arc<std::sync::RwLock<SearchProviders>>,
     rt: tokio::runtime::Runtime,
     /// One client, reused for every cover, so connections stay pooled.
     http: reqwest::Client,
@@ -1115,6 +1441,10 @@ impl Backend {
         );
 
         Ok(Self {
+            browse_epoch: AtomicU64::new(0),
+            search_cache: Arc::new(SearchCache::default()),
+            local_search_tracks: std::sync::RwLock::new(Arc::new(Vec::new())),
+            search_providers: Arc::new(std::sync::RwLock::new(SearchProviders::default())),
             rt,
             http: reqwest::Client::builder()
                 .use_rustls_tls()
@@ -1394,52 +1724,123 @@ impl Backend {
         self.ctx.copy_text(text);
     }
 
-    pub fn search(&self, query: String) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+    pub fn search(&self, request: u64, provider: Option<Provider>, query: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let spotify_signed_in = crate::spotify::is_signed_in();
         self.rt.spawn(async move {
-            let event = match api.search(&query).await {
-                Ok(results) => Event::SearchDone { query, results },
-                Err(e) => Event::SearchFailed {
+            let result = search_sources(
+                &context,
+                provider,
+                &query,
+                SearchScope::All,
+                spotify_signed_in,
+            )
+            .await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok((results, warnings)) => Event::SearchDone {
+                    request,
+                    provider,
                     query,
-                    error: format!("{e:#}"),
+                    results,
+                    warnings,
+                },
+                Err(error) => Event::SearchFailed {
+                    request,
+                    provider,
+                    query,
+                    error: format!("{error:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
-    /// Autocomplete for the search field. Failure is silent — the field simply shows nothing — so
-    /// only a debug line marks it.
-    pub fn fetch_suggestions(&self, query: String) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+    pub fn fetch_suggestions(&self, provider: Option<Provider>, query: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.suggestions(&query).await {
-                Ok(items) => Event::SuggestionsDone { query, items },
-                Err(e) => Event::SuggestionsFailed {
+            let result = search_suggestions(&context, provider, &query).await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok(items) => Event::SuggestionsDone {
+                    provider,
                     query,
-                    error: format!("{e:#}"),
+                    items,
+                    source_revision: context.source_revision,
+                },
+                Err(error) => Event::SuggestionsFailed {
+                    provider,
+                    query,
+                    error: format!("{error:#}"),
+                    source_revision: context.source_revision,
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
     pub fn sign_in_spotify(&self) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.search_scoped(&query, scope).await {
-                Ok(results) => Event::ScopedSearchDone {
+            let result = crate::spotify::sign_in()
+                .await
+                .map_err(|error| error.to_string());
+            Self::emit(&tx, &ctx, Event::SpotifySignInFinished(result));
+        });
+    }
+
+    pub fn sign_out_spotify(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = crate::spotify::sign_out()
+                .await
+                .map_err(|error| error.to_string());
+            Self::emit(&tx, &ctx, Event::SpotifySignOutFinished(result));
+        });
+    }
+
+    pub fn search_scoped(
+        &self,
+        request: u64,
+        provider: Option<Provider>,
+        query: String,
+        scope: crate::model::SearchScope,
+    ) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let spotify_signed_in = crate::spotify::is_signed_in();
+        self.rt.spawn(async move {
+            let result = search_sources(&context, provider, &query, scope, spotify_signed_in).await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok((results, warnings)) => Event::ScopedSearchDone {
+                    request,
+                    provider,
                     query,
                     scope,
-                    results,
+                    results: results.items,
+                    warnings,
                 },
-                Err(e) => Event::ScopedSearchFailed {
+                Err(error) => Event::ScopedSearchFailed {
+                    request,
+                    provider,
                     query,
                     scope,
-                    error: format!("{e:#}"),
+                    error: format!("{error:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -3268,6 +3669,161 @@ fn scrobble_nonce() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_provider_changes_track_membership_without_reordering_invalidations() {
+        let mut sources = SearchProviders::default();
+        assert_eq!(sources.allowed, [Provider::YouTubeMusic]);
+        assert!(!sources.replace(vec![Provider::YouTubeMusic, Provider::YouTubeMusic]));
+        assert_eq!(sources.revision, 0);
+        let captured = sources.allowed.clone();
+        assert!(sources.replace(vec![Provider::Spotify]));
+        assert_eq!(sources.allowed, [Provider::Spotify]);
+        assert_eq!(sources.revision, 1);
+        assert_eq!(captured, [Provider::YouTubeMusic]);
+        assert!(sources.replace(vec![
+            Provider::Local,
+            Provider::Spotify,
+            Provider::YouTubeMusic
+        ]));
+        assert!(!sources.replace(vec![
+            Provider::Spotify,
+            Provider::YouTubeMusic,
+            Provider::Local,
+            Provider::Spotify
+        ]));
+        assert_eq!(sources.allowed, Provider::ALL);
+        assert_eq!(sources.revision, 2);
+    }
+
+    #[test]
+    fn all_search_uses_only_available_sources_and_supported_scopes() {
+        assert_eq!(
+            search_candidates(&[Provider::Spotify], None, SearchScope::All, true).unwrap(),
+            [Provider::Spotify]
+        );
+        assert_eq!(
+            search_candidates(&[Provider::Local], None, SearchScope::Songs, false).unwrap(),
+            [Provider::Local]
+        );
+        assert_eq!(
+            search_candidates(&[Provider::YouTubeMusic], None, SearchScope::All, true).unwrap(),
+            [Provider::YouTubeMusic]
+        );
+        assert!(
+            search_candidates(
+                &[Provider::Spotify, Provider::Local],
+                None,
+                SearchScope::Videos,
+                true
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            search_candidates(&[], None, SearchScope::All, true)
+                .unwrap()
+                .is_empty()
+        );
+        let error = search_candidates(
+            &[Provider::Spotify],
+            Some(Provider::YouTubeMusic),
+            SearchScope::All,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("YouTube Music is not available"));
+    }
+
+    fn search_rows(ids: &[&str]) -> SearchResults {
+        SearchResults {
+            items: ids
+                .iter()
+                .map(|id| {
+                    Entry::Song(
+                        crate::listening::Metadata {
+                            id: (*id).to_owned(),
+                            title: "Same song".to_owned(),
+                            ..Default::default()
+                        }
+                        .to_track(),
+                    )
+                })
+                .collect(),
+            no_results: ids.is_empty(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn all_search_interleaves_sources_without_dropping_matching_songs() {
+        let (results, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Ok(search_rows(&["yt-1", "yt-2", "yt-3"])),
+            ),
+            (
+                Provider::Spotify,
+                Ok(search_rows(&["spotify:track:3TO7bbrUKrOSPGRTB5MeCz"])),
+            ),
+            (Provider::Local, Ok(search_rows(&["local-1", "local-2"]))),
+        ])
+        .unwrap();
+        let ids: Vec<_> = results
+            .items
+            .iter()
+            .filter_map(Entry::track)
+            .map(|track| track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "yt-1",
+                "spotify:track:3TO7bbrUKrOSPGRTB5MeCz",
+                "local-1",
+                "yt-2",
+                "local-2",
+                "yt-3"
+            ]
+        );
+        assert!(warnings.is_empty());
+        assert!(!results.no_results);
+    }
+
+    #[test]
+    fn partial_search_keeps_healthy_rows_and_names_failed_sources() {
+        let (results, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Err(anyhow::anyhow!("network unavailable")),
+            ),
+            (
+                Provider::Spotify,
+                Ok(search_rows(&["spotify:track:3TO7bbrUKrOSPGRTB5MeCz"])),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(results.items.len(), 1);
+        assert_eq!(warnings, ["YouTube Music: network unavailable"]);
+        let (empty, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Err(anyhow::anyhow!("network unavailable")),
+            ),
+            (Provider::Local, Ok(search_rows(&[]))),
+        ])
+        .unwrap();
+        assert!(empty.items.is_empty());
+        assert!(!empty.no_results);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            merge_search_results(vec![(
+                Provider::Spotify,
+                Err(anyhow::anyhow!("signed out"))
+            )])
+            .is_err()
+        );
+    }
 
     /// yt-dlp's progress lines, and only those, read as a percentage.
     #[test]
