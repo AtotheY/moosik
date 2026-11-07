@@ -712,6 +712,33 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+const SETTINGS_INPUT_HEIGHT: f32 = 32.0;
+
+fn settings_input_pill(
+    p: &theme::Palette,
+    rect: egui::Rect,
+    hover: f32,
+    focused: bool,
+    invalid: bool,
+) -> egui::epaint::RectShape {
+    egui::epaint::RectShape::new(
+        rect,
+        egui::CornerRadius::same(16),
+        p.glass(widgets::mix(p.surface, p.surface_hover, hover)),
+        egui::Stroke::new(
+            1.0,
+            if invalid {
+                p.danger
+            } else if focused {
+                p.text
+            } else {
+                p.outline
+            },
+        ),
+        egui::StrokeKind::Inside,
+    )
+}
+
 fn discord(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut presence = app.settings.discord_rich_presence;
@@ -742,11 +769,31 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
             "Session name",
             "Shown with your Discord picture in the listening session.",
             |ui| {
-                ui.add(
+                let available = ui.available_width();
+                let width = if available < 600.0 { available } else { 232.0 };
+                let background = ui.painter().add(egui::Shape::Noop);
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut name)
-                        .hint_text("Discord display name")
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 0)))
+                        .font(theme::semibold(13.0))
+                        .text_color(p.text)
+                        .hint_text(
+                            RichText::new("Discord display name").font(theme::semibold(13.0)),
+                        )
                         .char_limit(32)
-                        .desired_width(150.0),
+                        .min_size(egui::vec2(0.0, SETTINGS_INPUT_HEIGHT))
+                        .vertical_align(egui::Align::Center)
+                        .desired_width(width),
+                );
+                ui.painter().set(
+                    background,
+                    settings_input_pill(
+                        &p,
+                        field.rect,
+                        widgets::lit(ui, &field),
+                        field.has_focus(),
+                        false,
+                    ),
                 );
             },
         );
@@ -1016,26 +1063,19 @@ fn cache_limit(
                         draft = CacheLimitDraft::new(size);
                     }
                 }
-                let (rect, field) =
-                    ui.allocate_exact_size(egui::vec2(132.0, 32.0), egui::Sense::click());
+                let (rect, field) = ui.allocate_exact_size(
+                    egui::vec2(132.0, SETTINGS_INPUT_HEIGHT),
+                    egui::Sense::click(),
+                );
                 let focused = ui.memory(|memory| memory.has_focus(editor_id));
                 let t = widgets::lit(ui, &field);
-                ui.painter().rect(
+                ui.painter().add(settings_input_pill(
+                    p,
                     rect,
-                    egui::CornerRadius::same(16),
-                    p.glass(widgets::mix(p.surface, p.surface_hover, t)),
-                    egui::Stroke::new(
-                        1.0,
-                        if draft.error.is_some() {
-                            p.danger
-                        } else if focused {
-                            p.text
-                        } else {
-                            p.outline
-                        },
-                    ),
-                    egui::StrokeKind::Inside,
-                );
+                    t,
+                    focused,
+                    draft.error.is_some(),
+                ));
                 let unit_font = theme::semibold(13.0);
                 let unit_width = widgets::text_width(ui, "MiB", &unit_font);
                 let inner = egui::Rect::from_min_max(
