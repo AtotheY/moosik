@@ -244,7 +244,7 @@ async fn host_room(
             }
         }
         let solo = match &sent {
-            Ok(Some(snapshot)) => snapshot.members.len() == 1 && snapshot.queue.is_empty(),
+            Ok(Some(snapshot)) => snapshot.members.len() == 1,
             Ok(None) => true,
             Err(_) => false,
         };
@@ -734,6 +734,54 @@ mod tests {
         assert!(solo_heartbeat_due(&last, &None, elapsed));
         assert!(!solo_heartbeat_due(&None, &None, elapsed));
         assert!(solo_heartbeat_due(&None, &None, Duration::from_secs(15)));
+    }
+
+    /// Count successful room writes while the UI continues sampling a paused track every second.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a loopback session relay and waits for a solo heartbeat"]
+    async fn a_queued_song_does_not_keep_a_solo_host_polling_each_second() {
+        assert!(origin().starts_with("http://127.0.0.1:"));
+        let song = Song {
+            id: "dQw4w9WgXcQ".into(),
+            title: "Solo".into(),
+            artist: String::new(),
+            position: 10.0,
+            playing: false,
+            audio_alternative: false,
+        };
+        let (tx, updates) = channel();
+        let (write, samples) = watch::channel(Some(song.clone()));
+        let outbox = Outbox::default();
+        let worker = tokio::spawn(host(samples, outbox.clone(), tx, egui::Context::default()));
+        let timeout = Duration::from_secs(5);
+        let Update::Ready(room) = updates.recv_timeout(timeout).unwrap() else {
+            panic!("missing invite");
+        };
+        assert!(matches!(
+            updates.recv_timeout(timeout).unwrap(),
+            Update::Snapshot(_)
+        ));
+        assert!(outbox.add(&room, song.clone()));
+        write.send_replace(Some(song.clone()));
+        let Update::Snapshot(added) = updates.recv_timeout(timeout).unwrap() else {
+            panic!("missing queue");
+        };
+        assert_eq!(added.members.len(), 1);
+        assert_eq!(added.queue.len(), 1);
+
+        for _ in 0..17 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            write.send_replace(Some(song.clone()));
+        }
+        drop(write);
+        worker.await.unwrap().unwrap();
+        assert_eq!(
+            updates
+                .try_iter()
+                .filter(|u| matches!(u, Update::Snapshot(_)))
+                .count(),
+            1
+        );
     }
 
     /// Simulate a suspended host. The development relay expires an idle room after 45 seconds.
