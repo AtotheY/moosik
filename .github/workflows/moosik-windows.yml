@@ -107,11 +107,14 @@ jobs:
           $config = Join-Path $roaming 'moosik\config'
           New-Item -Type Directory -Force $config | Out-Null
           '{"app_icon":"amber"}' | Set-Content (Join-Path $config 'settings.json') -Encoding utf8NoBOM
-          $app = Start-Process "$dest/moosik.exe" -PassThru -RedirectStandardError "$env:RUNNER_TEMP/moosik-stderr.txt"
+          $start = [Diagnostics.ProcessStartInfo]::new("$dest/moosik.exe", '--tray-test stdin')
+          $start.UseShellExecute = $false
+          $start.RedirectStandardInput = $true
+          $app = [Diagnostics.Process]::Start($start)
           Start-Sleep -Seconds 20
           $app.Refresh()
           if ($app.HasExited) {
-            Get-Content "$env:RUNNER_TEMP/moosik-stderr.txt"
+            Get-Content (Join-Path $config 'moosik.log') -Tail 30 -ErrorAction SilentlyContinue
             throw "App exited early: $($app.ExitCode)"
           }
           if ($app.MainWindowHandle -eq 0) { Stop-Process -Id $app.Id; throw 'No application window appeared' }
@@ -131,7 +134,7 @@ jobs:
           ./scripts/tests/windows-taskbar.ps1 -Window $app.MainWindowHandle -Exe (Join-Path $dest 'moosik.exe') -Icon $icon
           python scripts/tests/windows-taskbar-image.py $icon "$env:RUNNER_TEMP/taskbar.png"
           if ($LASTEXITCODE -ne 0) { throw 'Taskbar artwork did not match the selected finish' }
-          Stop-Process -Id $app.Id
+          ./scripts/tests/windows-tray-restore.ps1 -App $app
           $uninstall = Start-Process "$dest/unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES' -PassThru -Wait
           if ($uninstall.ExitCode -ne 0) { throw 'Uninstall failed' }
       - uses: actions/upload-artifact@v4

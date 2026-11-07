@@ -60,6 +60,17 @@ pub enum TrayAction {
 /// plain queue; the `request_repaint` in [`inject`] is what makes the render thread look at it.
 static ACTIONS: Mutex<VecDeque<TrayAction>> = Mutex::new(VecDeque::new());
 
+#[cfg(target_os = "windows")]
+static PLAYER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn set_player_window(hwnd: Option<u64>) {
+    PLAYER_HWND.store(
+        hwnd.unwrap_or_default() as isize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Hand `action` to the render thread: queue it, then wake the UI.
 ///
 /// `pub(crate)` for the `--tray-test` diagnostic, which has to reach the same queue a real
@@ -70,10 +81,26 @@ pub(crate) fn inject(ctx: &egui::Context, action: TrayAction) {
     // frame then runs `App::poll_tray` as usual.
     #[cfg(target_os = "macos")]
     bring_window_forward();
+    #[cfg(target_os = "windows")]
+    let action = wake_minimized_player(action);
     if let Ok(mut queue) = ACTIONS.lock() {
         queue.push_back(action);
     }
     ctx.request_repaint();
+}
+
+/// Wake a taskbar-minimized window before waiting for egui to process the tray action.
+/// Record Show so the next frame cannot interpret the already-restored window as a hide.
+#[cfg(target_os = "windows")]
+fn wake_minimized_player(action: TrayAction) -> TrayAction {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, ShowWindowAsync};
+
+    let hwnd = PLAYER_HWND.load(std::sync::atomic::Ordering::Relaxed);
+    if action != TrayAction::Quit && hwnd != 0 && unsafe { IsIconic(hwnd) } != 0 {
+        unsafe { ShowWindowAsync(hwnd, SW_RESTORE) };
+        return TrayAction::Show;
+    }
+    action
 }
 
 /// Order the app's main window back on screen and activate the app, without needing a frame.
