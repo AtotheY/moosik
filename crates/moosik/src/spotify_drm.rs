@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, Notify},
+    sync::{Mutex as AsyncMutex, Notify, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -30,7 +30,9 @@ const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RENDERER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const RENDERER_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const PLAYBACK_READY_GRACE: Duration = Duration::from_secs(45);
-const CACHE_HEADER: &[u8; 8] = b"MOOSIKC1";
+const LEGACY_CACHE_HEADER: &[u8; 8] = b"MOOSIKC1";
+const CACHE_HEADER: &[u8; 8] = b"MOOSIKC2";
+const CACHE_HEADER_LEN: u64 = 80;
 static CACHE_ENABLED: AtomicBool = AtomicBool::new(true);
 static CACHE_LIMIT: AtomicU64 = AtomicU64::new(512 * 1024 * 1024);
 static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -75,7 +77,7 @@ fn cache_entry_fits(media_len: u64, limit: u64) -> bool {
     media_len > 0
         && media_len <= LIMIT
         && media_len
-            .checked_add(48)
+            .checked_add(CACHE_HEADER_LEN)
             .is_some_and(|incoming| incoming <= limit)
 }
 
@@ -168,33 +170,65 @@ fn trim_cache(limit: u64, incoming: u64) -> Result<()> {
     Ok(())
 }
 
-fn verify_cached(file: &mut impl Read) -> Option<u64> {
+fn verify_cached(file: &mut impl Read) -> Option<(u64, Option<[u8; 32]>)> {
     let mut header = [0; 48];
     file.read_exact(&mut header).ok()?;
     let len = u64::from_le_bytes(header[8..16].try_into().ok()?);
-    if &header[..8] != CACHE_HEADER || len == 0 || len > LIMIT {
+    if len == 0 || len > LIMIT {
         return None;
     }
+    let file_hash = match &header[..8] {
+        tag if tag == CACHE_HEADER => {
+            let mut hash = [0; 32];
+            file.read_exact(&mut hash).ok()?;
+            Some(hash)
+        }
+        tag if tag == LEGACY_CACHE_HEADER => None,
+        _ => return None,
+    };
     let mut digest = Sha256::new();
     let actual = io::copy(&mut file.take(len + 1), &mut digest).ok()?;
-    (actual == len && digest.finalize()[..] == header[16..]).then_some(len)
+    (actual == len && digest.finalize()[..] == header[16..]).then_some((len, file_hash))
 }
 
-fn open_cached(file_id: &str) -> Option<(std::fs::File, u64)> {
-    let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+struct CachedAudio {
+    file: std::fs::File,
+    len: u64,
+    file_hash: Option<[u8; 32]>,
+}
+
+impl CachedAudio {
+    fn matches(&self, file_id: &str) -> bool {
+        self.file_hash
+            .is_some_and(|hash| hash == <[u8; 32]>::from(Sha256::digest(file_id)))
+    }
+}
+
+fn open_cached(key: &str, legacy: bool) -> Option<CachedAudio> {
     if !CACHE_ENABLED.load(Ordering::SeqCst) {
         return None;
     }
-    let path = cache_dir().ok()?.join(cache_name(file_id));
+    let path = cache_dir().ok()?.join(cache_name(key));
     let metadata = std::fs::symlink_metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT + 48 {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > LIMIT + CACHE_HEADER_LEN
+    {
         return None;
     }
     let mut file = std::fs::File::open(&path).ok()?;
-    if let Some(len) = verify_cached(&mut file) {
-        file.seek(SeekFrom::Start(48)).ok()?;
+    if let Some((len, file_hash)) = verify_cached(&mut file) {
+        if file_hash.is_none() != legacy {
+            return None;
+        }
+        let header_len = if legacy { 48 } else { CACHE_HEADER_LEN };
+        file.seek(SeekFrom::Start(header_len)).ok()?;
         let _ = file.set_modified(SystemTime::now());
-        Some((file, len))
+        Some(CachedAudio {
+            file,
+            len,
+            file_hash,
+        })
     } else {
         drop(file);
         let _ = std::fs::remove_file(&path);
@@ -210,6 +244,7 @@ fn cache_write_allowed(len: u64, generation: u64) -> bool {
 }
 
 fn write_cached(
+    uri: &str,
     file_id: &str,
     mut media: std::fs::File,
     len: u64,
@@ -222,14 +257,15 @@ fn write_cached(
     }
     let directory = cache_dir()?;
     std::fs::create_dir_all(&directory)?;
-    let destination = directory.join(cache_name(file_id));
+    let destination = directory.join(cache_name(uri));
     if destination.is_file() {
-        return Ok(());
+        std::fs::remove_file(&destination)?;
     }
-    trim_cache(CACHE_LIMIT.load(Ordering::SeqCst), len + 48)?;
+    let entry_size = len + CACHE_HEADER_LEN;
+    trim_cache(CACHE_LIMIT.load(Ordering::SeqCst), entry_size)?;
     let temporary = directory.join(format!(
         "{}.part-{:016x}",
-        cache_name(file_id),
+        cache_name(uri),
         rand::random::<u64>()
     ));
     let result = (|| {
@@ -240,6 +276,7 @@ fn write_cached(
         file.write_all(CACHE_HEADER)?;
         file.write_all(&len.to_le_bytes())?;
         file.write_all(digest)?;
+        file.write_all(&Sha256::digest(file_id))?;
         media.seek(SeekFrom::Start(0))?;
         if io::copy(&mut Read::take(media, len), &mut file)? != len {
             return Err(io::ErrorKind::UnexpectedEof.into());
@@ -251,7 +288,7 @@ fn write_cached(
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
     } else {
-        CACHE_USAGE.fetch_add(len + 48, Ordering::SeqCst);
+        CACHE_USAGE.fetch_add(entry_size, Ordering::SeqCst);
     }
     result.map_err(Into::into)
 }
@@ -617,15 +654,28 @@ impl Handle {
 
 struct Broker {
     transport: Transport,
-    track: PreparedTrack,
-    media: AsyncMutex<()>,
-    certificate: Vec<u8>,
+    uri: Arc<str>,
+    playback: watch::Receiver<Option<Arc<ValidatedPlayback>>>,
+    media: AsyncMutex<JoinSet<Option<CachedAudio>>>,
     prefix: String,
     origin: String,
     volume: f64,
     start_at: Option<f64>,
     cache_generation: u64,
     handle: Weak<Inner>,
+}
+
+struct ValidatedPlayback {
+    track: PreparedTrack,
+    certificate: Vec<u8>,
+}
+
+impl Broker {
+    async fn validated_playback(&self) -> Result<Arc<ValidatedPlayback>> {
+        let mut playback = self.playback.clone();
+        let ready = playback.wait_for(Option::is_some).await?;
+        Ok(ready.as_ref().unwrap().clone())
+    }
 }
 
 pub async fn play(
@@ -672,21 +722,31 @@ async fn start(
             .to_vec();
         Result::<_>::Ok((certificate, started.elapsed().as_millis()))
     };
-    let ((track, prepare_ms), (certificate, certificate_ms)) =
-        tokio::try_join!(prepare, service_certificate)?;
-    ensure!(
-        !handle.0.canceled.load(Ordering::SeqCst),
-        "Spotify playback canceled"
-    );
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
     let prefix = format!("/{}/", capability());
     let url = format!("{origin}{prefix}");
+    let (validated, playback) = watch::channel(None);
+    let uri_key: Arc<str> = Arc::from(uri);
+    let mut media = JoinSet::new();
+    if CACHE_ENABLED.load(Ordering::SeqCst) {
+        let uri_key = uri_key.clone();
+        let active = Arc::downgrade(&handle.0);
+        media.spawn_blocking(move || {
+            let _guard = CACHE_LOCK.try_lock().ok()?;
+            if CACHE_GENERATION.load(Ordering::SeqCst) != cache_generation
+                || active.upgrade()?.canceled.load(Ordering::SeqCst)
+            {
+                return None;
+            }
+            open_cached(&uri_key, false)
+        });
+    }
     let broker = Arc::new(Broker {
-        transport,
-        track,
-        media: AsyncMutex::new(()),
-        certificate,
+        transport: transport.clone(),
+        uri: uri_key,
+        playback,
+        media: AsyncMutex::new(media),
         prefix,
         origin,
         volume: volume.clamp(0.0, 100.0),
@@ -735,10 +795,18 @@ async fn start(
         reused
     };
     let renderer_started = Instant::now();
-    let deadline = renderer_started
-        + MEDIA_DOWNLOAD_TIMEOUT
-        + RENDERER_RESPONSE_TIMEOUT
-        + PLAYBACK_READY_GRACE;
+    let ((track, prepare_ms), (certificate, certificate_ms)) =
+        tokio::try_join!(prepare, service_certificate)?;
+    if let Some(error) = handle.last_error() {
+        bail!(error);
+    }
+    ensure!(
+        !handle.0.canceled.load(Ordering::SeqCst),
+        "Spotify playback canceled"
+    );
+    validated.send_replace(Some(Arc::new(ValidatedPlayback { track, certificate })));
+    let deadline =
+        Instant::now() + MEDIA_DOWNLOAD_TIMEOUT + RENDERER_RESPONSE_TIMEOUT + PLAYBACK_READY_GRACE;
     loop {
         if let Some(error) = handle.last_error() {
             bail!(error);
@@ -832,27 +900,30 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             .await
         }
         ("GET", "meta") => {
+            let playback = broker.validated_playback().await?;
             let meta = serde_json::to_vec(&json!({
                 "volume": broker.volume,
                 "startAt": broker.start_at,
-                "duration": broker.track.metadata.duration_ms.map(|ms| ms as f64 / 1000.0),
+                "duration": playback.track.metadata.duration_ms.map(|ms| ms as f64 / 1000.0),
             }))?;
             respond(&mut socket, 200, "application/json", &meta).await
         }
         ("GET", "certificate") => {
+            let playback = broker.validated_playback().await?;
             respond(
                 &mut socket,
                 200,
                 "application/octet-stream",
-                &broker.certificate,
+                &playback.certificate,
             )
             .await
         }
         ("GET", "media") => {
+            let playback = broker.validated_playback().await?;
             let mut response_started = false;
             match tokio::time::timeout(
                 MEDIA_DOWNLOAD_TIMEOUT,
-                serve_media(&mut socket, &broker, &mut response_started),
+                serve_media(&mut socket, &broker, &playback.track, &mut response_started),
             )
             .await
             {
@@ -863,6 +934,7 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             }
         }
         ("POST", "license") => {
+            broker.validated_playback().await?;
             let started = Instant::now();
             match broker.transport.license(&body).await {
                 Ok(license) => {
@@ -922,12 +994,36 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
 async fn serve_media(
     socket: &mut TcpStream,
     broker: &Broker,
+    track: &PreparedTrack,
     response_started: &mut bool,
 ) -> Result<()> {
-    let _stream = broker.media.lock().await;
+    let mut preloaded = broker.media.lock().await;
     let started = Instant::now();
-    let file_id = broker.track.file_id.clone();
-    if let Ok(Some((file, len))) = tokio::task::spawn_blocking(move || open_cached(&file_id)).await
+    let preloaded = preloaded.join_next().await.and_then(Result::ok).flatten();
+    let warmed = preloaded
+        .as_ref()
+        .is_some_and(|audio| audio.matches(&track.file_id));
+    let cached = if warmed {
+        preloaded
+    } else {
+        let file_id = track.file_id.clone();
+        let uri = broker.uri.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            if preloaded.is_none()
+                && let Some(audio) = open_cached(&uri, false)
+                && audio.matches(&file_id)
+            {
+                return Some(audio);
+            }
+            open_cached(&file_id, true)
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    if let Some(CachedAudio { file, len, .. }) = cached
+        && CACHE_GENERATION.load(Ordering::SeqCst) == broker.cache_generation
     {
         *response_started = true;
         respond_head(socket, 200, "audio/mp4", len).await?;
@@ -939,6 +1035,7 @@ async fn serve_media(
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis(),
             cache_hit = true,
+            cache_preloaded = warmed,
             "Spotify media ready"
         );
         return Ok(());
@@ -946,7 +1043,7 @@ async fn serve_media(
 
     let mut range = broker
         .transport
-        .fetch_range(&broker.track, 0, FIRST_MEDIA_RANGE - 1)
+        .fetch_range(track, 0, FIRST_MEDIA_RANGE - 1)
         .await?;
     let total = range.total_len;
     ensure!(
@@ -989,11 +1086,7 @@ async fn serve_media(
         drop(range);
         range = broker
             .transport
-            .fetch_range(
-                &broker.track,
-                offset,
-                (offset + MEDIA_RANGE - 1).min(total - 1),
-            )
+            .fetch_range(track, offset, (offset + MEDIA_RANGE - 1).min(total - 1))
             .await?;
         check_media_range(&range, offset, total)?;
         socket.write_all(&range.bytes).await?;
@@ -1002,10 +1095,11 @@ async fn serve_media(
         && file.flush().await.is_ok()
     {
         let file = file.into_std().await;
-        let file_id = broker.track.file_id.clone();
+        let uri = broker.uri.clone();
+        let file_id = track.file_id.clone();
         let digest = digest.finalize();
         drop(tokio::task::spawn_blocking(move || {
-            write_cached(&file_id, file, total, &digest, generation)
+            write_cached(&uri, &file_id, file, total, &digest, generation)
         }));
     }
     tracing::info!(
@@ -1202,12 +1296,12 @@ mod tests {
     #[test]
     fn cache_entries_must_fit_with_their_header_before_eviction() {
         let limit = 1024 * 1024;
-        assert!(cache_entry_fits(limit - 48, limit));
-        assert!(!cache_entry_fits(limit - 47, limit));
+        assert!(cache_entry_fits(limit - CACHE_HEADER_LEN, limit));
+        assert!(!cache_entry_fits(limit - CACHE_HEADER_LEN + 1, limit));
         assert!(!cache_entry_fits(limit, limit));
         assert!(!cache_entry_fits(0, limit));
         assert!(!cache_entry_fits(LIMIT + 1, cache_limit_bytes(4096)));
-        assert!(cache_entry_fits(LIMIT, LIMIT + 48));
+        assert!(cache_entry_fits(LIMIT, LIMIT + CACHE_HEADER_LEN));
     }
 
     #[test]
@@ -1256,12 +1350,21 @@ mod tests {
         let mut encoded = Vec::from(CACHE_HEADER.as_slice());
         encoded.extend_from_slice(&(media.len() as u64).to_le_bytes());
         encoded.extend_from_slice(&Sha256::digest(media));
+        let file_hash: [u8; 32] = Sha256::digest("spotify-file").into();
+        encoded.extend_from_slice(&file_hash);
         encoded.extend_from_slice(media);
         assert_eq!(
             verify_cached(&mut encoded.as_slice()),
-            Some(media.len() as u64)
+            Some((media.len() as u64, Some(file_hash)))
         );
-        for length in [0, 8, 16, 47, encoded.len() - 1] {
+        let mut legacy = Vec::from(LEGACY_CACHE_HEADER.as_slice());
+        legacy.extend_from_slice(&encoded[8..48]);
+        legacy.extend_from_slice(media);
+        assert_eq!(
+            verify_cached(&mut legacy.as_slice()),
+            Some((media.len() as u64, None))
+        );
+        for length in [0, 8, 16, 47, 79, encoded.len() - 1] {
             assert!(verify_cached(&mut &encoded[..length]).is_none());
         }
         encoded.push(0);

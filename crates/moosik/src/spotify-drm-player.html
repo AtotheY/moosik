@@ -83,7 +83,7 @@ function fail(code) {
 async function request(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    signal: path === 'media'
+    signal: path === 'media' || path === 'meta'
       ? requests.signal
       : AbortSignal.any([requests.signal, AbortSignal.timeout(30000)]),
   });
@@ -231,6 +231,8 @@ async function begin() {
       fail(11);
       return;
     }
+    const keys = await access.createMediaKeys();
+    await audio.setMediaKeys(keys);
     const meta = await (await request('meta')).json();
     if (stopped) return;
     if (Number.isFinite(meta.duration) && meta.duration > 0 && meta.duration <= 86400) declaredDuration = meta.duration;
@@ -238,8 +240,6 @@ async function begin() {
     audio.volume = desiredVolume / 100;
     if (!seekChanged && Number.isFinite(meta.startAt) && meta.startAt >= 0) pendingSeek = meta.startAt;
     if (stopped) return;
-    const keys = await access.createMediaKeys();
-    await audio.setMediaKeys(keys);
     audio.addEventListener('encrypted', async event => {
       if (stopped || errorCode !== null) return;
       try {
