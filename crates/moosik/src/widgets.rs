@@ -2361,6 +2361,12 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             Sense::click(),
         )
     });
+    // Next up swaps the duration for a remove button in place, beside More options.
+    let remove_button = queue_index.map(|index| {
+        let rect = more_rect.translate(vec2(-36.0, 0.0));
+        let button = ui.interact(rect, row_id.with("remove"), Sense::click());
+        (index, button)
+    });
     // A narrow row — the open queue on a small window — compresses instead of starving:
     // the number column and the art yield first, and what they give back is the title's
     // room. A full-size art and a 30pt number column left 21pt of it on a 215pt card,
@@ -2372,8 +2378,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     // artist page's side-by-side "Popular" column is exactly this width.
     let corner_thumbs = rect.width() < 520.0;
     // Whether the thumbs really do share that corner. They can only where they will be drawn:
-    // a ratable, signed-in row. Where they cannot — the queue, a signed-out list — the duration
-    // is not stepping aside for anything and stays put at every width.
+    // a ratable, signed-in row. Queue rows handle their remove button separately.
     let share_corner = corner_shares_duration(
         rect.width(),
         show_rating,
@@ -2391,6 +2396,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     let duration_w = match (duration, badge) {
         (Some(d), _) => (text_width(ui, &fmt_duration(d), &theme::regular(12.0)) + 12.0).max(44.0),
         (None, Some(b)) => (text_width(ui, b, &badge_font()) + 12.0).max(44.0),
+        (None, None) if remove_button.is_some() => 30.0,
         (None, None) => 0.0,
     }
     .max(if share_corner { 76.0 } else { 0.0 });
@@ -2457,12 +2463,14 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
             && response
                 .interact_pointer_pos()
                 .is_some_and(|p| more_rect.contains(p)));
-    let queue_suppress = menu
-        .as_ref()
-        .and_then(|m| m.queue_index)
-        .is_some_and(|index| {
-            crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
-        });
+    let remove_clicked = remove_button.as_ref().is_some_and(|(_, b)| b.clicked());
+    let queue_suppress = !remove_clicked
+        && menu
+            .as_ref()
+            .and_then(|m| m.queue_index)
+            .is_some_and(|index| {
+                crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
+            });
     let song_suppress = menu
         .as_ref()
         .filter(|m| m.queue_index.is_none())
@@ -2472,7 +2480,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     if song_suppress {
         link = None;
     }
-    let activate = if on_more || queue_suppress || song_suppress {
+    let activate = if on_more || remove_clicked || queue_suppress || song_suppress {
         false
     } else if (!hide_art
         && on_cover(
@@ -2699,9 +2707,26 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         // Where the corner is shared with the rating thumbs it holds the thumb and nothing else —
         // for *every* row, so a list never mixes rows that show a duration with rows that show a
         // thumb. (Letting unrated rows keep the duration was exactly that inconsistency: rated
-        // rows lost it, unrated ones did not, purely by width.) With no corner to share — wide
-        // rows, the queue, signed-out lists — the duration is always painted.
-        if !share_corner {
+        // rows lost it, unrated ones did not, purely by width.)
+        if let Some((_, button)) = &remove_button
+            && (over || button.hovered() || button.has_focus())
+        {
+            if let Some(fill) = shell_state_fill(ui, palette, button) {
+                ui.painter().circle_filled(button.rect.center(), 15.0, fill);
+            }
+            Icon::X
+                .image(
+                    mix(palette.secondary, palette.danger, lit(ui, button)),
+                    16.0,
+                )
+                .paint_at(
+                    ui,
+                    Rect::from_center_size(
+                        button.rect.center() + press_offset(button),
+                        vec2(16.0, 16.0),
+                    ),
+                );
+        } else if !share_corner {
             if let Some(d) = duration {
                 ui.painter().text(
                     egui::pos2(rect.right() - right_pad, rect.center().y),
@@ -2769,6 +2794,18 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
     }
     let mut action =
         menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m));
+    if let Some((index, button)) = remove_button {
+        let label = "Remove from queue";
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        if button.clicked() {
+            action = Some(crate::ui::RowAction::RemoveFromQueue(index));
+        }
+        button
+            .on_hover_text(label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     // Rating thumbs are interacted whenever the row is visible — never gated on drawn — for
     // the reason documented on `rate_thumbs`. A click is only reachable where they are
     // visible anyway, since their zone sits inside the row.
