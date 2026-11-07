@@ -2350,14 +2350,14 @@ impl Backend {
                     playlists,
                     &mut tracks,
                     |id| async move {
-                        Ok(if crate::model::is_spotify_id(&id) {
+                        Ok(if id.starts_with("spotify:playlist:") {
                             crate::spotify::playlist(&id).await?.tracks
                         } else {
                             api.playlist(&id).await?.tracks
                         })
                     },
                     |id, token| async move {
-                        let page = if crate::model::is_spotify_id(&id) {
+                        let page = if id.starts_with("spotify:playlist:") {
                             crate::spotify::playlist_more(&token).await?
                         } else {
                             api.playlist_more(token).await?

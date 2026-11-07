@@ -8119,7 +8119,7 @@ impl App {
                 }
             } else if !id.starts_with("private:")
                 && !id.starts_with("local:")
-                && providers.contains(&if crate::model::is_spotify_id(id) {
+                && providers.contains(&if id.starts_with("spotify:playlist:") {
                     crate::model::Provider::Spotify
                 } else {
                     crate::model::Provider::YouTubeMusic
