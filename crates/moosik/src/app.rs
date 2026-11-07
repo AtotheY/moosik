@@ -8973,6 +8973,32 @@ impl App {
         }
     }
 
+    fn search_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.results
+            .items
+            .iter()
+            .chain(&self.scoped_results)
+            .filter_map(Entry::track)
+    }
+
+    fn update_search_tracks(&mut self, mut update: impl FnMut(&mut Track) -> bool) {
+        for (entries, generation) in [
+            (&mut self.results.items, &mut self.results_generation),
+            (
+                &mut self.scoped_results,
+                &mut self.scoped_results_generation,
+            ),
+        ] {
+            let mut changed = false;
+            for track in entries.iter_mut().filter_map(Entry::track_mut) {
+                changed |= update(track);
+            }
+            if changed {
+                *generation = generation.wrapping_add(1);
+            }
+        }
+    }
+
     /// Visit every `Track` the app holds — what is playing, the queue, and each loaded page.
     /// The read-only twin of the fan-out in [`Self::set_like`], and it must stay in step with
     /// it: a list one of them knows about and the other does not is a copy that goes stale.
@@ -8983,12 +9009,7 @@ impl App {
         for t in self.q.tracks() {
             f(t);
         }
-        for t in self
-            .results
-            .items
-            .iter()
-            .filter_map(crate::model::Entry::track)
-        {
+        for t in self.search_tracks() {
             f(t);
         }
         if let Some(artist) = self.artist.as_ref() {
@@ -9082,16 +9103,12 @@ impl App {
                 self.q
                     .tracks()
                     .iter()
-                    .find(|t| t.video_id == video_id)
+                    .chain(&self.now.track)
+                    .chain(self.search_tracks())
+                    .find(|t| t.video_id == video_id && t.like != LikeStatus::Indifferent)
                     .map(|t| t.like)
             })
-            .or_else(|| {
-                self.now
-                    .track
-                    .as_ref()
-                    .filter(|t| t.video_id == video_id)
-                    .map(|t| t.like)
-            })
+            .or_else(|| self.liked.like_of(video_id))
             .unwrap_or(LikeStatus::Indifferent)
     }
 
@@ -9112,21 +9129,7 @@ impl App {
         for t in self.q.tracks_mut() {
             set(t);
         }
-        for (entries, generation) in [
-            (&mut self.results.items, &mut self.results_generation),
-            (
-                &mut self.scoped_results,
-                &mut self.scoped_results_generation,
-            ),
-        ] {
-            let mut changed = false;
-            for track in entries.iter_mut().filter_map(Entry::track_mut) {
-                changed |= set(track);
-            }
-            if changed {
-                *generation = generation.wrapping_add(1);
-            }
-        }
+        self.update_search_tracks(set);
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
                 set(t);
@@ -9258,12 +9261,15 @@ impl App {
     fn set_like(&mut self, video_id: &str, like: LikeStatus) {
         let mut copy: Option<Track> = None;
         let mut set = |t: &mut Track| {
-            if t.video_id == video_id {
-                t.like = like;
-                if copy.is_none() {
-                    copy = Some(t.clone());
-                }
+            if t.video_id != video_id {
+                return false;
             }
+            let changed = t.like != like;
+            t.like = like;
+            if copy.is_none() {
+                copy = Some(t.clone());
+            }
+            changed
         };
         if let Some(t) = self.now.track.as_mut() {
             set(t);
@@ -9271,14 +9277,7 @@ impl App {
         for t in self.q.tracks_mut() {
             set(t);
         }
-        for t in self
-            .results
-            .items
-            .iter_mut()
-            .filter_map(crate::model::Entry::track_mut)
-        {
-            set(t);
-        }
+        self.update_search_tracks(&mut set);
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
                 set(t);
