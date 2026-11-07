@@ -33,6 +33,7 @@ icons! {
     Ellipsis => "ellipsis",
     EllipsisVertical => "ellipsis-vertical",
     Folder => "folder",
+    Grip => "grip",
     Heart => "heart",
     HeartFilled => "heart-filled",
     History => "history",

@@ -9749,7 +9749,7 @@ impl eframe::App for App {
         ui::sidebar::new_playlist_popup(self, &ctx);
         ui::organizer::dialog(self, &ctx);
         ui::help::modal(self, ui);
-        ui::home_order::modal(self, ui);
+        ui::home_order::window(self, ui);
         ui::paste_cookies::modal(self, ui);
         ui::crash::modal(self, ui);
         ui::update::modal(self, ui);
