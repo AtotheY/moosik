@@ -6,10 +6,13 @@ checking, verifying the archive, installation, permissions, and relaunch.
 
 A lit download button appears immediately left of the profile picture when an update is
 available. With automatic checks enabled (the default), Moosik checks at launch and every
-15 minutes while running. On Windows setup installs, one click downloads the
+15 minutes while running. Clicking Update checks the release source again. If a newer release
+appeared after the badge, Moosik uses the newer version. A failed lookup leaves the app running
+and the user can retry. On Windows setup installs, one click downloads the
 installer, verifies its checksum and restarts Moosik. Portable builds offer the release page.
 On macOS, Sparkle can prepare the signed update in the background and the button restarts
-into it. Sparkle handles authorization and any updates that need its native dialog.
+into it if it still matches the published appcast. A superseded installer is discarded before
+Sparkle fetches the current release. Sparkle handles authorization and any updates that need its native dialog.
 Manual checks are available in **Settings → About → Updates**.
 
 Before the first release is published, a manual check shows “Updates aren’t

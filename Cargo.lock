@@ -4958,6 +4958,7 @@ dependencies = [
  "moosik-resolve",
  "reqwest",
  "rfd",
+ "roxmltree",
  "rusqlite",
  "security-framework",
  "serde",

@@ -2659,7 +2659,7 @@ impl App {
     /// Ask GitHub for the latest release. `manual` is the About tab's "Check now": it asks at
     /// once, and answers even when there is nothing new.
     pub(crate) fn check_for_update(&mut self, manual: bool) {
-        if self.update.checking || self.update.progress.is_some() {
+        if self.update.checking || self.update.refreshing || self.update.progress.is_some() {
             return;
         }
         #[cfg(target_os = "macos")]
@@ -2685,37 +2685,70 @@ impl App {
         self.backend.check_for_update(delay, manual);
     }
 
-    /// Both the toolbar and About act on the release already offered to the user.
+    /// Every install action resolves the release again, including manual installs.
     pub(crate) fn activate_update(&mut self) {
-        if let Some(release) = &self.update.available {
-            if release.installable() {
-                self.install_update();
-            } else {
-                self.update.open = true;
-            }
+        #[cfg(target_os = "macos")]
+        if crate::update::macos::install_in_progress() {
+            return;
+        }
+        if self.update.progress.is_none() && !self.update.refreshing {
+            self.update.install_requested = true;
+        }
+        self.refresh_update_if_requested();
+    }
+
+    fn refresh_update_if_requested(&mut self) {
+        if self.update.install_requested && !self.update.checking {
+            self.update.install_requested = false;
+            self.update.refreshing = true;
+            self.update.error = None;
+            #[cfg(target_os = "macos")]
+            let feed = crate::update::macos::feed_url();
+            #[cfg(not(target_os = "macos"))]
+            let feed = None;
+            self.backend.refresh_update(feed);
         }
     }
 
-    /// Download and install the release the check found. The window closes once it is ready.
-    pub(crate) fn install_update(&mut self) {
-        let Some(release) = self.update.available.clone() else {
-            return;
-        };
-        if self.update.progress.is_some() || !release.installable() {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        if release.native {
-            if !crate::update::macos::install_prepared() {
-                // Bring Sparkle's existing offer or download to the front, even if
-                // a previous manual check is still marked in progress.
-                crate::update::macos::check();
+    fn use_latest_update(&mut self, result: Result<crate::update::Check, String>) {
+        use crate::update::Check;
+        self.update.refreshing = false;
+        self.update.not_published = false;
+        self.update.up_to_date = false;
+        match result {
+            Ok(Check::Available(release)) => {
+                self.update.available = Some(release.clone());
+                self.update.notice = true;
+                #[cfg(target_os = "macos")]
+                if release.native {
+                    self.update.open = false;
+                    crate::update::macos::install_latest(release.version);
+                    return;
+                }
+                if release.installable() {
+                    self.update.progress = Some(0.0);
+                    self.backend.install_update(release);
+                } else {
+                    self.update.open = true;
+                }
             }
-            return;
+            Ok(status) => {
+                self.update.available = None;
+                self.update.notice = false;
+                self.update.open = false;
+                self.update.up_to_date = matches!(status, Check::Current);
+                self.update.not_published = matches!(status, Check::NotPublished);
+                self.toast(if self.update.up_to_date {
+                    "Moosik is up to date"
+                } else {
+                    "Updates aren’t published yet"
+                });
+            }
+            Err(error) => {
+                self.update.error = Some(error.clone());
+                self.toast_error(&failure_text("Could not check for updates", &error));
+            }
         }
-        self.update.progress = Some(0.0);
-        self.update.error = None;
-        self.backend.install_update(release);
     }
 
     /// The titlebar's own close button was clicked: hide to the tray if that's configured,
@@ -5072,6 +5105,7 @@ impl App {
                     self.local_scan_error = Some(error);
                 }
 
+                Event::LatestUpdate(result) => self.use_latest_update(result),
                 Event::UpdateChecked { release, manual } => {
                     self.update.checking = false;
                     self.update.error = None;
@@ -8411,6 +8445,7 @@ impl eframe::App for App {
     /// minimized window played its song out and stopped there, and answered no media key.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
+        self.refresh_update_if_requested();
         if (self.update.native || self.settings.check_for_updates)
             && let Some(next) = self.update.next_check
         {
@@ -8460,6 +8495,7 @@ impl eframe::App for App {
         while let Some(event) = crate::update::macos::poll() {
             use crate::update::macos::Event;
             match event {
+                Event::ShowOffer => self.update.open = true,
                 Event::Available(version) => {
                     self.update.not_published = false;
                     self.update.available = Some(crate::update::native_release(version));

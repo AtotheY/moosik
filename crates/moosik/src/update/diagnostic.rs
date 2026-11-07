@@ -15,17 +15,27 @@ struct Probe {
     version: String,
     available: Option<String>,
     status: String,
+    refresh: Option<std::sync::mpsc::Receiver<anyhow::Result<super::Check>>>,
     state_file: PathBuf,
     state: serde_json::Value,
 }
 impl eframe::App for Probe {
     fn logic(&mut self, _: &egui::Context, _: &mut eframe::Frame) {
+        if let Some(result) = self.refresh.as_ref().and_then(|r| r.try_recv().ok()) {
+            self.refresh = None;
+            match result {
+                Ok(super::Check::Available(release)) => macos::install_latest(release.version),
+                Ok(_) => self.status = "No update available".into(),
+                Err(e) => self.status = e.to_string(),
+            }
+        }
         while let Some(event) = macos::poll() {
             match event {
                 Event::Available(v) => {
                     self.status = "Update available".into();
                     self.available = Some(v);
                 }
+                Event::ShowOffer => {}
                 Event::Current => self.status = "Up to date".into(),
                 Event::Failed(error) => self.status = error,
                 Event::Skipped => self.available = None,
@@ -54,9 +64,21 @@ impl eframe::App for Probe {
                     &format!("Update to {version} and restart"),
                     None,
                 )
-                && !macos::install_prepared()
+                && self.refresh.is_none()
             {
-                macos::check();
+                let url = macos::feed_url().unwrap();
+                let ctx = ui.ctx().clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.refresh = Some(rx);
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(super::latest_for_install(
+                        &reqwest::Client::new(),
+                        Some(&url),
+                    ));
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
             }
         });
         ui.label(&self.status);
@@ -92,6 +114,7 @@ pub fn run() -> eframe::Result {
             Ok(Box::new(Probe {
                 version,
                 available: None,
+                refresh: None,
                 status: "Ready".into(),
                 state_file,
                 state,
