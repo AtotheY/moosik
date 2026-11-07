@@ -164,7 +164,9 @@ jobs:
     uses: ./.github/workflows/moosik-windows.yml
   publish:
     if: github.ref_type == 'tag'
-    concurrency: moosik-publish-latest
+    concurrency:
+      group: moosik-publish-latest
+      queue: max
     needs: [macos-checks, macos, windows, linux]
     runs-on: ubuntu-latest
     permissions:
