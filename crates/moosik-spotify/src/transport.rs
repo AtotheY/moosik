@@ -1,4 +1,11 @@
-use std::{io::Read, sync::Arc, time::Duration};
+use std::{
+    io::Read,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::{SinkExt, StreamExt};
@@ -8,7 +15,7 @@ use reqwest::{
 };
 use serde_json::{Value, json};
 use tokio::{
-    sync::{OnceCell, oneshot, watch},
+    sync::{Mutex, OnceCell, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_tungstenite::tungstenite::{
@@ -23,6 +30,10 @@ use crate::{
 
 const LIMIT: usize = 16 * 1024 * 1024;
 const HARMONY: &str = "harmony:4.80.0-3cdf02c91";
+const PLATFORM: &str = "web_player windows 10.0.0;chrome 156.0.0.0;desktop";
+const MEDIA_REPORT_PLATFORM: &str = "web_player windows 10;chrome 156.0.0.0;desktop";
+const REPORT_TIMEOUT: Duration = Duration::from_secs(2);
+const REPORT_DIAGNOSTIC_LIMIT: usize = 2 * 1024;
 
 #[derive(Clone)]
 pub struct Transport {
@@ -39,6 +50,9 @@ struct Inner {
     license_cookie: HeaderValue,
     spclient: Url,
     service_certificate: OnceCell<Vec<u8>>,
+    playback_registration: Mutex<u64>,
+    playback_session: String,
+    verification_sequence: AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +71,198 @@ pub struct PreparedTrack {
     pub file_id: String,
     signed_url: OnceCell<Url>,
     dealer: Dealer,
+    reporting: Option<Mutex<ReportingState>>,
+    verification: Option<StreamVerification>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackReportKind {
+    Loading,
+    Started,
+    Paused,
+    Resumed,
+    Seeked,
+    ThresholdReached,
+    Finalized,
+}
+
+impl PlaybackReportKind {
+    fn debug_source(self) -> &'static str {
+        match self {
+            Self::Loading => "before_track_load",
+            Self::Started => "started_playing",
+            Self::Paused => "pause",
+            Self::Resumed => "resume",
+            Self::Seeked => "seek",
+            Self::ThresholdReached => "played_threshold_reached",
+            Self::Finalized => "track_data_finalized",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackReport {
+    pub kind: PlaybackReportKind,
+    pub position_ms: u64,
+    pub previous_position_ms: Option<u64>,
+    pub duration_ms: u64,
+    pub played_ms: u64,
+    pub start_offset_ms: u64,
+    pub paused: bool,
+    pub playback_speed: f64,
+    pub timeline: Option<PlaybackTimeline>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlaybackTimeline {
+    pub loaded_at_ms: u64,
+    pub started_at_ms: u64,
+    pub ended_at_ms: u64,
+}
+
+impl PlaybackTimeline {
+    fn is_ordered(&self) -> bool {
+        self.loaded_at_ms > 0
+            && self.loaded_at_ms <= self.started_at_ms
+            && self.started_at_ms < self.ended_at_ms
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlaybackReference {
+    state_machine_id: String,
+    state_id: String,
+}
+
+#[derive(Clone)]
+struct SelectedPlayback {
+    reference: PlaybackReference,
+    file_id: String,
+}
+
+struct StreamVerification {
+    playback_id: String,
+    internal_play_id: u64,
+    bitrate: Option<u64>,
+    sequence: OnceLock<u64>,
+    sent: AtomicBool,
+    stats_sent: AtomicBool,
+    media_sent: AtomicBool,
+    start_sent: AtomicBool,
+    initially_paused: OnceLock<bool>,
+    playback_media: OnceLock<PlaybackMedia>,
+}
+
+struct PlaybackMedia {
+    total_bytes: u64,
+    persistent_cached: bool,
+}
+
+impl StreamVerification {
+    fn new(playback_id: String, internal_play_id: u64, bitrate: Option<u64>) -> Self {
+        Self {
+            playback_id,
+            internal_play_id,
+            bitrate,
+            sequence: OnceLock::new(),
+            sent: AtomicBool::new(false),
+            stats_sent: AtomicBool::new(false),
+            media_sent: AtomicBool::new(false),
+            start_sent: AtomicBool::new(false),
+            initially_paused: OnceLock::new(),
+            playback_media: OnceLock::new(),
+        }
+    }
+
+    fn sequence(&self, next: &AtomicU64) -> u64 {
+        *self
+            .sequence
+            .get_or_init(|| next.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+struct ReportingState {
+    registration: u64,
+    sequence: u64,
+    updated_reference: Option<(PlaybackReference, PlaybackReference)>,
+    closed: bool,
+    bitrate: Option<u64>,
+    format: Option<u64>,
+    audio_quality: Option<String>,
+}
+
+impl ReportingState {
+    fn payload(
+        &mut self,
+        reference: &PlaybackReference,
+        metadata_duration_ms: Option<u64>,
+        report: PlaybackReport,
+    ) -> Result<Value> {
+        let stationary = report.paused || report.kind == PlaybackReportKind::Loading;
+        if !stationary && (!report.playback_speed.is_finite() || report.playback_speed <= 0.0) {
+            return Err(Error::Invalid("playback speed"));
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(Error::Invalid("playback sequence"))?;
+        let mut payload = json!({
+            "seq_num": self.sequence,
+            "state_ref": {
+                "state_machine_id": reference.state_machine_id,
+                "state_id": reference.state_id,
+                "paused": report.paused,
+            },
+            "sub_state": {
+                "playback_speed": if stationary { 0.0 } else { report.playback_speed },
+                "position": report.position_ms,
+                "media_type": "AUDIO",
+                "is_video_on": false,
+            },
+            "debug_source": report.kind.debug_source(),
+        });
+        let sub_state = &mut payload["sub_state"];
+        if report.duration_ms > 0 {
+            sub_state["duration"] = json!(report.duration_ms);
+        }
+        if let Some(bitrate) = self.bitrate {
+            sub_state["bitrate"] = json!(bitrate);
+        }
+        if let Some(format) = self.format {
+            sub_state["format"] = json!(format);
+        }
+        if let Some(quality) = &self.audio_quality {
+            sub_state["audio_quality"] = json!(quality);
+        }
+        let previous_position = match report.kind {
+            PlaybackReportKind::Started
+            | PlaybackReportKind::Paused
+            | PlaybackReportKind::Resumed
+            | PlaybackReportKind::ThresholdReached => Some(report.position_ms),
+            _ => report.previous_position_ms,
+        };
+        if let Some(previous_position) = previous_position {
+            payload["previous_position"] = json!(previous_position);
+        }
+        if report.kind == PlaybackReportKind::Finalized {
+            const CODEC: &str = "mp4a.40.2";
+            let mut stats = json!({
+                "ms_total_est": report.duration_ms,
+                "start_offset_ms": report.start_offset_ms,
+                "audiocodec": CODEC,
+                "key_system": "widevine",
+            });
+            if let Some(duration) = metadata_duration_ms {
+                stats["ms_metadata_duration"] = json!(duration);
+            }
+            if let Some(bitrate) = self.bitrate.filter(|bitrate| *bitrate > 0) {
+                let format = format!("{CODEC};{bitrate}");
+                stats["ms_played_per_audio_format"] = json!({ (format): report.played_ms });
+            }
+            payload["playback_stats"] = stats;
+        }
+        Ok(payload)
+    }
 }
 
 pub struct RangeData {
@@ -66,6 +272,7 @@ pub struct RangeData {
 
 struct Dealer {
     task: JoinHandle<()>,
+    selected: watch::Receiver<Option<SelectedPlayback>>,
 }
 
 impl Drop for Dealer {
@@ -77,6 +284,25 @@ impl Drop for Dealer {
 impl PreparedTrack {
     pub fn dealer_connected(&self) -> bool {
         !self.dealer.task.is_finished()
+    }
+
+    pub fn record_playback_media(&self, total_bytes: u64, persistent_cached: bool) {
+        if let Some(verification) = &self.verification {
+            let _ = verification.playback_media.set(PlaybackMedia {
+                total_bytes: if persistent_cached { 0 } else { total_bytes },
+                persistent_cached,
+            });
+        }
+    }
+
+    pub fn can_report_playback(&self) -> bool {
+        self.reporting.is_some()
+            && self
+                .dealer
+                .selected
+                .borrow()
+                .as_ref()
+                .is_some_and(|selection| selection.file_id == self.file_id)
     }
 }
 
@@ -246,6 +472,9 @@ impl Transport {
                 license_cookie,
                 spclient,
                 service_certificate: OnceCell::new(),
+                playback_registration: Mutex::new(0),
+                playback_session: now_ms()?.to_string(),
+                verification_sequence: AtomicU64::new(0),
             }),
         })
     }
@@ -321,11 +550,14 @@ impl Transport {
         }
         let (dealer, connection_id, mut manifests) = self.connect_dealer(uri).await?;
         let device = &self.inner.device_id;
-        self.api(Method::POST, "/track-playback/v1/devices", Some(json!({
+        let mut registration = self.inner.playback_registration.lock().await;
+        *registration = registration.wrapping_add(1);
+        let registration_id = *registration;
+        let registered = self.api(Method::POST, "/track-playback/v1/devices", Some(json!({
             "device": {
                 "brand":"spotify", "device_id":device, "device_type":"computer", "metadata":{},
                 "model":"web_player", "name":"Moosik", "is_group":false, "is_public":false,
-                "platform_identifier":"web_player windows 10.0.0;chrome 156.0.0.0;desktop",
+                "platform_identifier":PLATFORM,
                 "correlation_id":correlation(), "client_version":HARMONY,
                 "capabilities": {
                     "change_volume":true, "enable_play_token":true, "supports_file_media_type":true,
@@ -346,6 +578,7 @@ impl Transport {
                 "endpoint":"play"
             }
         })), "play request").await?;
+        drop(registration);
         let resolved = tokio::time::timeout(Duration::from_secs(18), async {
             loop {
                 if let Some(value) = manifests.borrow_and_update().clone() {
@@ -356,18 +589,304 @@ impl Transport {
         })
         .await
         .map_err(|_| Error::Timeout("manifest"))??;
-        let file_id = resolved
-            .pointer("/manifest/file_ids_mp4/0/file_id")
-            .and_then(Value::as_str)
-            .filter(|id| id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        let file = &resolved["manifest"]["file_ids_mp4"][0];
+        let file_id = audio_file_id(file)
             .ok_or(Error::Invalid("audio manifest"))?
             .to_owned();
+        let bitrate = unsigned_number(&file["bitrate"]).or_else(|| {
+            file.get("bitrate")
+                .is_none_or(Value::is_null)
+                .then_some(128_000)
+        });
+        let reporting = unsigned_number(&registered["initial_seq_num"]).map(|sequence| {
+            Mutex::new(ReportingState {
+                registration: registration_id,
+                sequence,
+                updated_reference: None,
+                closed: false,
+                bitrate,
+                format: unsigned_number(&file["format"]),
+                audio_quality: file["audio_quality"].as_str().map(str::to_owned),
+            })
+        });
+        let verification = dealer
+            .selected
+            .borrow()
+            .as_ref()
+            .filter(|selection| selection.file_id == file_id)
+            .map(|selection| {
+                StreamVerification::new(
+                    selection.reference.state_id.clone(),
+                    registration_id,
+                    bitrate,
+                )
+            });
         Ok(PreparedTrack {
             metadata: metadata(&resolved, uri),
             file_id,
             signed_url: OnceCell::new(),
             dealer,
+            reporting,
+            verification,
         })
+    }
+
+    pub async fn report_playback(
+        &self,
+        authorization: &Transport,
+        track: &PreparedTrack,
+        report: PlaybackReport,
+    ) -> Result<bool> {
+        if report.kind == PlaybackReportKind::Loading
+            && let Some(verification) = &track.verification
+        {
+            let _ = verification.initially_paused.set(report.paused);
+        }
+        let Some(reporting) = &track.reporting else {
+            return Ok(false);
+        };
+        let registration = self.inner.playback_registration.lock().await;
+        let mut reporting = reporting.lock().await;
+        if *registration != reporting.registration || reporting.closed {
+            return Ok(false);
+        }
+        let Some(selection) = track
+            .dealer
+            .selected
+            .borrow()
+            .as_ref()
+            .filter(|selection| selection.file_id == track.file_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let headers = self.report_headers(authorization)?;
+        let reference = reporting
+            .updated_reference
+            .as_ref()
+            .filter(|(original, _)| original == &selection.reference)
+            .map_or(&selection.reference, |(_, updated)| updated);
+        let reference = reference.clone();
+        let payload = reporting.payload(&reference, track.metadata.duration_ms, report)?;
+        let response = tokio::time::timeout(
+            REPORT_TIMEOUT,
+            self.api_with_headers(
+                Method::PUT,
+                &format!("/track-playback/v1/devices/{}/state", self.inner.device_id),
+                Some(payload),
+                "playback report",
+                headers,
+            ),
+        )
+        .await
+        .map_err(|_| Error::Timeout("playback report"))??;
+        if let Some((selected, updated)) = selected_track(&response, "updated_state_ref") {
+            if selected.pointer("/metadata/uri").and_then(Value::as_str)
+                == Some(&track.metadata.uri)
+                && audio_file_id(&selected["manifest"]["file_ids_mp4"][0]) == Some(&track.file_id)
+            {
+                reporting.updated_reference = Some((selection.reference, updated));
+            } else {
+                reporting.closed = true;
+            }
+        }
+        Ok(true)
+    }
+
+    pub async fn report_stream_verification(
+        &self,
+        authorization: &Transport,
+        track: &PreparedTrack,
+        report: PlaybackReport,
+    ) -> Result<bool> {
+        const STAGE: &str = "stream verification";
+        let Some(verification) = &track.verification else {
+            return Ok(false);
+        };
+        if report.kind != PlaybackReportKind::Finalized
+            || report.played_ms == 0
+            || report.playback_speed != 1.0
+        {
+            return Ok(false);
+        }
+        let headers = self.report_headers(authorization)?;
+        if verification.sent.swap(true, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let sequence = verification.sequence(&self.inner.verification_sequence);
+        let session = &self.inner.playback_session;
+        let message = json!({
+            "type": "track_stream_verification",
+            "message": {
+                "play_track": track.metadata.uri,
+                "playback_id": verification.playback_id,
+                "ms_played": report.played_ms,
+                "ms_nominal_played": report.played_ms,
+                "session_id": session,
+                "sequence_id": sequence,
+                "next_playback_id": "",
+                "playback_service": "track-playback",
+            },
+        });
+        self.send_melody_report(headers, stream_report_batch(vec![message]), STAGE)
+            .await
+    }
+
+    pub async fn report_playback_stats(
+        &self,
+        authorization: &Transport,
+        track: &PreparedTrack,
+        report: PlaybackReport,
+    ) -> Result<bool> {
+        let Some(verification) = &track.verification else {
+            return Ok(false);
+        };
+        let Some(timeline) = report.timeline.filter(PlaybackTimeline::is_ordered) else {
+            return Ok(false);
+        };
+        if report.kind != PlaybackReportKind::Finalized
+            || report.played_ms == 0
+            || report.playback_speed != 1.0
+        {
+            return Ok(false);
+        }
+        let headers = self.report_headers(authorization)?;
+        if verification.stats_sent.swap(true, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let message = playback_stats_message(
+            track,
+            verification,
+            report,
+            timeline,
+            &self.inner.playback_session,
+            verification.sequence(&self.inner.verification_sequence),
+        );
+        self.send_melody_report(
+            headers,
+            stream_report_batch(vec![message]),
+            "playback stats",
+        )
+        .await
+    }
+
+    pub async fn report_playback_start(
+        &self,
+        authorization: &Transport,
+        track: &PreparedTrack,
+        report: PlaybackReport,
+    ) -> Result<bool> {
+        let Some(verification) = &track.verification else {
+            return Ok(false);
+        };
+        if report.kind != PlaybackReportKind::Started || report.played_ms == 0 {
+            return Ok(false);
+        }
+        let headers = self.report_headers(authorization)?;
+        if verification.start_sent.swap(true, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let message =
+            playback_start_message(track, verification, report, &self.inner.playback_session);
+        self.send_melody_report(
+            headers,
+            stream_report_batch(vec![message]),
+            "playback start",
+        )
+        .await
+    }
+
+    pub async fn report_media_playback(
+        &self,
+        authorization: &Transport,
+        track: &PreparedTrack,
+        report: PlaybackReport,
+    ) -> Result<bool> {
+        let Some(verification) = &track.verification else {
+            return Ok(false);
+        };
+        let Some(timeline) = report.timeline.filter(PlaybackTimeline::is_ordered) else {
+            return Ok(false);
+        };
+        if report.kind != PlaybackReportKind::Finalized || report.played_ms == 0 {
+            return Ok(false);
+        }
+        let headers = self.report_headers(authorization)?;
+        if verification.media_sent.swap(true, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        self.send_melody_report(
+            headers,
+            media_playback_payload(track, &verification.playback_id, report, timeline),
+            "media playback",
+        )
+        .await
+    }
+
+    async fn send_melody_report(
+        &self,
+        headers: &HeaderMap,
+        payload: Value,
+        stage: &'static str,
+    ) -> Result<bool> {
+        let url = self
+            .inner
+            .spclient
+            .join("/melody/v1/msg/batch")
+            .map_err(|_| Error::Invalid("Melody endpoint"))?;
+        let response = self
+            .inner
+            .http
+            .post(url)
+            .headers(headers.clone())
+            .json(&payload)
+            .timeout(REPORT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    Error::Timeout(stage)
+                } else {
+                    Error::Network(stage)
+                }
+            })?;
+        let status = response.status();
+        if matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            let diagnostic = body(response, REPORT_DIAGNOSTIC_LIMIT, stage)
+                .await
+                .map_or_else(
+                    |_| "diagnostic unavailable".to_owned(),
+                    |bytes| report_rejection(&bytes, &payload),
+                );
+            return Err(Error::ReportRejected {
+                stage,
+                status: status.as_u16(),
+                diagnostic,
+            });
+        }
+        if status != reqwest::StatusCode::ACCEPTED {
+            return Err(Error::Http {
+                stage,
+                status: status.as_u16(),
+            });
+        }
+        Ok(true)
+    }
+
+    fn report_headers<'a>(&self, authorization: &'a Transport) -> Result<&'a HeaderMap> {
+        let authorization = &authorization.inner;
+        if authorization.device_id != self.inner.device_id
+            || authorization.license_cookie != self.inner.license_cookie
+        {
+            return Err(Error::AuthorizationDenied);
+        }
+        if authorization.expires_at <= now_ms()? {
+            return Err(Error::AuthorizationExpired);
+        }
+        Ok(&authorization.headers)
     }
 
     async fn storage_url<'a>(&self, track: &'a PreparedTrack) -> Result<&'a Url> {
@@ -509,6 +1028,18 @@ impl Transport {
         payload: Option<Value>,
         stage: &'static str,
     ) -> Result<Value> {
+        self.api_with_headers(method, path, payload, stage, &self.inner.headers)
+            .await
+    }
+
+    async fn api_with_headers(
+        &self,
+        method: Method,
+        path: &str,
+        payload: Option<Value>,
+        stage: &'static str,
+        headers: &HeaderMap,
+    ) -> Result<Value> {
         let url = self
             .inner
             .spclient
@@ -518,7 +1049,7 @@ impl Transport {
             .inner
             .http
             .request(method, url)
-            .headers(self.inner.headers.clone());
+            .headers(headers.clone());
         if let Some(payload) = payload {
             request = request.json(&payload);
         }
@@ -560,6 +1091,7 @@ impl Transport {
         .map_err(|_| Error::Network("Dealer connect"))?;
         let (connection_tx, connection_rx) = oneshot::channel();
         let (manifest_tx, manifest_rx) = watch::channel(None);
+        let (selected_tx, selected) = watch::channel(None);
         let wanted = uri.to_owned();
         let task = tokio::spawn(async move {
             let (mut output, mut input) = socket.split();
@@ -597,13 +1129,11 @@ impl Transport {
                         {
                             break;
                         }
-                        if let Some(found) = find_manifest(&value, &wanted, 0) { let _ = manifest_tx.send(Some(found.clone())); }
+                        observe_dealer_payload(&value, &wanted, &manifest_tx, &selected_tx);
                         if let Some(payloads) = value["payloads"].as_array() {
                             for payload in payloads.iter().filter_map(Value::as_str) {
-                                if let Some(payload) = decode_payload(payload)
-                                    && let Some(found) = find_manifest(&payload, &wanted, 0)
-                                {
-                                    let _ = manifest_tx.send(Some(found.clone()));
+                                if let Some(payload) = decode_payload(payload) {
+                                    observe_dealer_payload(&payload, &wanted, &manifest_tx, &selected_tx);
                                 }
                             }
                         }
@@ -611,7 +1141,7 @@ impl Transport {
                 }
             }
         });
-        let dealer = Dealer { task };
+        let dealer = Dealer { task, selected };
         let connection = tokio::time::timeout(Duration::from_secs(12), connection_rx)
             .await
             .map_err(|_| Error::Timeout("Dealer connection identity"))?
@@ -740,6 +1270,291 @@ async fn body(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+fn unsigned_number(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn stream_report_batch(messages: Vec<Value>) -> Value {
+    json!({
+        "messages": messages,
+        "sdk_id": HARMONY.split_once('-').map_or(HARMONY, |(version, _)| version),
+        "platform": PLATFORM,
+        "client_version": "0.0.0",
+    })
+}
+
+fn report_rejection(bytes: &[u8], payload: &Value) -> String {
+    let reply = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    let reason = if reply.contains("missing") || reply.contains("required") {
+        "missing required data"
+    } else if reply.contains("type") || reply.contains("expected") {
+        "unexpected type or value"
+    } else if reply.contains("unknown") || reply.contains("unsupported") {
+        "unknown or unsupported data"
+    } else if reply.contains("invalid") || reply.contains("malformed") {
+        "invalid data"
+    } else {
+        "unclassified rejection"
+    };
+    let field = payload["messages"][0]["message"]
+        .as_object()
+        .and_then(|fields| {
+            reply
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .find_map(|word| fields.get_key_value(word).map(|(field, _)| field))
+        });
+    field.map_or_else(
+        || reason.to_owned(),
+        |field| format!("{reason} for {field}"),
+    )
+}
+
+fn playback_start_message(
+    track: &PreparedTrack,
+    verification: &StreamVerification,
+    report: PlaybackReport,
+    session: &str,
+) -> Value {
+    let mut message = json!({
+        "play_track": track.metadata.uri,
+        "file_id": track.file_id,
+        "playback_id": verification.playback_id,
+        "session_id": session,
+        "ms_start_position": report.start_offset_ms,
+        "feature_identifier": "",
+    });
+    if let Some(paused) = verification.initially_paused.get() {
+        message["initially_paused"] = json!(paused);
+    }
+    json!({"type": "jssdk_playback_start", "message": message})
+}
+
+fn playback_stats_message(
+    track: &PreparedTrack,
+    verification: &StreamVerification,
+    report: PlaybackReport,
+    timeline: PlaybackTimeline,
+    session: &str,
+    sequence: u64,
+) -> Value {
+    const CODEC: &str = "mp4a.40.2";
+    let media = verification.playback_media.get();
+    let bitrate = verification.bitrate.filter(|bitrate| *bitrate > 0);
+    let played_per_audio_format = bitrate.map_or_else(
+        || json!({}),
+        |bitrate| json!({ (format!("{CODEC};{bitrate}")): report.played_ms }),
+    );
+    let mut message = json!({
+        "play_track": track.metadata.uri,
+        "file_id": track.file_id,
+        "manifest_id": track.file_id,
+        "playback_id": verification.playback_id,
+        "internal_play_id": verification.internal_play_id.to_string(),
+        "session_id": session,
+        "sequence_id": sequence,
+        "audio_format": "mp4",
+        "video_format": "",
+        "protected": true,
+        "key_system": "com.widevine.alpha",
+        "key_system_impl": "native",
+        "memory_cached": false,
+        "persistent_cached": media.is_some_and(|media| media.persistent_cached),
+        "urls_json": r#"{"version":"1.0.0","urls":[]}"#,
+        "start_time": timeline.loaded_at_ms,
+        "end_time": timeline.ended_at_ms,
+        "external_start_time": 0,
+        "ms_play_latency": timeline.started_at_ms - timeline.loaded_at_ms,
+        "ms_played": report.played_ms,
+        "ms_nominal_played": report.played_ms,
+        "ms_file_duration": report.duration_ms,
+        "ms_actual_duration": report.duration_ms,
+        "ms_metadata_duration": track.metadata.duration_ms.unwrap_or_default(),
+        "ms_start_position": report.start_offset_ms,
+        "ms_end_position": report.position_ms,
+        "ms_played_per_surface": {},
+        "ms_played_per_audio_format": played_per_audio_format,
+        "ms_played_per_video_format": {},
+        "audio_start_bitrate": bitrate,
+        "video_start_bitrate": null,
+        "start_bitrate": bitrate.unwrap_or_default(),
+        "reason_start": "remote",
+        "reason_end": "trackdone",
+        "initially_paused": verification.initially_paused.get().copied().unwrap_or_default(),
+        "had_error": false,
+        "client_id": "",
+        "correlation_id": "",
+        "total_bytes": media.map_or(0, |media| media.total_bytes),
+        "strategy": "MSE",
+    });
+    for field in [
+        "ms_pre_play_latency",
+        "ms_init_latency",
+        "ms_head_latency",
+        "ms_first_bytes_latency",
+        "ms_first_append_done_latency",
+        "ms_key_system_info_latency",
+        "ms_manifest_latency",
+        "ms_manifest_parse_latency",
+        "ms_resolve_latency",
+        "ms_license_session_latency",
+        "ms_license_generation_latency",
+        "ms_license_request_latency",
+        "ms_license_update_latency",
+    ] {
+        message[field] = Value::Null;
+    }
+    for field in [
+        "ms_initial_rebuffer",
+        "ms_seek_rebuffer",
+        "ms_seek_rebuffer_longest",
+        "ms_stall_rebuffer",
+        "ms_stall_rebuffer_longest",
+        "ms_played_visible",
+        "n_stalls",
+        "n_rendition_upgrade",
+        "n_rendition_downgrade",
+        "bps_bandwidth_max",
+        "bps_bandwidth_min",
+        "bps_bandwidth_avg",
+        "n_seekback",
+        "n_seekforward",
+        "time_weighted_bitrate",
+        "n_warnings",
+        "n_navigator_offline",
+        "n_dropped_video_frames",
+        "n_total_video_frames",
+        "resolution_max",
+        "resolution_min",
+    ] {
+        message[field] = json!(0);
+    }
+    json!({"type": "jssdk_playback_stats", "message": message})
+}
+
+fn media_playback_payload(
+    track: &PreparedTrack,
+    playback_id: &str,
+    report: PlaybackReport,
+    timeline: PlaybackTimeline,
+) -> Value {
+    json!({
+        "messages": [{
+            "type": "media_playback_event_v2",
+            "message": {
+                "events": [{
+                    "sn": 0,
+                    "ct": timeline.loaded_at_ms,
+                    "ms": {
+                        "mu": format!("spotify-audio://{}", track.file_id),
+                        "fi": "",
+                        "pi": playback_id,
+                        "si": "",
+                        "mt": "audio",
+                    },
+                    "ps": {
+                        "md": 0,
+                        "ip": true,
+                        "pp": report.start_offset_ms,
+                        "sp": 1,
+                        "br": 0,
+                        "pd": "device",
+                        "ao": true,
+                    },
+                    "et": 0,
+                    "ur": track.metadata.uri,
+                    "pc": "",
+                    "xt": "audio",
+                }, {
+                    "sn": 1,
+                    "ct": timeline.started_at_ms,
+                    "ms": {},
+                    "ps": {"pp": report.start_offset_ms, "md": report.duration_ms},
+                    "et": 4,
+                }, {
+                    "sn": 2,
+                    "ct": timeline.ended_at_ms,
+                    "ms": {},
+                    "ps": {"md": report.duration_ms, "pp": report.position_ms},
+                    "et": 10,
+                    "rn": 5,
+                    "bt": -1,
+                    "rf": 0,
+                    "df": 0,
+                }],
+                "context": {
+                    "device": {"manufacturer": "spotify", "model": "web_player", "type": "computer"},
+                    "os": {"name": "", "version": ""},
+                },
+            },
+        }],
+        "sdk_id": HARMONY,
+        "platform": MEDIA_REPORT_PLATFORM,
+        "client_version": "0.0.0",
+    })
+}
+
+fn audio_file_id(file: &Value) -> Option<&str> {
+    file["file_id"]
+        .as_str()
+        .filter(|id| id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn selected_track<'a>(value: &'a Value, reference: &str) -> Option<(&'a Value, PlaybackReference)> {
+    let machine = &value["state_machine"];
+    let state_index = usize::try_from(unsigned_number(&value[reference]["state_index"])?).ok()?;
+    let state = machine["states"].get(state_index)?;
+    let track_index = usize::try_from(unsigned_number(&state["track"])?).ok()?;
+    let track = machine["tracks"].get(track_index)?;
+    let reference = PlaybackReference {
+        state_machine_id: machine["state_machine_id"].as_str()?.to_owned(),
+        state_id: state["state_id"].as_str()?.to_owned(),
+    };
+    Some((track, reference))
+}
+
+fn find_replace_state(value: &Value, depth: usize) -> Option<&Value> {
+    if depth > 14 {
+        return None;
+    }
+    if value["type"].as_str() == Some("replace_state") {
+        return Some(value);
+    }
+    match value {
+        Value::Object(values) => values
+            .values()
+            .find_map(|value| find_replace_state(value, depth + 1)),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_replace_state(value, depth + 1)),
+        _ => None,
+    }
+}
+
+fn observe_dealer_payload(
+    value: &Value,
+    uri: &str,
+    manifests: &watch::Sender<Option<Value>>,
+    selections: &watch::Sender<Option<SelectedPlayback>>,
+) {
+    if let Some(command) = find_replace_state(value, 0) {
+        if let Some((track, reference)) = selected_track(command, "state_ref")
+            && track.pointer("/metadata/uri").and_then(Value::as_str) == Some(uri)
+            && let Some(file_id) = audio_file_id(&track["manifest"]["file_ids_mp4"][0])
+        {
+            let _ = selections.send(Some(SelectedPlayback {
+                reference,
+                file_id: file_id.to_owned(),
+            }));
+            let _ = manifests.send(Some(track.clone()));
+            return;
+        }
+        let _ = selections.send(None);
+    }
+    if let Some(track) = find_manifest(value, uri, 0) {
+        let _ = manifests.send(Some(track.clone()));
+    }
 }
 
 fn find_manifest<'a>(value: &'a Value, uri: &str, depth: usize) -> Option<&'a Value> {
@@ -921,6 +1736,9 @@ mod tests {
                 license_cookie: HeaderValue::from_static("sp_dc=test"),
                 spclient: Url::parse("http://127.0.0.1/").unwrap(),
                 service_certificate: OnceCell::new(),
+                playback_registration: Mutex::new(0),
+                playback_session: "123456789".to_owned(),
+                verification_sequence: AtomicU64::new(0),
             }),
         }
     }
@@ -940,8 +1758,380 @@ mod tests {
             signed_url: OnceCell::new(),
             dealer: Dealer {
                 task: tokio::spawn(std::future::pending()),
+                selected: watch::channel(None).1,
             },
+            reporting: None,
+            verification: None,
         }
+    }
+
+    #[test]
+    fn dealer_reports_only_the_selected_track_and_audio_file() {
+        let requested = "spotify:track:0000000000000000000000";
+        let file = "0123456789abcdef0123456789abcdef01234567";
+        let mut message = json!({
+            "payloads": [{
+                "type": "replace_state",
+                "state_ref": { "state_index": 0 },
+                "state_machine": {
+                    "state_machine_id": "machine",
+                    "states": [
+                        {"state_id": "other", "track": 0},
+                        {"state_id": "requested", "track": 1},
+                    ],
+                    "tracks": [
+                        {"metadata": {"uri": "spotify:track:other"}},
+                        {
+                            "metadata": {"uri": requested},
+                            "manifest": {"file_ids_mp4": [{"file_id": file}]},
+                        },
+                    ],
+                },
+            }],
+        });
+        let (manifest_tx, manifests) = watch::channel(None);
+        let (selection_tx, selections) = watch::channel(None);
+        observe_dealer_payload(&message, requested, &manifest_tx, &selection_tx);
+        assert!(manifests.borrow().is_some());
+        assert!(selections.borrow().is_none());
+
+        message["payloads"][0]["state_ref"]["state_index"] = json!(1);
+        observe_dealer_payload(&message, requested, &manifest_tx, &selection_tx);
+        let selections = selections.borrow();
+        let selection = selections.as_ref().unwrap();
+        assert_eq!(selection.file_id, file);
+        assert_eq!(selection.reference.state_machine_id, "machine");
+        assert_eq!(selection.reference.state_id, "requested");
+    }
+
+    #[test]
+    fn playback_reports_preserve_actual_positions_and_sequence() {
+        let mut reporting = ReportingState {
+            registration: 1,
+            sequence: 19,
+            updated_reference: None,
+            closed: false,
+            bitrate: Some(128_000),
+            format: Some(19),
+            audio_quality: None,
+        };
+        let reference = PlaybackReference {
+            state_machine_id: "machine".to_owned(),
+            state_id: "track".to_owned(),
+        };
+        let threshold = PlaybackReport {
+            kind: PlaybackReportKind::ThresholdReached,
+            position_ms: 35_500,
+            previous_position_ms: Some(35_250),
+            duration_ms: 90_000,
+            played_ms: 31_500,
+            start_offset_ms: 4_000,
+            paused: false,
+            playback_speed: 1.0,
+            timeline: None,
+        };
+        let first = reporting
+            .payload(&reference, Some(90_100), threshold)
+            .unwrap();
+        assert_eq!(first["seq_num"], 20);
+        assert_eq!(first["previous_position"], 35_500);
+        assert_eq!(first["debug_source"], "played_threshold_reached");
+        assert_eq!(first["sub_state"]["media_type"], "AUDIO");
+        assert!(first.get("playback_stats").is_none());
+        assert!(first["sub_state"].get("audio_quality").is_none());
+
+        let finalized = PlaybackReport {
+            kind: PlaybackReportKind::Finalized,
+            position_ms: 90_000,
+            previous_position_ms: Some(89_750),
+            played_ms: 80_000,
+            paused: true,
+            ..threshold
+        };
+        let second = reporting
+            .payload(&reference, Some(90_100), finalized)
+            .unwrap();
+        assert_eq!(second["seq_num"], 21);
+        assert_eq!(second["debug_source"], "track_data_finalized");
+        assert_eq!(second["sub_state"]["position"], 90_000);
+        assert_eq!(second["sub_state"]["playback_speed"], 0.0);
+        assert_eq!(second["previous_position"], 89_750);
+        assert_eq!(second["playback_stats"]["ms_metadata_duration"], 90_100);
+        assert_eq!(
+            second["playback_stats"]["ms_played_per_audio_format"]["mp4a.40.2;128000"],
+            80_000
+        );
+
+        let loading = PlaybackReport {
+            kind: PlaybackReportKind::Loading,
+            position_ms: 0,
+            previous_position_ms: None,
+            played_ms: 0,
+            ..threshold
+        };
+        let third = reporting.payload(&reference, None, loading).unwrap();
+        assert_eq!(third["sub_state"]["playback_speed"], 0.0);
+        assert!(third.get("previous_position").is_none());
+        let started = PlaybackReport {
+            kind: PlaybackReportKind::Started,
+            position_ms: 1_250,
+            previous_position_ms: Some(1_000),
+            played_ms: 1_250,
+            ..threshold
+        };
+        let fourth = reporting.payload(&reference, None, started).unwrap();
+        assert_eq!(fourth["sub_state"]["playback_speed"], 1.0);
+        assert_eq!(fourth["previous_position"], 1_250);
+
+        let paused = PlaybackReport {
+            kind: PlaybackReportKind::Paused,
+            paused: true,
+            ..started
+        };
+        let pause_payload = reporting.payload(&reference, None, paused).unwrap();
+        assert_eq!(pause_payload["debug_source"], "pause");
+        assert_eq!(pause_payload["state_ref"]["paused"], true);
+        assert_eq!(pause_payload["sub_state"]["playback_speed"], 0.0);
+        assert_eq!(pause_payload["previous_position"], 1_250);
+
+        let seeked = PlaybackReport {
+            kind: PlaybackReportKind::Seeked,
+            previous_position_ms: Some(1_250),
+            position_ms: 22_000,
+            ..paused
+        };
+        let seek_payload = reporting.payload(&reference, None, seeked).unwrap();
+        assert_eq!(seek_payload["debug_source"], "seek");
+        assert_eq!(seek_payload["sub_state"]["position"], 22_000);
+        assert_eq!(seek_payload["previous_position"], 1_250);
+        assert_eq!(seek_payload["sub_state"]["playback_speed"], 0.0);
+
+        let resumed = PlaybackReport {
+            kind: PlaybackReportKind::Resumed,
+            paused: false,
+            ..seeked
+        };
+        let resume_payload = reporting.payload(&reference, None, resumed).unwrap();
+        assert_eq!(resume_payload["debug_source"], "resume");
+        assert_eq!(resume_payload["state_ref"]["paused"], false);
+        assert_eq!(resume_payload["sub_state"]["playback_speed"], 1.0);
+        assert_eq!(resume_payload["previous_position"], 22_000);
+    }
+
+    #[tokio::test]
+    async fn stream_verification_uses_refreshed_credentials_and_the_original_play() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut original = transport(0);
+        Arc::get_mut(&mut original.inner).unwrap().spclient =
+            Url::parse(&format!("http://{}", server.local_addr().unwrap())).unwrap();
+        let mut authorization = transport(u64::MAX);
+        let auth = Arc::get_mut(&mut authorization.inner).unwrap();
+        auth.playback_session = "different-auth-session".to_owned();
+        auth.headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer refreshed-test"),
+        );
+        let mut unrelated = transport(u64::MAX);
+        Arc::get_mut(&mut unrelated.inner).unwrap().license_cookie =
+            HeaderValue::from_static("sp_dc=unrelated");
+        let mut track = prepared_track("file");
+        let verification = StreamVerification::new("original-state".to_owned(), 5, Some(128_000));
+        verification.initially_paused.set(true).unwrap();
+        track.verification = Some(verification);
+        track.record_playback_media(12_345, true);
+        let report = PlaybackReport {
+            kind: PlaybackReportKind::Finalized,
+            position_ms: 90_000,
+            previous_position_ms: Some(89_750),
+            duration_ms: 90_000,
+            played_ms: 80_000,
+            start_offset_ms: 0,
+            paused: true,
+            playback_speed: 1.0,
+            timeline: Some(PlaybackTimeline {
+                loaded_at_ms: 100_000,
+                started_at_ms: 100_800,
+                ended_at_ms: 180_800,
+            }),
+        };
+        assert!(
+            !original
+                .report_stream_verification(
+                    &authorization,
+                    &track,
+                    PlaybackReport {
+                        played_ms: 0,
+                        ..report
+                    }
+                )
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            original
+                .report_stream_verification(&original, &track, report)
+                .await,
+            Err(Error::AuthorizationExpired)
+        ));
+        assert!(matches!(
+            original
+                .report_stream_verification(&unrelated, &track, report)
+                .await,
+            Err(Error::AuthorizationDenied)
+        ));
+        let server = &server;
+        let read_request = |status, response_body: &str| {
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            async move {
+                let (socket, _) = server.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "POST /melody/v1/msg/batch HTTP/1.1\r\n");
+                let mut length = None;
+                let mut bearer = false;
+                loop {
+                    line.clear();
+                    assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = Some(value.trim().parse::<usize>().unwrap());
+                        } else if name.eq_ignore_ascii_case("authorization") {
+                            bearer = value.trim() == "Bearer refreshed-test";
+                        }
+                    }
+                }
+                assert!(bearer);
+                let mut body = vec![0; length.unwrap()];
+                socket.read_exact(&mut body).await.unwrap();
+                socket.write_all(response.as_bytes()).await.unwrap();
+                serde_json::from_slice::<Value>(&body).unwrap()
+            }
+        };
+        let (receipt, payload) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                original.report_playback_stats(&authorization, &track, report),
+                read_request(
+                    "400 Bad Request",
+                    r#"{"message":"missing required ms_actual_duration","token":"must-not-log"}"#,
+                )
+            )
+        })
+        .await
+        .unwrap();
+        let error = receipt.unwrap_err().to_string();
+        assert!(error.contains("missing required data for ms_actual_duration"));
+        assert!(!error.contains("must-not-log"));
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+        let stats = &payload["messages"][0];
+        assert_eq!(stats["type"], "jssdk_playback_stats");
+        assert_eq!(stats["message"].as_object().unwrap().len(), 74);
+        assert_eq!(stats["message"]["playback_id"], "original-state");
+        assert_eq!(stats["message"]["internal_play_id"], "5");
+        assert_eq!(stats["message"]["session_id"], "123456789");
+        assert_eq!(stats["message"]["sequence_id"], 0);
+        assert_eq!(stats["message"]["start_time"], 100_000);
+        assert_eq!(stats["message"]["end_time"], 180_800);
+        assert_eq!(stats["message"]["ms_play_latency"], 800);
+        assert_eq!(stats["message"]["reason_end"], "trackdone");
+        assert_eq!(stats["message"]["initially_paused"], true);
+        assert_eq!(stats["message"]["persistent_cached"], true);
+        assert_eq!(stats["message"]["total_bytes"], 0);
+        assert_eq!(stats["message"]["strategy"], "MSE");
+        assert_eq!(stats["message"]["ms_license_update_latency"], Value::Null);
+        assert_eq!(
+            stats["message"]["ms_played_per_audio_format"]["mp4a.40.2;128000"],
+            80_000
+        );
+
+        let (receipt, payload) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                original.report_stream_verification(&authorization, &track, report),
+                read_request("202 Accepted", "")
+            )
+        })
+        .await
+        .unwrap();
+        assert!(receipt.unwrap());
+        let message = &payload["messages"][0]["message"];
+        assert_eq!(payload["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(message["playback_id"], "original-state");
+        assert_eq!(message["ms_played"], 80_000);
+        assert_eq!(message["ms_nominal_played"], 80_000);
+        assert_eq!(message["session_id"], "123456789");
+        assert_eq!(message["sequence_id"], 0);
+        let started = playback_start_message(
+            &track,
+            track.verification.as_ref().unwrap(),
+            PlaybackReport {
+                kind: PlaybackReportKind::Started,
+                start_offset_ms: 1_250,
+                ..report
+            },
+            "123456789",
+        );
+        assert_eq!(started["type"], "jssdk_playback_start");
+        assert_eq!(started["message"]["playback_id"], "original-state");
+        assert_eq!(started["message"]["ms_start_position"], 1_250);
+        assert_eq!(started["message"]["initially_paused"], true);
+        assert!(
+            !original
+                .report_stream_verification(&authorization, &track, report)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !original
+                .report_playback_stats(&authorization, &track, report)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn media_playback_payload_reports_natural_end_from_measured_timeline() {
+        let track = prepared_track("encrypted-file");
+        let timeline = PlaybackTimeline {
+            loaded_at_ms: 100_000,
+            started_at_ms: 100_800,
+            ended_at_ms: 190_800,
+        };
+        let report = PlaybackReport {
+            kind: PlaybackReportKind::Finalized,
+            position_ms: 92_000,
+            previous_position_ms: Some(91_750),
+            duration_ms: 92_000,
+            played_ms: 90_000,
+            start_offset_ms: 2_000,
+            paused: false,
+            playback_speed: 1.0,
+            timeline: Some(timeline),
+        };
+        let body = media_playback_payload(&track, "initial-playback-state", report, timeline);
+        let message = &body["messages"][0];
+        assert_eq!(message["type"], "media_playback_event_v2");
+        let events = message["message"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["ct"], 100_000);
+        assert_eq!(events[0]["ms"]["pi"], "initial-playback-state");
+        assert_eq!(events[0]["ms"]["mu"], "spotify-audio://encrypted-file");
+        assert_eq!(events[0]["ur"], track.metadata.uri);
+        assert_eq!(events[1]["et"], 4);
+        assert_eq!(events[1]["ct"], 100_800);
+        assert_eq!(events[1]["ps"]["pp"], 2_000);
+        assert_eq!(events[2]["ct"], 190_800);
+        assert_eq!(events[2]["et"], 10);
+        assert_eq!(events[2]["rn"], 5);
+        assert_eq!(events[2]["ps"]["pp"], 92_000);
+        assert_eq!(body["sdk_id"], HARMONY);
     }
 
     #[test]

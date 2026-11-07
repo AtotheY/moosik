@@ -3612,7 +3612,7 @@ impl App {
         self.q.set_resume(Some((index, sample.position)));
         self.playback_started = false;
         self.spotify_pause = SpotifyPause::Released;
-        player.stop();
+        player.suspend_spotify();
         crate::spotify_drm::retire_idle_renderer();
     }
 
@@ -7736,6 +7736,11 @@ impl App {
             }
         } else if let Some(index) = self.q.current() {
             self.q.set_resume(Some((index, seconds)));
+            if self.spotify_pause == SpotifyPause::Released
+                && let Some(player) = &self.player
+            {
+                player.seek(seconds);
+            }
         }
     }
 

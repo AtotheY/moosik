@@ -43,7 +43,7 @@ pub fn is_signed_in() -> bool {
     signed_in
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -114,7 +114,7 @@ pub async fn sign_out() -> Result<()> {
     Ok(())
 }
 
-async fn transport() -> Result<Transport> {
+pub(crate) async fn transport() -> Result<Transport> {
     let mut cached = TRANSPORT.get_or_init(|| Mutex::new(None)).lock().await;
     if let Some(entry) = cached
         .as_ref()

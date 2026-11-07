@@ -11,13 +11,22 @@ pub use browse::{
 };
 pub use model::AccountProfile;
 
-pub use transport::{PreparedTrack, RangeData, TrackMetadata, Transport};
+pub use transport::{
+    PlaybackReport, PlaybackReportKind, PlaybackTimeline, PreparedTrack, RangeData, TrackMetadata,
+    Transport,
+};
 pub use web_auth::{WebSession, web_session};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Spotify {stage} request failed with HTTP {status}")]
     Http { stage: &'static str, status: u16 },
+    #[error("Spotify {stage} request failed with HTTP {status} ({diagnostic})")]
+    ReportRejected {
+        stage: &'static str,
+        status: u16,
+        diagnostic: String,
+    },
     #[error("Spotify {0} transport failed")]
     Network(&'static str),
     #[error("Spotify returned invalid {0}")]

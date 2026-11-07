@@ -11,14 +11,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use moosik_spotify::{PreparedTrack, RangeData, Transport};
+use moosik_spotify::{
+    PlaybackReport, PlaybackReportKind, PlaybackTimeline, PreparedTrack, RangeData, Transport,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex as AsyncMutex, Notify, watch},
+    sync::{Mutex as AsyncMutex, Notify, mpsc, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -30,6 +32,9 @@ const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RENDERER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const RENDERER_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const PLAYBACK_READY_GRACE: Duration = Duration::from_secs(45);
+const REPORT_STARTED_MS: u64 = 1_000;
+const REPORT_THRESHOLD_MS: u64 = 31_000;
+const REPORT_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
 const LEGACY_CACHE_HEADER: &[u8; 8] = b"MOOSIKC1";
 const CACHE_HEADER: &[u8; 8] = b"MOOSIKC2";
 const CACHE_HEADER_LEN: u64 = 80;
@@ -39,6 +44,7 @@ static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_USAGE: AtomicU64 = AtomicU64::new(0);
 static CACHE_USAGE_KNOWN: AtomicBool = AtomicBool::new(false);
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
+static REPORT_TURN: AsyncMutex<()> = AsyncMutex::const_new(());
 static RENDERER_POOL: Mutex<RendererPool> = Mutex::new(RendererPool {
     child: None,
     retirement: None,
@@ -335,7 +341,103 @@ struct Inner {
     playing: AtomicBool,
     paused: AtomicBool,
     canceled: AtomicBool,
+    reporting: Mutex<Option<PlaybackReporting>>,
     resources: Mutex<Option<Resources>>,
+}
+
+struct PlaybackReporting {
+    tx: mpsc::UnboundedSender<PlaybackReport>,
+    latest: Option<PlaybackReport>,
+    loaded_at_ms: u64,
+    paused: bool,
+    seek_version: u64,
+}
+
+impl PlaybackReporting {
+    fn seek_while_suspended(&mut self, position_ms: u64) {
+        let Some(latest) = self.latest else {
+            return;
+        };
+        let position_ms = position_ms.min(latest.duration_ms);
+        if position_ms == latest.position_ms {
+            return;
+        }
+        let report = PlaybackReport {
+            kind: PlaybackReportKind::Seeked,
+            position_ms,
+            previous_position_ms: Some(latest.position_ms),
+            paused: true,
+            ..latest
+        };
+        let _ = self.tx.send(report);
+        self.latest = Some(report);
+    }
+
+    fn observe(&mut self, state: &BrowserState) {
+        let Some(mut report) = state.playback_report() else {
+            return;
+        };
+        let previous_ms = self.latest.as_ref().map_or(0, |latest| latest.played_ms);
+        if report.played_ms < previous_ms {
+            return;
+        }
+        if state.ended {
+            if let Some(latest) = self.latest {
+                report.paused = latest.paused;
+            }
+            if let (Some(started_at_ms), Some(ended_at_ms)) =
+                (state.started_at_ms, state.ended_at_ms)
+            {
+                report.timeline = Some(PlaybackTimeline {
+                    loaded_at_ms: self.loaded_at_ms,
+                    started_at_ms,
+                    ended_at_ms,
+                });
+            }
+        }
+        report.previous_position_ms = self.latest.as_ref().map(|latest| latest.position_ms);
+        if !state.ended
+            && state.error_code.is_none()
+            && state.paused != self.paused
+            && (state.paused || state.playing)
+        {
+            self.paused = state.paused;
+            let kind = if self.paused {
+                PlaybackReportKind::Paused
+            } else {
+                PlaybackReportKind::Resumed
+            };
+            let _ = self.tx.send(PlaybackReport { kind, ..report });
+        }
+        if state.error_code.is_none() && !state.seeking && state.seek_version > self.seek_version {
+            self.seek_version = state.seek_version;
+            let _ = self.tx.send(PlaybackReport {
+                kind: PlaybackReportKind::Seeked,
+                previous_position_ms: Some(state.seek_from_ms.min(report.duration_ms)),
+                ..report
+            });
+        }
+        for (threshold, kind) in [
+            (REPORT_STARTED_MS, PlaybackReportKind::Started),
+            (REPORT_THRESHOLD_MS, PlaybackReportKind::ThresholdReached),
+        ] {
+            if previous_ms < threshold && report.played_ms >= threshold {
+                let _ = self.tx.send(PlaybackReport { kind, ..report });
+            }
+        }
+        self.latest = Some(report);
+    }
+}
+
+impl Drop for PlaybackReporting {
+    fn drop(&mut self) {
+        if let Some(report) = self.latest.take() {
+            let _ = self.tx.send(PlaybackReport {
+                kind: PlaybackReportKind::Finalized,
+                ..report
+            });
+        }
+    }
 }
 
 struct Resources {
@@ -556,6 +658,7 @@ impl Handle {
             playing: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             canceled: AtomicBool::new(false),
+            reporting: Mutex::new(None),
             resources: Mutex::new(None),
         }))
     }
@@ -599,7 +702,15 @@ impl Handle {
     }
 
     pub fn seek(&self, position: f64) {
-        if position.is_finite() {
+        if !position.is_finite() {
+            return;
+        }
+        if self.0.canceled.load(Ordering::SeqCst) {
+            let mut reporting = self.0.reporting.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(reporter) = reporting.as_mut() {
+                reporter.seek_while_suspended((position * 1000.0).round() as u64);
+            }
+        } else {
             self.command("seek", json!(position.max(0.0)));
         }
     }
@@ -617,7 +728,22 @@ impl Handle {
     }
 
     pub fn stop(&self) {
+        self.release_renderer(false);
+    }
+
+    pub fn suspend(&self) {
+        self.release_renderer(true);
+    }
+
+    fn release_renderer(&self, keep_reporting: bool) {
         self.0.canceled.store(true, Ordering::SeqCst);
+        if !keep_reporting {
+            self.0
+                .reporting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
         self.0
             .resources
             .lock()
@@ -710,9 +836,10 @@ async fn start(
     let started = Instant::now();
     let cache_generation = CACHE_GENERATION.load(Ordering::SeqCst);
     let prepare = async {
+        let report_turn = REPORT_TURN.lock().await;
         let started = Instant::now();
         let track = transport.prepare_for_playback(uri).await?;
-        Result::<_>::Ok((track, started.elapsed().as_millis()))
+        Result::<_>::Ok((track, started.elapsed().as_millis(), report_turn))
     };
     let service_certificate = async {
         let started = Instant::now();
@@ -795,7 +922,7 @@ async fn start(
         reused
     };
     let renderer_started = Instant::now();
-    let ((track, prepare_ms), (certificate, certificate_ms)) =
+    let ((track, prepare_ms, report_turn), (certificate, certificate_ms)) =
         tokio::try_join!(prepare, service_certificate)?;
     if let Some(error) = handle.last_error() {
         bail!(error);
@@ -804,7 +931,124 @@ async fn start(
         !handle.0.canceled.load(Ordering::SeqCst),
         "Spotify playback canceled"
     );
-    validated.send_replace(Some(Arc::new(ValidatedPlayback { track, certificate })));
+    let playback = Arc::new(ValidatedPlayback { track, certificate });
+    if playback.track.can_report_playback() {
+        let mut reporting = handle.0.reporting.lock().unwrap_or_else(|e| e.into_inner());
+        ensure!(
+            !handle.0.canceled.load(Ordering::SeqCst),
+            "Spotify playback canceled"
+        );
+        let (tx, mut reports) = mpsc::unbounded_channel::<PlaybackReport>();
+        let start_offset_ms = (start_at.unwrap_or_default() * 1000.0).round() as u64;
+        let paused = handle.0.paused.load(Ordering::SeqCst);
+        let _ = tx.send(PlaybackReport {
+            kind: PlaybackReportKind::Loading,
+            position_ms: start_offset_ms,
+            previous_position_ms: None,
+            duration_ms: playback.track.metadata.duration_ms.unwrap_or_default(),
+            played_ms: 0,
+            start_offset_ms,
+            paused,
+            playback_speed: 1.0,
+            timeline: None,
+        });
+        *reporting = Some(PlaybackReporting {
+            tx,
+            latest: None,
+            loaded_at_ms: crate::spotify::now_ms(),
+            paused,
+            seek_version: 0,
+        });
+        let report_playback = playback.clone();
+        tokio::spawn(async move {
+            let _turn = report_turn;
+            let mut next = None;
+            while let Some(mut report) = match next.take() {
+                Some(report) => Some(report),
+                None => reports.recv().await,
+            } {
+                if report.kind == PlaybackReportKind::Seeked {
+                    let previous_position = report.previous_position_ms;
+                    while let Ok(queued) = reports.try_recv() {
+                        if queued.kind != PlaybackReportKind::Seeked {
+                            next = Some(queued);
+                            break;
+                        }
+                        report = queued;
+                    }
+                    report.previous_position_ms = previous_position;
+                }
+                let kind = report.kind;
+                let authorization = match tokio::time::timeout(
+                    REPORT_AUTH_TIMEOUT,
+                    crate::spotify::transport(),
+                )
+                .await
+                {
+                    Ok(Ok(authorization)) => authorization,
+                    Ok(Err(error)) => {
+                        tracing::warn!(?kind, %error, "Spotify playback report authorization failed");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::warn!(?kind, "Spotify playback report authorization timed out");
+                        continue;
+                    }
+                };
+                let track = &report_playback.track;
+                let verification = async {
+                    if kind == PlaybackReportKind::Started {
+                        match transport
+                            .report_playback_start(&authorization, track, report)
+                            .await
+                        {
+                            Ok(true) => tracing::debug!("Spotify playback start summary sent"),
+                            Ok(false) => tracing::debug!("Spotify playback start summary skipped"),
+                            Err(error) => {
+                                tracing::warn!(%error, "Spotify playback start summary failed")
+                            }
+                        }
+                    } else if kind == PlaybackReportKind::Finalized {
+                        let (stream, media, stats) = tokio::join!(
+                            transport.report_stream_verification(&authorization, track, report),
+                            transport.report_media_playback(&authorization, track, report),
+                            transport.report_playback_stats(&authorization, track, report)
+                        );
+                        match stream {
+                            Ok(true) => tracing::debug!("Spotify stream verification sent"),
+                            Ok(false) => tracing::debug!("Spotify stream verification skipped"),
+                            Err(error) => {
+                                tracing::warn!(%error, "Spotify stream verification failed")
+                            }
+                        }
+                        match media {
+                            Ok(true) => tracing::debug!("Spotify media end report sent"),
+                            Ok(false) => tracing::debug!("Spotify media end report skipped"),
+                            Err(error) => tracing::warn!(%error, "Spotify media end report failed"),
+                        }
+                        match stats {
+                            Ok(true) => tracing::debug!("Spotify playback stats sent"),
+                            Ok(false) => tracing::debug!("Spotify playback stats skipped"),
+                            Err(error) => tracing::warn!(%error, "Spotify playback stats failed"),
+                        }
+                    }
+                };
+                let (state_report, ()) = tokio::join!(
+                    transport.report_playback(&authorization, track, report),
+                    verification
+                );
+                match state_report {
+                    Ok(true) => tracing::debug!(?kind, "Spotify playback report sent"),
+                    Ok(false) => tracing::debug!(?kind, "Spotify playback report skipped"),
+                    Err(error) => tracing::warn!(?kind, %error, "Spotify playback report failed"),
+                }
+            }
+        });
+    } else {
+        drop(report_turn);
+        tracing::debug!("Spotify playback reporting is unavailable for this track");
+    }
+    validated.send_replace(Some(playback));
     let deadline =
         Instant::now() + MEDIA_DOWNLOAD_TIMEOUT + RENDERER_RESPONSE_TIMEOUT + PLAYBACK_READY_GRACE;
     loop {
@@ -1032,6 +1276,7 @@ async fn serve_media(
             tokio::io::copy(&mut media, socket).await? == len,
             "Spotify cache entry changed during playback"
         );
+        track.record_playback_media(len, true);
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis(),
             cache_hit = true,
@@ -1091,6 +1336,7 @@ async fn serve_media(
         check_media_range(&range, offset, total)?;
         socket.write_all(&range.bytes).await?;
     }
+    track.record_playback_media(total, false);
     if let Some(mut file) = cache
         && file.flush().await.is_ok()
     {
@@ -1125,6 +1371,12 @@ fn check_media_range(range: &RangeData, offset: u64, total: u64) -> Result<()> {
 struct BrowserState {
     position: f64,
     duration: f64,
+    played_ms: u64,
+    start_offset_ms: u64,
+    started_at_ms: Option<u64>,
+    ended_at_ms: Option<u64>,
+    seek_version: u64,
+    seek_from_ms: u64,
     paused: bool,
     ended: bool,
     buffering: bool,
@@ -1138,6 +1390,24 @@ struct BrowserState {
 }
 
 impl BrowserState {
+    fn playback_report(&self) -> Option<PlaybackReport> {
+        if self.played_ms == 0 || self.duration <= 0.0 {
+            return None;
+        }
+        let duration_ms = (self.duration * 1000.0).round() as u64;
+        Some(PlaybackReport {
+            kind: PlaybackReportKind::Finalized,
+            position_ms: ((self.position * 1000.0).round() as u64).min(duration_ms),
+            previous_position_ms: None,
+            duration_ms,
+            played_ms: self.played_ms.min(duration_ms),
+            start_offset_ms: self.start_offset_ms.min(duration_ms),
+            paused: self.paused,
+            playback_speed: self.rate,
+            timeline: None,
+        })
+    }
+
     fn update(self, inner: &Inner) -> Result<()> {
         if inner.canceled.load(Ordering::SeqCst) {
             return Ok(());
@@ -1165,6 +1435,15 @@ impl BrowserState {
                 _ => "Spotify protected playback failed. Sign in again and retry",
             };
             *inner.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.to_owned());
+        }
+        {
+            let mut reporting = inner.reporting.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(reporter) = reporting.as_mut() {
+                reporter.observe(&self);
+            }
+            if self.ended || self.error_code.is_some() {
+                reporting.take();
+            }
         }
         *inner.state.lock().unwrap_or_else(|e| e.into_inner()) = Snapshot {
             position: self.position,
@@ -1311,6 +1590,12 @@ mod tests {
         BrowserState {
             position: 50.0,
             duration: 100.0,
+            played_ms: 0,
+            start_offset_ms: 0,
+            started_at_ms: None,
+            ended_at_ms: None,
+            seek_version: 0,
+            seek_from_ms: 0,
             paused: false,
             ended: false,
             buffering: false,
@@ -1328,6 +1613,135 @@ mod tests {
         assert!(state.idle && state.paused);
         assert_eq!(state.position, 0.0);
         assert!(!handle.0.playing.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn spotify_reports_follow_played_audio_instead_of_seek_position() {
+        let (tx, mut reports) = mpsc::unbounded_channel();
+        let mut reporter = PlaybackReporting {
+            tx,
+            latest: None,
+            loaded_at_ms: 1_000,
+            paused: false,
+            seek_version: 0,
+        };
+        let mut state = BrowserState {
+            position: 60.0,
+            duration: 100.0,
+            played_ms: 0,
+            start_offset_ms: 60_000,
+            started_at_ms: None,
+            ended_at_ms: None,
+            seek_version: 0,
+            seek_from_ms: 0,
+            paused: false,
+            ended: false,
+            buffering: false,
+            seeking: true,
+            rate: 1.0,
+            volume: 70.0,
+            muted: false,
+            playing: false,
+            ready: true,
+            error_code: None,
+        };
+        reporter.observe(&state);
+        assert!(reports.try_recv().is_err());
+        state.seeking = false;
+        state.playing = true;
+        state.position = 61.25;
+        state.played_ms = 1_250;
+        state.started_at_ms = Some(2_000);
+        reporter.observe(&state);
+        let started = reports.try_recv().unwrap();
+        assert!(matches!(started.kind, PlaybackReportKind::Started));
+        assert_eq!(started.start_offset_ms, 60_000);
+        state.paused = true;
+        state.playing = false;
+        reporter.observe(&state);
+        let paused = reports.try_recv().unwrap();
+        assert_eq!(paused.kind, PlaybackReportKind::Paused);
+        assert!(paused.paused);
+        assert_eq!(paused.played_ms, 1_250);
+        reporter.observe(&state);
+        assert!(reports.try_recv().is_err());
+        state.position = 80.0;
+        state.seek_from_ms = 61_250;
+        state.seek_version = 1;
+        state.seeking = true;
+        reporter.observe(&state);
+        assert!(reports.try_recv().is_err());
+        state.seeking = false;
+        reporter.observe(&state);
+        let seeked = reports.try_recv().unwrap();
+        assert_eq!(seeked.kind, PlaybackReportKind::Seeked);
+        assert_eq!(seeked.previous_position_ms, Some(61_250));
+        assert_eq!(seeked.position_ms, 80_000);
+        assert_eq!(seeked.played_ms, 1_250);
+        assert!(seeked.paused);
+        state.paused = false;
+        reporter.observe(&state);
+        assert!(reports.try_recv().is_err());
+        state.playing = true;
+        reporter.observe(&state);
+        let resumed = reports.try_recv().unwrap();
+        assert_eq!(resumed.kind, PlaybackReportKind::Resumed);
+        assert!(!resumed.paused);
+        state.position = 100.0;
+        state.played_ms = 31_500;
+        state.ended = true;
+        state.paused = true;
+        state.ended_at_ms = Some(35_000);
+        reporter.observe(&state);
+        drop(reporter);
+        let threshold = reports.try_recv().unwrap();
+        assert!(matches!(
+            threshold.kind,
+            PlaybackReportKind::ThresholdReached
+        ));
+        let finalized = reports.try_recv().unwrap();
+        assert!(matches!(finalized.kind, PlaybackReportKind::Finalized));
+        assert_eq!(finalized.played_ms, 31_500);
+        assert_eq!(finalized.position_ms, 100_000);
+        assert!(!finalized.paused);
+        assert_eq!(finalized.timeline.unwrap().ended_at_ms, 35_000);
+        assert!(reports.try_recv().is_err());
+    }
+
+    #[test]
+    fn suspended_spotify_seeks_keep_reported_listening_time() {
+        let handle = Handle::new(egui::Context::default());
+        let (tx, mut reports) = mpsc::unbounded_channel();
+        *handle.0.reporting.lock().unwrap() = Some(PlaybackReporting {
+            tx,
+            latest: Some(PlaybackReport {
+                kind: PlaybackReportKind::Paused,
+                position_ms: 12_000,
+                previous_position_ms: None,
+                duration_ms: 90_000,
+                played_ms: 700,
+                start_offset_ms: 11_300,
+                paused: true,
+                playback_speed: 1.0,
+                timeline: None,
+            }),
+            loaded_at_ms: 1_000,
+            paused: true,
+            seek_version: 0,
+        });
+        handle.suspend();
+        handle.seek(45.0);
+        let seek = reports.try_recv().unwrap();
+        assert_eq!(seek.kind, PlaybackReportKind::Seeked);
+        assert_eq!(seek.previous_position_ms, Some(12_000));
+        assert_eq!(seek.position_ms, 45_000);
+        assert_eq!(seek.played_ms, 700);
+        assert!(seek.paused);
+        handle.stop();
+        let finalized = reports.try_recv().unwrap();
+        assert_eq!(finalized.kind, PlaybackReportKind::Finalized);
+        assert_eq!(finalized.played_ms, 700);
+        assert!(reports.try_recv().is_err());
     }
 
     #[test]

@@ -23,12 +23,30 @@ let mediaComplete = false;
 let declaredDuration = 0;
 let sendingState = false;
 let queuedState = null;
+let firstPlayedAt = null;
+let audioStartedAt = null;
+let audioEndedAt = null;
+let seekVersion = 0;
+let seekFromMs = 0;
 
 function snapshot() {
   const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+  const ranges = audio.played;
+  let playedSeconds = 0;
+  for (let i = 0; i < ranges.length; i++) {
+    playedSeconds += ranges.end(i) - ranges.start(i);
+  }
+  if (firstPlayedAt === null && ranges.length) firstPlayedAt = ranges.start(0);
+  if (audioEndedAt === null && audio.ended && !stopped && errorCode === null) audioEndedAt = Date.now();
   return {
     position: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
     duration: mediaComplete ? duration : Math.max(duration, declaredDuration),
+    playedMs: Math.round(playedSeconds * 1000),
+    startOffsetMs: Math.round((firstPlayedAt ?? 0) * 1000),
+    startedAtMs: audioStartedAt,
+    endedAtMs: audioEndedAt,
+    seekVersion,
+    seekFromMs,
     paused: waitingForSeek ? desiredPaused : audio.paused,
     ended: errorCode === null && (stopped || audio.ended),
     buffering: !stopped && errorCode === null && (buffering || waitingForSeek),
@@ -103,6 +121,10 @@ function applySeek() {
   const target = mediaComplete && Number.isFinite(audio.duration)
     ? Math.min(pendingSeek, Math.max(0, audio.duration))
     : pendingSeek;
+  if (audioStartedAt !== null && target !== audio.currentTime) {
+    seekVersion += 1;
+    seekFromMs = Math.round(audio.currentTime * 1000);
+  }
   audio.currentTime = target;
   pendingSeek = null;
   if (waitingForSeek) {
@@ -180,6 +202,7 @@ async function commands() {
 }
 
 audio.addEventListener('playing', () => {
+  if (audioStartedAt === null) audioStartedAt = Date.now();
   playing = true;
   buffering = false;
   publish();

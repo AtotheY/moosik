@@ -358,6 +358,12 @@ impl Player {
         }
     }
 
+    pub fn suspend_spotify(&self) {
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            handle.suspend();
+        }
+    }
+
     pub fn seek(&self, seconds: f64) {
         self.seek_serial
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
