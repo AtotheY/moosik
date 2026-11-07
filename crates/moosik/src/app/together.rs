@@ -43,6 +43,7 @@ impl Song {
 
 enum Update {
     Ready(String),
+    Reconnecting,
     Follow(Option<Song>, Instant),
     End(&'static str),
 }
@@ -107,7 +108,35 @@ async fn host(
 ) -> anyhow::Result<()> {
     let http = client()?;
     let rooms = format!("{}/rooms", origin());
-    let res = http.post(&rooms).send().await?.error_for_status()?;
+    let mut delay = Duration::from_secs(15);
+    while samples.has_changed().is_ok() {
+        if host_room(&http, &rooms, &mut samples, &tx, &ctx)
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        if !notify(&tx, &ctx, Update::Reconnecting) {
+            break;
+        }
+        // Song changes during backoff are coalesced. Turning hosting off cancels the wait.
+        tokio::select! {
+            _ = samples.wait_for(|_| false) => break,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        delay = (delay * 2).min(Duration::from_secs(120));
+    }
+    Ok(())
+}
+
+async fn host_room(
+    http: &reqwest::Client,
+    rooms: &str,
+    samples: &mut watch::Receiver<Option<Song>>,
+    tx: &Sender<Update>,
+    ctx: &egui::Context,
+) -> anyhow::Result<()> {
+    let res = http.post(rooms).send().await?.error_for_status()?;
     let created: Created = serde_json::from_slice(&res.bytes().await?)?;
     anyhow::ensure!(created.id.len() == 32 && created.id.bytes().all(|b| b.is_ascii_hexdigit()));
     let url = format!("{rooms}/{}", created.id);
@@ -129,7 +158,7 @@ async fn host(
         if sent.is_ok() {
             failures = 0;
             if !advertised {
-                advertised = notify(&tx, &ctx, Update::Ready(created.id.clone()));
+                advertised = notify(tx, ctx, Update::Ready(created.id.clone()));
                 if !advertised {
                     break;
                 }
@@ -338,6 +367,11 @@ impl App {
             latest = Some(update);
         }
         match latest {
+            Some(Update::Reconnecting) => {
+                if session.id.take().is_some() {
+                    self.presence_key = None;
+                }
+            }
             Some(Update::Ready(id)) => {
                 session.id = Some(id);
                 self.presence_key = None;
@@ -434,6 +468,34 @@ mod tests {
         song.position = 0.0;
         song.id = "/etc/passwd".into();
         assert!(!song.valid());
+    }
+
+    /// Simulate a suspended host. The development relay expires an idle room after 45 seconds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the default loopback relay and waits for room expiry"]
+    async fn enabled_host_replaces_expired_invite() {
+        assert!(origin().starts_with("http://127.0.0.1:"));
+        let (tx, updates) = channel();
+        let (write, samples) = watch::channel(None);
+        let worker = tokio::spawn(host(samples, tx, egui::Context::default()));
+        let Update::Ready(first) = updates.recv_timeout(Duration::from_secs(5)).unwrap() else {
+            panic!("missing initial invite")
+        };
+        tokio::time::sleep(Duration::from_secs(46)).await;
+        for _ in 0..3 {
+            write.send_replace(None);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(matches!(
+            updates.recv_timeout(Duration::from_secs(5)),
+            Ok(Update::Reconnecting)
+        ));
+        let Update::Ready(second) = updates.recv_timeout(Duration::from_secs(25)).unwrap() else {
+            panic!("missing replacement invite")
+        };
+        assert_ne!(first, second);
+        drop(write);
+        worker.await.unwrap().unwrap();
     }
 
     /// Run against the real Node relay with synthetic songs, independent of Discord or mpv.

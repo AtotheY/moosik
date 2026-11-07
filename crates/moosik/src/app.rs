@@ -260,6 +260,14 @@ struct MediaKey {
     scalars: MediaScalars,
 }
 
+struct PresenceKey {
+    id: Option<String>,
+    title: String,
+    artists: Vec<crate::model::ArtistLink>,
+    playing: bool,
+    duration: i64,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct MediaScalars {
     playing: bool,
@@ -1860,7 +1868,7 @@ pub struct App {
     together: together::Together,
     /// What was last handed to Discord — the track's id, whether it was playing, and its title —
     /// so the presence is only resent when something material changes rather than every frame.
-    presence_key: Option<(Option<String>, bool, String)>,
+    presence_key: Option<PresenceKey>,
     /// What the OS media widget was last handed, reduced to what it shows. `publish_media` runs
     /// every frame; building and sending the full snapshot (every string cloned, then cloned
     /// twice more inside playwire) only happens when this changes.
@@ -3022,46 +3030,49 @@ impl App {
             return;
         };
         let id = track.local_path.is_none().then(|| track.video_id.clone());
-        let was_playing = self.presence_key.as_ref().is_some_and(|(_, p, _)| *p);
-        let expected = self.presence_position
-            + if was_playing {
-                self.presence_sent_at.elapsed().as_secs_f64()
-            } else {
-                0.0
-            };
-        let changed = match &self.presence_key {
-            Some((last_id, last_playing, last_title)) => {
-                last_id != &id
-                    || *last_playing != playing
-                    || last_title != &track.title
-                    || (position - expected).abs() > 1.5
-            }
-            None => true,
-        };
-        if !changed {
-            return;
-        }
-        let duration = if state.duration > 0.0 {
-            state.duration
+        let duration = if state.duration.is_finite() && state.duration > 0.0 {
+            state.duration.round() as i64
         } else {
-            track.duration.map(|d| d as f64).unwrap_or(0.0)
+            track.duration.unwrap_or(0) as i64
         };
+        if let Some(last) = &self.presence_key {
+            let expected = self.presence_position
+                + if last.playing {
+                    self.presence_sent_at.elapsed().as_secs_f64()
+                } else {
+                    0.0
+                };
+            if last.id == id
+                && last.title == track.title
+                && last.artists == track.artists
+                && last.playing == playing
+                && last.duration == duration
+                && (position - expected).abs() <= 1.5
+            {
+                return;
+            }
+        }
+        let timeline = (playing && duration > 0 && position.is_finite()).then(|| {
+            let start = unix_now() - (position as i64).clamp(0, duration);
+            (start, start.saturating_add(duration))
+        });
         discord.set(crate::discord::Presence {
             youtube_id: id.clone(),
             room: self.room_id().map(str::to_owned),
             title: track.title.clone(),
-            artist: track
-                .artists
-                .iter()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>()
-                .join(", "),
+            artist: track.artist_line(),
             thumbnail: track.thumbnail.as_deref().map(str::to_owned),
             wide: track.wide,
             playing,
-            end_unix: playing.then(|| unix_now() + (duration - position).max(0.0) as i64),
+            timeline,
         });
-        self.presence_key = Some((id, playing, track.title.clone()));
+        self.presence_key = Some(PresenceKey {
+            id,
+            playing,
+            title: track.title.clone(),
+            artists: track.artists.clone(),
+            duration,
+        });
         self.presence_position = position;
         self.presence_sent_at = Instant::now();
     }
