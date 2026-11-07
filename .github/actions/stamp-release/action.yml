@@ -1,0 +1,10 @@
+name: Prepare public version
+description: Stamp the selected Moosik tag and its release notes into this build checkout
+runs:
+  using: composite
+  steps:
+    - if: github.ref_type == 'tag'
+      shell: bash
+      run: |
+        git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+        python3 scripts/public-version.py stamp "$GITHUB_REF_NAME"
