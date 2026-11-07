@@ -688,6 +688,7 @@ fn paint_grid_cell<'d>(
     cell_rect: egui::Rect,
     i: usize,
     s: RowSpec<'d>,
+    listening_time: Option<&str>,
 ) -> (Option<ListClick>, Option<RowAction>) {
     let mut cell = ui.new_child(
         egui::UiBuilder::new()
@@ -707,7 +708,7 @@ fn paint_grid_cell<'d>(
     } else {
         art_texture(images, backend, cell.ctx(), s.thumbnail, ROW_ART_PT)
     };
-    let hit = crate::widgets::track_row(
+    let hit = crate::widgets::track_row_with_listening_time(
         &mut cell,
         palette,
         crate::widgets::TrackRow {
@@ -735,6 +736,7 @@ fn paint_grid_cell<'d>(
             quiet_like: s.quiet_like,
             add_to: s.add_to,
         },
+        listening_time,
     );
     // A link wins over the row: clicking the artist name must not also start the track.
     let click = if let Some(link) = hit.link {
@@ -941,8 +943,17 @@ fn spec_pages<'d>(
                     egui::pos2(x, top_left.y),
                     egui::vec2(col_w, theme::ROW_HEIGHT),
                 );
-                let (click, act) =
-                    paint_grid_cell(ui, palette, images, backend, liked, cell_rect, i, spec(i));
+                let (click, act) = paint_grid_cell(
+                    ui,
+                    palette,
+                    images,
+                    backend,
+                    liked,
+                    cell_rect,
+                    i,
+                    spec(i),
+                    None,
+                );
                 if click.is_some() {
                     clicked = click;
                 }

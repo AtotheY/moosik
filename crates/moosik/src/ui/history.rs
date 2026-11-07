@@ -229,7 +229,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(stamp).font(theme::regular(11.0)).color(p.dim));
             if let Some(meta) = &row.metadata {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::ROW_HEIGHT), egui::Sense::hover());
-                crate::ui::listening::regular_song(app, ui, &meta.to_track(), rect, i, false);
+                crate::ui::listening::regular_song(app, ui, &meta.to_track(), rect, i, super::listening::SongRow::Unnumbered);
             }
         });
         if report.recent.len() >= 5000 { ui.label("Showing the latest 5,000 listens. The full ledger is available in Listening stats → Export."); }
