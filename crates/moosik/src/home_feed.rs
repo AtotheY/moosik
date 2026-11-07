@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::model::{Entry, HomeSection, PlaylistRef, PlaylistSource, Provider, Shelf, Track};
 
@@ -95,6 +95,77 @@ pub fn arrange(
     }
 }
 
+pub(crate) enum DisplayShelf {
+    Native,
+    Merged(Shelf),
+    Hidden,
+}
+
+pub(crate) fn merge_categories(shelves: &[Shelf], primary: Option<Provider>) -> Vec<DisplayShelf> {
+    let mut groups: HashMap<_, Vec<_>> = HashMap::new();
+    for (index, shelf) in shelves.iter().enumerate() {
+        if let Some(key) = category_key(shelf)
+            && let Some(provider) = shelf_provider(shelf)
+        {
+            groups.entry(key).or_default().push((index, provider));
+        }
+    }
+    let mut display: Vec<_> = shelves.iter().map(|_| DisplayShelf::Native).collect();
+    for ((title, _, _), members) in groups {
+        let mut providers = HashSet::new();
+        if members.len() < 2
+            || !members
+                .iter()
+                .all(|&(_, provider)| providers.insert(provider))
+        {
+            continue;
+        }
+        let index = members[0].0;
+        let first = &shelves[index];
+        let mut items = members
+            .iter()
+            .flat_map(|&(index, _)| shelves[index].items.iter().cloned())
+            .collect();
+        crate::source_groups::prioritize_entries(&mut items, primary);
+        display[index] = DisplayShelf::Merged(Shelf {
+            title: if title == "new releases" {
+                HomeSection::NewReleases.label().to_owned()
+            } else {
+                first.title.clone()
+            },
+            strapline: first.strapline.clone(),
+            items,
+            more_params: None,
+            more_browse_id: None,
+            expanded: false,
+        });
+        for &(index, _) in &members[1..] {
+            display[index] = DisplayShelf::Hidden;
+        }
+    }
+    display
+}
+
+fn category_key(shelf: &Shelf) -> Option<(String, &'static str, &str)> {
+    let kind = shelf.items.first()?.kind();
+    if kind == "Mood" || !shelf.items.iter().all(|entry| entry.kind() == kind) {
+        return None;
+    }
+    let mut title = shelf.title.trim().to_lowercase();
+    match shelf.home_section() {
+        HomeSection::NewReleases if kind == "Album" => title = "new releases".to_owned(),
+        HomeSection::NewReleases | HomeSection::Themed | HomeSection::SimilarTo => return None,
+        HomeSection::Everything
+            if !matches!(title.as_str(), "made for you" | "recently played") =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+    let strapline = shelf.strapline.as_deref().unwrap_or_default().trim();
+    Some((title, kind, strapline))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +207,85 @@ mod tests {
                     .unwrap_or(&shelf.title)
             })
             .collect()
+    }
+
+    #[test]
+    fn release_aliases_merge_in_place_with_primary_entries_first() {
+        let album = |id: &str, title: &str| {
+            Entry::Album(crate::model::AlbumRef {
+                id: id.to_owned(),
+                title: title.to_owned(),
+                artist: String::new(),
+                artists: Vec::new(),
+                explicit: None,
+                year: None,
+                kind: None,
+                thumbnail: None,
+            })
+        };
+        let mut youtube = shelf(Provider::YouTubeMusic, "New albums & singles", "yt");
+        youtube.items = vec![album("MPREyt", "YouTube album")];
+        youtube.more_params = Some("youtube-more".into());
+        let mut spotify = shelf(Provider::Spotify, "New releases", "sp");
+        spotify.items = vec![album(
+            "spotify:album:0000000000000000000000",
+            "Spotify album",
+        )];
+        let native = vec![
+            youtube,
+            shelf(Provider::YouTubeMusic, "Quick picks", "unrelated"),
+            spotify,
+        ];
+        let display = merge_categories(&native, Some(Provider::Spotify));
+        let [
+            DisplayShelf::Merged(releases),
+            DisplayShelf::Native,
+            DisplayShelf::Hidden,
+        ] = display.as_slice()
+        else {
+            panic!("Expected one combined release shelf");
+        };
+        assert_eq!(releases.title, "New releases");
+        assert_eq!(
+            releases.items,
+            [native[2].items[0].clone(), native[0].items[0].clone()]
+        );
+        assert!(releases.more_params.is_none());
+        assert_eq!(native[0].more_params.as_deref(), Some("youtube-more"));
+    }
+
+    #[test]
+    fn equivalent_song_shelves_preserve_variants_and_reject_ambiguity() {
+        let youtube = shelf(Provider::YouTubeMusic, "Quick picks", "yt");
+        let spotify = shelf(Provider::Spotify, "quick picks", "sp");
+        let display = merge_categories(&[youtube.clone(), spotify.clone()], None);
+        let [DisplayShelf::Merged(picks), DisplayShelf::Hidden] = display.as_slice() else {
+            panic!("Expected one combined Quick picks shelf");
+        };
+        assert_eq!(
+            picks.items,
+            [youtube.items[0].clone(), spotify.items[0].clone()]
+        );
+
+        let mut account_shelf = spotify.clone();
+        account_shelf.strapline = Some("For this account".into());
+        let mut video_shelf = spotify.clone();
+        video_shelf.items = vec![Entry::Video(track(Provider::Spotify, "video"))];
+        for native in [
+            vec![youtube.clone(), account_shelf],
+            vec![youtube.clone(), video_shelf],
+            vec![youtube.clone(), youtube, spotify],
+            vec![
+                shelf(Provider::YouTubeMusic, "Fresh finds", "yt"),
+                shelf(Provider::Spotify, "Fresh finds", "sp"),
+            ],
+        ] {
+            assert!(
+                merge_categories(&native, None)
+                    .iter()
+                    .all(|slot| matches!(slot, DisplayShelf::Native))
+            );
+        }
     }
 
     #[test]

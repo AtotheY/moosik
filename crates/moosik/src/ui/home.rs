@@ -1,10 +1,59 @@
+use std::sync::{Arc, Weak};
+
 use crate::app::{App, Route};
+use crate::home_feed::{self, DisplayShelf};
 use crate::icons::Icon;
-use crate::model::Provider;
+use crate::model::{HomeSection, Provider, Shelf};
 use crate::settings::HomeSource;
 use crate::theme;
 use crate::ui::{failed, shelf_carousel, song_shelf};
 use crate::widgets;
+
+use super::source_rows;
+
+struct CombinedDisplay {
+    source: Weak<Vec<Shelf>>,
+    primary: Option<Provider>,
+    shelves: Vec<DisplayShelf>,
+    song_rows: Vec<Option<source_rows::State>>,
+}
+
+fn combined_display(
+    ui: &egui::Ui,
+    shelves: &Arc<Vec<Shelf>>,
+    primary: Option<Provider>,
+) -> Arc<CombinedDisplay> {
+    let id = ui.id().with("combined-home");
+    let source = Arc::downgrade(shelves);
+    if let Some(display) = ui.data(|data| data.get_temp::<Arc<CombinedDisplay>>(id))
+        && display.source.ptr_eq(&source)
+        && display.primary == primary
+    {
+        return display;
+    }
+    let shelves = home_feed::merge_categories(shelves, primary);
+    let song_rows = shelves
+        .iter()
+        .map(|shelf| match shelf {
+            DisplayShelf::Merged(shelf)
+                if shelf.items.iter().all(|item| item.track().is_some()) =>
+            {
+                let mut rows = source_rows::State::default();
+                rows.set_entries(&shelf.items, 0, true);
+                Some(rows)
+            }
+            _ => None,
+        })
+        .collect();
+    let display = Arc::new(CombinedDisplay {
+        source,
+        primary,
+        shelves,
+        song_rows,
+    });
+    ui.data_mut(|data| data.insert_temp(id, Arc::clone(&display)));
+    display
+}
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     // No "Home" heading: the sidebar already says where you are.
@@ -79,14 +128,30 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
             return;
         }
+        let display = (app.effective_home_source() == HomeSource::Combined
+            && app.home_filter.is_none())
+        .then(|| combined_display(ui, &shelves, app.settings.home_primary_provider));
         for (index, shelf) in shelves.iter().enumerate() {
+            let projected = display
+                .as_ref()
+                .map(|display| (&display.shelves[index], display.song_rows[index].as_ref()));
             let source = shelf
                 .items
                 .first()
                 .map(crate::source_groups::entry_provider);
-            ui.push_id(("home-shelf", source, index), |ui| {
-                home_shelf(app, ui, shelf)
-            });
+            match projected {
+                Some((DisplayShelf::Hidden, _)) => {}
+                Some((DisplayShelf::Merged(shelf), rows)) => {
+                    ui.push_id(("home-merged-shelf", index), |ui| {
+                        merged_shelf(app, ui, shelf, rows);
+                    });
+                }
+                Some((DisplayShelf::Native, _)) | None => {
+                    ui.push_id(("home-shelf", source, index), |ui| {
+                        home_shelf(app, ui, shelf)
+                    });
+                }
+            }
         }
 
         // The feed goes on past what is loaded: YouTube serves it three shelves at a time, and
@@ -109,6 +174,30 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(theme::PAGE_INSET_X);
     });
+}
+
+fn merged_shelf(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    shelf: &Shelf,
+    rows: Option<&source_rows::State>,
+) {
+    ui.add_space(20.0);
+    if let Some(rows) = rows {
+        if let Some(line) = &shelf.strapline {
+            super::shelf_strapline(ui, &app.palette, line);
+        }
+        ui.label(
+            egui::RichText::new(&shelf.title)
+                .font(theme::bold(theme::SECTION_PT))
+                .color(app.palette.text),
+        );
+        ui.add_space(4.0);
+        source_rows::draw_with_options(app, ui, rows, "home", source_rows::Playback::List, false);
+    } else {
+        let more = (shelf.home_section() == HomeSection::NewReleases).then_some(Route::NewReleases);
+        shelf_carousel(app, ui, "home", shelf, more, crate::ui::MoreButton::ShowAll);
+    }
 }
 
 /// One Home shelf, in the shape YouTube Music's home gives it: songs as pages of rows, mood
