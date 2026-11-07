@@ -1,10 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { addressKey, allowance, hmacKey, issueId, reserve, validId, writeKey } from './guards.mjs';
 import { publicState, validState } from './state.mjs';
+import { playback, sessionVersion, syncRoom } from './session.mjs';
 
 const ttl = 45_000;
-const reply = (status, state) => new Response(state === undefined ? null : JSON.stringify(state), {
-  status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+const reply = (status, state, headers = {}) => new Response(state === undefined ? null : JSON.stringify(state), {
+  status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers },
 });
 const allowCreate = allowance('create');
 const allowPlayback = allowance('playback');
@@ -26,9 +27,18 @@ export class Room extends DurableObject {
   async read() {
     const room = await this.ctx.storage.get('room');
     if (!room || Date.now() - room.seen >= ttl) return reply(404);
-    const state = room.state;
-    return reply(200, state && { ...state, position: state.position +
-      (state.playing ? Math.max(0, Date.now() - room.seen) / 1000 : 0) });
+    return reply(200, playback(room, Date.now()), room.session ? { 'X-Moosik-Session': sessionVersion } : {});
+  }
+  sync(token, host, body) {
+    return this.ctx.storage.transactionSync(() => {
+      const kv = this.ctx.storage.kv;
+      const room = kv.get('room');
+      const now = Date.now();
+      if (!room || now - room.seen >= ttl) return reply(404);
+      const result = syncRoom(room, token, host, body, now);
+      if (result.status < 300) kv.put('room', room);
+      return reply(result.status, result.value);
+    });
   }
   async update(key, state, close) {
     const room = await this.ctx.storage.get('room');
@@ -55,7 +65,7 @@ export class Room extends DurableObject {
   }
 }
 
-async function readState(req) {
+async function readBody(req) {
   if (!req.body) throw new Error('missing body');
   const reader = req.body.getReader();
   let size = 0, text = '';
@@ -70,9 +80,7 @@ async function readState(req) {
     }
     text += decoder.decode(value, { stream: true });
   }
-  const state = JSON.parse(text + decoder.decode());
-  if (!validState(state)) throw new Error('invalid state');
-  return publicState(state);
+  return JSON.parse(text + decoder.decode());
 }
 
 export default {
@@ -87,7 +95,7 @@ export default {
       const id = await issueId(signer, Date.now());
       const key = await writeKey(signer, id);
       if (!await env.ROOMS.getByName(id).create(key)) return reply(503);
-      return reply(201, { id, key });
+      return reply(201, { id, key, session: sessionVersion });
     }
     const id = /^\/rooms\/([a-f0-9]{32})$/.exec(path)?.[1];
     if (!id) return reply(404);
@@ -101,15 +109,20 @@ export default {
       return env.ROOMS.getByName(id).read();
     }
     const key = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.get('Authorization') || '')?.[1];
-    if (!key) return reply(403);
-    const enc = new TextEncoder();
-    if (!crypto.subtle.timingSafeEqual(enc.encode(await writeKey(signer, id)), enc.encode(key))) return reply(403);
+    const sync = req.method === 'PUT' && req.headers.get('X-Moosik-Session') === sessionVersion;
+    const guest = req.headers.get('X-Moosik-Listener') || '';
+    if (key) {
+      const enc = new TextEncoder();
+      if (!crypto.subtle.timingSafeEqual(enc.encode(await writeKey(signer, id)), enc.encode(key))) return reply(403);
+    } else if (!sync || req.headers.has('Authorization') || !/^[0-9a-f]{32}$/.test(guest)) return reply(403);
     let state = null;
     if (req.method === 'PUT') {
-      try { state = await readState(req); }
+      try { state = await readBody(req); }
       catch (e) { return reply(e instanceof RangeError ? 413 : 400); }
+      if (!sync && !validState(state)) return reply(400);
     }
     if (!await allowPlayback(env, Date.now())) return reply(429);
-    return env.ROOMS.getByName(id).update(key, state, req.method === 'DELETE');
+    if (sync) return env.ROOMS.getByName(id).sync(guest, Boolean(key), state);
+    return env.ROOMS.getByName(id).update(key, publicState(state), req.method === 'DELETE');
   },
 };

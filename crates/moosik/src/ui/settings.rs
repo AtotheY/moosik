@@ -723,6 +723,7 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut presence = app.settings.discord_rich_presence;
     let mut hosting = app.settings.discord_host_listen_along;
+    let mut name = app.settings.session_name.clone();
     let mut leave = false;
     widgets::setting_group(ui, &p, None, |ui, g| {
         toggle_row(
@@ -743,6 +744,19 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
             "Let friends join your playback when Rich Presence is on.",
             &mut hosting,
         );
+        g.row(
+            ui,
+            "Session name",
+            "Shown to everyone in the listening session.",
+            |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .hint_text("Discord display name")
+                        .char_limit(32)
+                        .desired_width(150.0),
+                );
+            },
+        );
         if app.following() {
             g.row(
                 ui,
@@ -758,6 +772,7 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
     app.update_settings(&ctx, |s| {
         s.discord_rich_presence = presence;
         s.discord_host_listen_along = hosting;
+        s.session_name = name;
     });
     if leave {
         app.leave_room();

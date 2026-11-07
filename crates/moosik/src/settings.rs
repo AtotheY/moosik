@@ -313,6 +313,7 @@ pub struct Settings {
     pub discord_rich_presence: bool,
     /// Offer a synchronized listening invite while sharing a YouTube Music track.
     pub discord_host_listen_along: bool,
+    pub session_name: String,
     /// Folders scanned for local audio files, shown in the Library's Local tab. Absolute paths,
     /// same shape as `playlist_order`.
     pub local_folders: Vec<String>,
@@ -365,6 +366,7 @@ impl Default for Settings {
             hide_tray_on_close: false,
             discord_rich_presence: true,
             discord_host_listen_along: true,
+            session_name: String::new(),
             local_folders: Vec::new(),
             playlist_default_sort: crate::app::PlaylistSort::Default,
             sidebar_width: None,

@@ -261,6 +261,7 @@ struct MediaKey {
 }
 
 struct PresenceKey {
+    listeners: usize,
     id: Option<String>,
     title: String,
     artists: Vec<crate::model::ArtistLink>,
@@ -1868,7 +1869,7 @@ pub struct App {
     /// The Discord Rich Presence worker, while the setting is on and an application id is set.
     /// Dropping it tells the worker to clear the presence and stop.
     discord: Option<crate::discord::Discord>,
-    together: together::Together,
+    pub(crate) together: together::Together,
     /// What was last handed to Discord — the track's id, whether it was playing, and its title —
     /// so the presence is only resent when something material changes rather than every frame.
     presence_key: Option<PresenceKey>,
@@ -3094,6 +3095,7 @@ impl App {
         } else {
             track.duration.unwrap_or(0) as i64
         };
+        let listeners = self.room_snapshot().map_or(0, |room| room.members.len());
         if let Some(last) = &self.presence_key {
             let expected = self.presence_position
                 + if last.playing {
@@ -3101,7 +3103,8 @@ impl App {
                 } else {
                     0.0
                 };
-            if last.id == id
+            if last.listeners == listeners
+                && last.id == id
                 && last.title == track.title
                 && last.artists == track.artists
                 && last.playing == playing
@@ -3118,6 +3121,7 @@ impl App {
         discord.set(crate::discord::Presence {
             youtube_id: id.clone(),
             room: self.room_id().map(str::to_owned),
+            listeners,
             title: track.title.clone(),
             artist: track.artist_line(),
             thumbnail: track.thumbnail.as_deref().map(str::to_owned),
@@ -3126,6 +3130,7 @@ impl App {
             timeline,
         });
         self.presence_key = Some(PresenceKey {
+            listeners,
             id,
             playing,
             title: track.title.clone(),
@@ -3304,7 +3309,9 @@ impl App {
                 IdleEnd::Ended if self.following() => self.listening.finish("ended"),
                 IdleEnd::Ended => {
                     self.listening.finish("ended");
-                    if self.repeat == RepeatMode::One {
+                    if self.repeat == RepeatMode::One
+                        && self.room_snapshot().is_none_or(|s| s.queue.is_empty())
+                    {
                         if let Some(current) = self.q.current() {
                             self.play_index(current);
                         }
@@ -3380,6 +3387,7 @@ impl App {
         // Hand the OS widget the current transport. After the advance/autoplay above, so a track
         // that just changed is what the OS shows.
         self.poll_together();
+        crate::widgets::set_session_queue_menu(ctx, self.room_snapshot().map(|room| room.you == 0));
         self.publish_media();
         // Same snapshot, said to Discord.
         self.publish_presence();
@@ -6484,6 +6492,9 @@ impl App {
     }
 
     fn advance_queue(&mut self) {
+        if self.play_session_next() {
+            return;
+        }
         let next = self
             .q
             .next(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
@@ -6875,6 +6886,7 @@ impl App {
                 self.play_next(track);
                 self.toast("Song will play next");
             }
+            RowAction::AddToSession(track) => self.add_session_song(&track),
             RowAction::AddToQueue(track) => {
                 self.add_to_queue(track);
                 self.toast("Song added to queue");

@@ -2857,6 +2857,13 @@ fn add_button(ui: &mut Ui, palette: &Palette, rect: Rect, id: egui::Id) -> egui:
     response.on_hover_text("Add to playlist")
 }
 
+const SESSION_QUEUE: &str = "session-queue-available";
+
+/// A host has both a personal queue and a shared queue. Guests add to the shared one.
+pub(crate) fn set_session_queue_menu(ctx: &egui::Context, is_host: Option<bool>) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(SESSION_QUEUE), is_host));
+}
+
 /// A song's right-click menu, reporting the choice. Shared by every row and the player bar.
 ///
 /// The popup id is the video id, not the row index: indices shift as the virtualised range
@@ -2946,8 +2953,21 @@ fn row_menu_with_button(
                 }
                 mui.close();
             }
-            if menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked() {
+            let session_host = mui.ctx().data(|d| {
+                d.get_temp::<Option<bool>>(egui::Id::new(SESSION_QUEUE))
+                    .flatten()
+            });
+            if session_host != Some(false)
+                && menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked()
+            {
                 choice = Some(RowAction::AddToQueue(t.clone()));
+                mui.close();
+            }
+            if t.local_path.is_none()
+                && session_host.is_some()
+                && menu_item(mui, palette, Icon::ListPlus, "Add to session queue", None).clicked()
+            {
+                choice = Some(RowAction::AddToSession(t.clone()));
                 mui.close();
             }
             if let Some(i) = menu.queue_index

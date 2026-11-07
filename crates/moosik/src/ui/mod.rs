@@ -418,6 +418,7 @@ pub(crate) enum RowAction {
     RemoveDownload(String),
     PlayNext(Track),
     AddToQueue(Track),
+    AddToSession(Track),
     GoToAlbum(String),
     GoToArtist(String),
     /// Copy a song's link.

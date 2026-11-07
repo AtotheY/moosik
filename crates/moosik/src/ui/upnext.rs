@@ -22,7 +22,7 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let upcoming = app
         .q
         .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-    if upcoming.is_empty() && app.q.current_track().is_none() {
+    if upcoming.is_empty() && app.q.current_track().is_none() && app.room_snapshot().is_none() {
         edit_controls(app, ui, &upcoming, true);
         centered(app, ui, "Empty queue");
         return;
@@ -42,7 +42,16 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         // and it scrolls away with it — the same distance the content has from the sides.
         ui.add_space(8.0);
         now_playing(app, ui, false);
-        section(app, ui, 8.0, "Next up");
+        session_queue(app, ui, false);
+        if app.following() && app.room_snapshot().is_some() {
+            return;
+        }
+        let label = if app.room_snapshot().is_some() {
+            "Personal queue"
+        } else {
+            "Next up"
+        };
+        section(app, ui, 8.0, label);
         next_up(app, ui, &upcoming);
     });
     // Where the list is scrolled to, for the fullscreen view's edge fades: they only belong where
@@ -172,6 +181,10 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
         if app.q.current_track().is_none() && app.q.tracks().is_empty() {
+            if app.room_snapshot().is_some() {
+                session_queue(app, ui, true);
+                return;
+            }
             edit_controls(app, ui, &[], false);
             centered(app, ui, "Your queue is empty. Play a song to get started.");
             return;
@@ -183,6 +196,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 .cloned()
                 .into_iter()
                 .chain(
+                    app.room_snapshot()
+                        .into_iter()
+                        .flat_map(|room| room.queue.iter().map(|e| e.song.track())),
+                )
+                .chain(
                     app.q
                         .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen))
                         .into_iter()
@@ -193,10 +211,19 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
         ui.add_space(12.0);
         now_playing(app, ui, true);
+        session_queue(app, ui, true);
+        if app.following() && app.room_snapshot().is_some() {
+            return;
+        }
         let upcoming = app
             .q
             .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-        crate::ui::section(ui, &app.palette, "Next up");
+        let label = if app.room_snapshot().is_some() {
+            "Personal queue"
+        } else {
+            "Next up"
+        };
+        crate::ui::section(ui, &app.palette, label);
         if upcoming.is_empty() {
             edit_controls(app, ui, &upcoming, false);
             ui.label(
@@ -208,6 +235,93 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             next_up(app, ui, &upcoming);
         }
     });
+}
+
+fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
+    let Some(room) = app.together.snapshot() else {
+        return;
+    };
+    let p = app.palette;
+    if let Some(by) = &room.current_by {
+        ui.label(
+            egui::RichText::new(format!("Added by {}", by.name))
+                .font(theme::regular(12.0))
+                .color(p.secondary),
+        );
+    }
+    if page {
+        crate::ui::section(ui, &p, "Listening session");
+    } else {
+        section(app, ui, 8.0, "Listening session");
+    }
+    let names = room
+        .members
+        .iter()
+        .map(|m| {
+            let role = match (m.id == 0, m.id == room.you) {
+                (true, true) => " (you, host)",
+                (true, false) => " (host)",
+                (false, true) => " (you)",
+                _ => "",
+            };
+            format!("{}{role}", m.name)
+        })
+        .collect::<Vec<_>>()
+        .join("   ·   ");
+    ui.label(
+        egui::RichText::new(names)
+            .font(theme::medium(13.0))
+            .color(p.text),
+    );
+    section(app, ui, 8.0, "Session queue");
+    if room.queue.is_empty() {
+        ui.label(
+            egui::RichText::new("Use a song’s menu to add it to the session queue.")
+                .font(theme::regular(13.0))
+                .color(p.secondary),
+        );
+    }
+    for entry in &room.queue {
+        let track = entry.song.track();
+        ui.horizontal(|ui| {
+            ui.set_min_height(theme::ROW_HEIGHT);
+            ui.add_space(theme::ROW_LEFT_INSET);
+            let (rect, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(theme::ART_SIZE), egui::Sense::hover());
+            let art = crate::ui::art_texture(
+                &mut app.images,
+                &app.backend,
+                ui.ctx(),
+                track.thumbnail.as_ref(),
+                theme::ART_SIZE,
+            );
+            widgets::paint_art(ui, &p, rect, art, ArtShape::Square);
+            ui.vertical(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&entry.song.title)
+                            .font(theme::medium(theme::ROW_TITLE_PT))
+                            .color(p.text),
+                    )
+                    .truncate(),
+                );
+                let credit = if entry.song.artist.is_empty() {
+                    format!("Added by {}", entry.by.name)
+                } else {
+                    format!("{}  ·  Added by {}", entry.song.artist, entry.by.name)
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&credit)
+                            .font(theme::regular(12.0))
+                            .color(p.secondary),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(credit);
+            });
+        });
+    }
 }
 
 fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
