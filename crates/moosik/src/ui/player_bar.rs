@@ -339,6 +339,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(route) = navigate {
+        let route = match route {
+            Route::Artist(id) => app.combined_artist_route(&id).unwrap_or(Route::Artist(id)),
+            route => route,
+        };
         app.navigate(route);
     }
     // A primary click on the title opens its album or single; the menu is the right-click.

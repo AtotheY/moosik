@@ -1970,6 +1970,22 @@ fn same_queue(a: &[Track], b: &[Track]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.video_id == y.video_id)
 }
 
+fn matched_artist_route(
+    id: &str,
+    pairs: impl IntoIterator<Item = (String, String)>,
+) -> Option<Route> {
+    let mut pairs = pairs
+        .into_iter()
+        .filter(|(youtube, spotify)| id == youtube.as_str() || id == spotify.as_str());
+    let (youtube, spotify) = pairs.next()?;
+    if pairs
+        .any(|(other_youtube, other_spotify)| other_youtube != youtube || other_spotify != spotify)
+    {
+        return None;
+    }
+    Some(Route::ArtistGroup { youtube, spotify })
+}
+
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How long "Later" on the update window keeps the launch check quiet about that release.
 const UPDATE_LATER_SECS: i64 = 24 * 60 * 60;
@@ -3674,6 +3690,33 @@ impl App {
     /// The page currently on screen.
     pub(crate) fn current_route(&self) -> Route {
         self.history.current().clone()
+    }
+
+    pub(crate) fn combined_artist_route(&self, id: &str) -> Option<Route> {
+        if !self.signed_in() || !crate::spotify::is_signed_in() {
+            return None;
+        }
+        let active = self
+            .artist_sources
+            .ids()
+            .map(|(youtube, spotify)| (youtube.to_owned(), spotify.to_owned()));
+        let history = self.history.entries.iter().filter_map(|route| {
+            if let Route::ArtistGroup { youtube, spotify } = route {
+                Some((youtube.clone(), spotify.clone()))
+            } else {
+                None
+            }
+        });
+        matched_artist_route(
+            id,
+            active
+                .into_iter()
+                .chain(self.search_source_rows.artist_profiles(id))
+                .chain(self.library_source_rows.artist_profiles(id))
+                .chain(self.playlist_source_rows.artist_profiles(id))
+                .chain(self.artist_sources.rows.artist_profiles(id))
+                .chain(history),
+        )
     }
 
     pub(crate) fn navigate(&mut self, route: Route) {
@@ -10665,6 +10708,47 @@ mod tests {
         ));
         assert!(!same_queue(&[track("x")], &[track("x"), track("y")]));
         assert!(!same_queue(&[], &playing));
+    }
+
+    #[test]
+    fn artist_route_accepts_either_native_id_and_agreeing_pairs() {
+        let youtube = "UCartist";
+        let spotify = "spotify:artist:74ASZWbe4lXaubB36ztrGX";
+        let expected = Some(Route::ArtistGroup {
+            youtube: youtube.to_owned(),
+            spotify: spotify.to_owned(),
+        });
+        for id in [youtube, spotify] {
+            let pairs = [
+                (youtube.to_owned(), spotify.to_owned()),
+                ("UCother".to_owned(), "spotify:artist:other".to_owned()),
+                (youtube.to_owned(), spotify.to_owned()),
+            ];
+            assert_eq!(matched_artist_route(id, pairs), expected);
+        }
+    }
+
+    #[test]
+    fn artist_route_does_not_guess_unknown_or_unrelated_ids() {
+        for id in ["missing", "Artist", ""] {
+            let pairs = [("UCartist".to_owned(), "spotify:artist:known".to_owned())];
+            assert!(matched_artist_route(id, pairs).is_none());
+        }
+        assert!(matched_artist_route("UCartist", []).is_none());
+    }
+
+    #[test]
+    fn artist_route_rejects_conflicting_pairs_in_either_direction() {
+        let pairs = [
+            ("UCartist".to_owned(), "spotify:artist:first".to_owned()),
+            ("UCartist".to_owned(), "spotify:artist:second".to_owned()),
+        ];
+        assert!(matched_artist_route("UCartist", pairs).is_none());
+        let pairs = [
+            ("UCfirst".to_owned(), "spotify:artist:shared".to_owned()),
+            ("UCsecond".to_owned(), "spotify:artist:shared".to_owned()),
+        ];
+        assert!(matched_artist_route("spotify:artist:shared", pairs).is_none());
     }
 
     /// A failure toast says why when the error tells, and nothing technical ever reaches it.

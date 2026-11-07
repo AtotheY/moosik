@@ -603,6 +603,8 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|a| a.id.clone())
         .unwrap_or_default();
+    let combined = app.artist_id().and_then(|id| app.combined_artist_route(id));
+    let mut open_combined = false;
     let mut play_clicked = false;
     let mut play_target = None;
     let mut subscribe_to = None;
@@ -628,6 +630,9 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
                     play_clicked = true;
                 }
                 ui.add_space(6.0);
+            }
+            if combined.is_some() && widgets::outline_button(ui, &p, "Both sources").clicked() {
+                open_combined = true;
             }
             // Mix leads the pair: when both are on offer, starting a mix is the one worth
             // reaching for first.
