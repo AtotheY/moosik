@@ -3818,7 +3818,10 @@ impl App {
             return false;
         }
         let waiting = match self.auth {
-            crate::auth::AuthState::Checking => true,
+            crate::auth::AuthState::Checking => matches!(
+                self.effective_home_source(),
+                crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
+            ),
             // The shell paints before the landing feed is in — the rail, the chips, a grid of
             // skeletons — and that half-built frame is the same flash the splash exists to cover.
             // Hold until Home has something real to show, or has failed and has an error to show.
@@ -4085,16 +4088,109 @@ impl App {
         }
     }
 
-    fn load_home(&mut self) {
-        if matches!(self.auth, crate::auth::AuthState::Checking) {
+    pub(crate) fn home_sources(&self) -> crate::providers::HomeSources {
+        use crate::settings::HomeSource;
+        let spotify = crate::spotify::is_signed_in();
+        let local = self.has_local_music();
+        match self.effective_home_source() {
+            HomeSource::Combined if self.home_filter.is_some() => crate::providers::HomeSources {
+                youtube: true,
+                spotify: false,
+            },
+            HomeSource::Combined => crate::providers::HomeSources {
+                youtube: self.signed_in() || (!spotify && !local),
+                spotify,
+            },
+            HomeSource::YouTubeMusic => crate::providers::HomeSources {
+                youtube: true,
+                spotify: false,
+            },
+            HomeSource::Spotify => crate::providers::HomeSources {
+                youtube: false,
+                spotify,
+            },
+            HomeSource::Local => crate::providers::HomeSources::default(),
+        }
+    }
+
+    pub(crate) fn home_includes_local(&self) -> bool {
+        if self.home_filter.is_some() {
+            return false;
+        }
+        match self.effective_home_source() {
+            crate::settings::HomeSource::Local => true,
+            crate::settings::HomeSource::Combined => self.has_local_music(),
+            _ => false,
+        }
+    }
+
+    fn prepare_home_shelves(
+        &self,
+        mut shelves: Vec<crate::model::Shelf>,
+    ) -> Vec<crate::model::Shelf> {
+        let sources = self.home_sources();
+        shelves.retain(|shelf| match crate::home_feed::shelf_provider(shelf) {
+            Some(crate::model::Provider::YouTubeMusic) => sources.youtube,
+            Some(crate::model::Provider::Spotify) => sources.spotify,
+            Some(crate::model::Provider::Local) => false,
+            None => sources.youtube || sources.spotify,
+        });
+        if self.home_includes_local() {
+            shelves.extend(crate::home_feed::local_shelves(
+                &self.local_tracks,
+                &self.library.playlists.items,
+            ));
+        }
+        self.order_home_shelves(&mut shelves);
+        shelves
+    }
+
+    fn refresh_local_home(&mut self) {
+        let sources = self.home_sources();
+        if (self.home.is_some() || self.home_loading)
+            && self.home_requested_sources != (sources.youtube, sources.spotify)
+        {
+            self.clear_home();
+            self.load_home();
             return;
         }
+        if let Some(home) = self.home.take() {
+            self.home = Some(Arc::new(
+                self.prepare_home_shelves(Arc::unwrap_or_clone(home)),
+            ));
+        }
+    }
+
+    fn load_home(&mut self) {
+        if matches!(self.auth, crate::auth::AuthState::Checking)
+            && matches!(
+                self.effective_home_source(),
+                crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
+            )
+        {
+            return;
+        }
+        let sources = self.home_sources();
+        let key = (sources.youtube, sources.spotify);
+        if (self.home.is_some() || self.home_loading) && self.home_requested_sources != key {
+            self.clear_home();
+        }
         if self.home.is_none() && self.home_error.is_none() && !self.home_loading {
+            self.home_requested_sources = key;
+            if !sources.youtube && !sources.spotify {
+                self.home = Some(Arc::new(self.prepare_home_shelves(Vec::new())));
+                self.home_chips.clear();
+                self.home_next = None;
+                self.home_loaded_at = Some(Instant::now());
+                return;
+            }
             self.home_loading = true;
             self.backend.fetch_home(
                 self.home_filter.clone(),
-                self.account_epoch,
+                self.browsing_epoch,
+                self.home_request,
                 self.home_fetch(),
+                sources,
             );
         }
     }
@@ -4102,7 +4198,11 @@ impl App {
     /// Empty the home feed and everything that hangs off it — for a sign-out, an account
     /// switch, a new filter.
     fn clear_home(&mut self) {
+        self.home_request = self.home_request.wrapping_add(1);
         self.home = None;
+        self.home_loading = false;
+        self.home_warnings.clear();
+        self.home_chips.clear();
         self.home_error = None;
         self.home_next = None;
         self.home_more_loading = false;
@@ -4122,8 +4222,12 @@ impl App {
         };
         self.home_more_loading = true;
         tracing::debug!("home: loading the next page of the feed");
-        self.backend
-            .fetch_home_more(token, self.home_filter.clone(), self.account_epoch);
+        self.backend.fetch_home_more(
+            token,
+            self.home_filter.clone(),
+            self.browsing_epoch,
+            self.home_request,
+        );
     }
 
     /// Whether the full list behind this shelf's "Show all" is on its way.
@@ -4147,12 +4251,25 @@ impl App {
             return;
         }
         tracing::info!("home feed is stale; refreshing it");
+        let sources = self.home_sources();
+        if !sources.youtube && !sources.spotify {
+            self.refresh_local_home();
+            self.home_loaded_at = Some(Instant::now());
+            return;
+        }
+        self.home_request = self.home_request.wrapping_add(1);
+        self.home_requested_sources = (sources.youtube, sources.spotify);
+        self.home_more_loading = false;
+        self.home_shelf_full = None;
+        self.home_shelf_loading = None;
         self.home_refreshing = true;
         self.home_loading = true;
         self.backend.fetch_home(
             self.home_filter.clone(),
-            self.account_epoch,
+            self.browsing_epoch,
+            self.home_request,
             self.home_fetch(),
+            sources,
         );
     }
 
@@ -4166,11 +4283,15 @@ impl App {
         {
             return;
         }
-        let Some(shelf) = self
-            .home
-            .as_ref()
-            .and_then(|h| h.iter().find(|s| s.title == title))
-        else {
+        let Some(shelf) = self.home.as_ref().and_then(|h| {
+            h.iter().find(|s| {
+                s.title == title
+                    && crate::home_feed::shelf_provider(s)
+                        == Some(crate::model::Provider::YouTubeMusic)
+                    && s.more_browse_id.is_some()
+                    && s.more_params.is_some()
+            })
+        }) else {
             return;
         };
         let (Some(browse_id), Some(params)) =
@@ -4181,7 +4302,7 @@ impl App {
         self.home_shelf_full = None;
         self.home_shelf_loading = Some(title.to_owned());
         self.backend
-            .fetch_home_shelf(browse_id, params, title.to_owned());
+            .fetch_home_shelf(browse_id, params, title.to_owned(), self.home_request);
     }
 
     /// Filter the home feed through a mood-bar chip. `None` clears back to the default feed,
@@ -4194,14 +4315,8 @@ impl App {
         }
         self.home_filter = params;
         self.clear_home();
-        self.home_error = None;
-        self.home_loading = true;
         self.scroll_to_top = true;
-        self.backend.fetch_home(
-            self.home_filter.clone(),
-            self.account_epoch,
-            self.home_fetch(),
-        );
+        self.load_home();
     }
 
     fn artist_is_for(&self, id: &str) -> bool {
@@ -7192,11 +7307,13 @@ impl App {
 
     /// Arrange shelves by the listener's Home order — for the default feed only: with a mood chip
     /// selected the shelves are that mood's own and keep the order they came in.
-    fn order_home_shelves(&self, shelves: &mut [crate::model::Shelf]) {
+    fn order_home_shelves(&self, shelves: &mut Vec<crate::model::Shelf>) {
         if self.home_filter.is_none() {
-            crate::model::order_home(
+            crate::home_feed::arrange(
                 shelves,
                 &crate::model::normalise_order(&self.settings.home_order),
+                self.effective_home_source() == crate::settings::HomeSource::Combined,
+                self.settings.home_primary_provider,
             );
         }
     }

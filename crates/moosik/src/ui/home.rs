@@ -1,15 +1,7 @@
-//! Home: the feed YouTube Music would actually serve.
-//!
-//! This used to be a moods list and a recent-plays shelf we assembled ourselves, which meant none
-//! of YouTube's ranking reached the page. It is now `FEmusic_home` verbatim — Listen again, Mixed
-//! for you and Quick picks when signed in — with Explore's shelves appended while the anonymous
-//! feed is thin. Its shelves are YouTube's own, but their order is the listener's: the sections
-//! named in Settings' "Order of homepage" go where it puts them (see `model::order_home`), and
-//! everything else follows in the order YouTube sent.
-
 use crate::app::{App, Route};
-use crate::auth::AuthState;
 use crate::icons::Icon;
+use crate::model::Provider;
+use crate::settings::HomeSource;
 use crate::theme;
 use crate::ui::{failed, shelf_carousel, song_shelf};
 use crate::widgets;
@@ -20,7 +12,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // The first row's distance from the card's top, matching the sides.
         ui.add_space(theme::PAGE_INSET_X);
         // The feed's own mood chips head it, as `filter_chips` draws them.
-        widgets::skeleton_pills(ui, &app.palette, 10);
+        filter_chips(app, ui);
         ui.add_space(4.0);
         // The real feed is several titled shelves, mixing grids and row-lists — never one
         // untitled block. Which shelves are coming can't be known before they load, so this is
@@ -29,7 +21,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // grid, then more cards. Each with the air `home_shelf` and `song_shelf` give theirs.
         ui.add_space(20.0);
         // Signed in, Listen again carries a line over its title — the account's name.
-        if app.signed_in() {
+        if app.home_sources().youtube && app.signed_in() {
             widgets::skeleton_strapline(ui, &app.palette);
         }
         widgets::skeleton_shelf(
@@ -63,6 +55,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // distance from the card's top — the same as from its sides — and it scrolls away with
         // the feed. Outside the area it was a fixed band the feed was clipped under.
         ui.add_space(theme::PAGE_INSET_X);
+        home_warnings(app, ui);
         sign_in_note(app, ui);
         filter_chips(app, ui);
 
@@ -72,8 +65,28 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         let Some(shelves) = app.home.clone() else {
             return;
         };
-        for s in shelves.iter() {
-            home_shelf(app, ui, s);
+        if shelves.iter().all(|shelf| shelf.items.is_empty()) {
+            if app.home_has_more() || app.home_more_loading {
+                app.load_home_more();
+                widgets::skeleton_shelf(
+                    ui,
+                    &app.palette,
+                    widgets::SkeletonShelfShape::Cards(widgets::ArtShape::Square),
+                    1,
+                );
+            } else {
+                empty_home(app, ui);
+            }
+            return;
+        }
+        for (index, shelf) in shelves.iter().enumerate() {
+            let source = shelf
+                .items
+                .first()
+                .map(crate::source_groups::entry_provider);
+            ui.push_id(("home-shelf", source, index), |ui| {
+                home_shelf(app, ui, shelf)
+            });
         }
 
         // The feed goes on past what is loaded: YouTube serves it three shelves at a time, and
@@ -114,8 +127,11 @@ fn home_shelf(app: &mut App, ui: &mut egui::Ui, s: &crate::model::Shelf) {
     // "Show all" only where there is more than the row already holds — a shelf whose header
     // names its own full list. Elsewhere the arrows reach every item, and a page repeating them
     // would add nothing. YouTube Music's own "More" appears on the same shelves.
-    let more = (!s.is_mood_list() && s.more_browse_id.is_some() && s.more_params.is_some())
-        .then(|| Route::HomeShelf(s.title.clone()));
+    let more = (!s.is_mood_list()
+        && youtube_shelf(s)
+        && s.more_browse_id.is_some()
+        && s.more_params.is_some())
+    .then(|| Route::HomeShelf(s.title.clone()));
     shelf_carousel(app, ui, "home", s, more, crate::ui::MoreButton::ShowAll);
 }
 
@@ -128,9 +144,16 @@ pub fn shelf_page(app: &mut App, ui: &mut egui::Ui, title: &str) {
         .filter(|(t, _)| t == title)
         .map(|(_, shelf)| std::sync::Arc::clone(shelf));
     let home = app.home.clone();
-    let from_home = home
-        .as_ref()
-        .and_then(|h| h.iter().find(|s| s.title == title));
+    let from_home = home.as_ref().and_then(|h| {
+        h.iter()
+            .find(|s| {
+                s.title == title
+                    && youtube_shelf(s)
+                    && s.more_browse_id.is_some()
+                    && s.more_params.is_some()
+            })
+            .or_else(|| h.iter().find(|s| s.title == title && youtube_shelf(s)))
+    });
     crate::ui::page_scroll(app, "home-shelf").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, title);
         let Some(shelf) = full.as_deref().or(from_home) else {
@@ -150,6 +173,8 @@ pub fn shelf_page(app: &mut App, ui: &mut egui::Ui, title: &str) {
             ui.add_space(8.0);
         }
         let signed_in = app.signed_in();
+        let preferred_provider = app.settings.preferred_provider;
+        let group_sources = app.can_group_sources();
         let grid = {
             let App {
                 palette,
@@ -164,6 +189,8 @@ pub fn shelf_page(app: &mut App, ui: &mut egui::Ui, title: &str) {
             let ctx = crate::ui::ReleaseCtx {
                 playlists: &library.playlists.items,
                 signed_in,
+                preferred_provider,
+                group_sources,
                 rail: rail_cache,
                 albums: album_cache,
             };
@@ -235,8 +262,20 @@ fn filter_row(
 }
 
 fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
-    if app.home_chips.is_empty() {
+    if app.home_chips.is_empty() || !app.home_sources().youtube {
         return;
+    }
+    if app.effective_home_source() == HomeSource::Combined {
+        let label = if app.home_chips.iter().any(|chip| chip.selected) {
+            "YouTube Music only"
+        } else {
+            "YouTube Music moods"
+        };
+        ui.label(
+            egui::RichText::new(label)
+                .font(theme::regular(12.0))
+                .color(app.palette.dim),
+        );
     }
     let palette = app.palette;
     let (choice, _) = filter_row(ui, &palette, &app.home_chips);
@@ -249,7 +288,8 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn sign_in_note(app: &mut App, ui: &mut egui::Ui) {
-    if matches!(app.auth, AuthState::SignedIn { .. }) {
+    if !app.connected_providers().is_empty() || app.has_local_music() || !app.home_sources().youtube
+    {
         return;
     }
     ui.label(
@@ -271,6 +311,90 @@ fn sign_in_note(app: &mut App, ui: &mut egui::Ui) {
         );
     }
     ui.add_space(4.0);
+}
+
+fn youtube_shelf(shelf: &crate::model::Shelf) -> bool {
+    !shelf.items.is_empty()
+        && shelf
+            .items
+            .iter()
+            .all(|entry| crate::source_groups::entry_provider(entry) == Provider::YouTubeMusic)
+}
+
+fn provider_settings(app: &mut App, provider: Provider) {
+    app.settings_tab = crate::ui::settings::SettingsTab::Providers;
+    app.settings_provider = provider;
+    app.navigate(Route::Settings);
+}
+
+fn manage_providers(app: &mut App) {
+    let provider = app
+        .connected_providers()
+        .first()
+        .copied()
+        .or_else(|| app.available_providers().first().copied())
+        .unwrap_or(Provider::YouTubeMusic);
+    provider_settings(app, provider);
+}
+
+fn home_warnings(app: &mut App, ui: &mut egui::Ui) {
+    if app.home_warnings.is_empty() {
+        return;
+    }
+    for warning in &app.home_warnings {
+        ui.label(
+            egui::RichText::new(warning)
+                .font(theme::regular(12.0))
+                .color(app.palette.danger),
+        );
+    }
+    if widgets::outline_button(ui, &app.palette, "Try again").clicked() {
+        app.retry_route();
+    }
+    ui.add_space(8.0);
+}
+
+fn empty_home(app: &mut App, ui: &mut egui::Ui) {
+    ui.add_space(theme::PAGE_INSET_X);
+    match app.effective_home_source() {
+        HomeSource::Local if app.has_local_music() => {
+            let message = if app.local_scanning {
+                "Reading your music folders…"
+            } else {
+                "Add music folders to fill your Home."
+            };
+            ui.label(
+                egui::RichText::new(message)
+                    .font(theme::regular(13.0))
+                    .color(app.palette.dim),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if widgets::pill_button(ui, &app.palette, "Add folders").clicked() {
+                    provider_settings(app, Provider::Local);
+                }
+                if widgets::outline_button(ui, &app.palette, "Manage providers").clicked() {
+                    manage_providers(app);
+                }
+            });
+        }
+        _ => {
+            ui.label(
+                egui::RichText::new("Nothing to show on Home yet.")
+                    .font(theme::regular(13.0))
+                    .color(app.palette.dim),
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if widgets::outline_button(ui, &app.palette, "Try again").clicked() {
+                    app.retry_route();
+                }
+                if widgets::outline_button(ui, &app.palette, "Manage providers").clicked() {
+                    manage_providers(app);
+                }
+            });
+        }
+    }
 }
 
 #[cfg(test)]
