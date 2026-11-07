@@ -3471,6 +3471,10 @@ impl App {
     }
 
     fn start_download(&mut self, track: Track) {
+        if track.is_spotify() {
+            self.toast_error("Spotify downloads are unavailable");
+            return;
+        }
         if !self.can_download() {
             self.toast_error("Downloads need YouTube Premium");
             return;
@@ -3489,6 +3493,10 @@ impl App {
     }
 
     fn start_download_many(&mut self, tracks: Vec<Track>) {
+        if !tracks.is_empty() && tracks.iter().all(Track::is_spotify) {
+            self.toast_error("Spotify downloads are unavailable");
+            return;
+        }
         if !self.can_download() {
             self.toast_error("Downloads need YouTube Premium");
             return;
@@ -3496,7 +3504,8 @@ impl App {
         let pending: Vec<Track> = tracks
             .into_iter()
             .filter(|t| {
-                !self.downloads.entries.contains_key(&t.video_id)
+                !t.is_spotify()
+                    && !self.downloads.entries.contains_key(&t.video_id)
                     && !self.download_progress.contains_key(&t.video_id)
             })
             .collect();
@@ -7262,6 +7271,10 @@ impl App {
                 self.toast(&format!("Won't recommend {name}"));
             }
             RowAction::StartMix(id) => {
+                if crate::model::is_spotify_id(&id) {
+                    self.toast_error("Spotify radio is unavailable");
+                    return;
+                }
                 self.note_playback_choice();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
@@ -7291,6 +7304,10 @@ impl App {
                 self.toast("Link copied");
             }
             RowAction::Rate { video_id, status } => {
+                if crate::model::is_spotify_id(&video_id) {
+                    self.toast_error("Spotify ratings are unavailable");
+                    return;
+                }
                 if !self.signed_in() {
                     // No optimistic update and no request: without a session the write is
                     // impossible, and painting it first would flicker.
@@ -7304,6 +7321,10 @@ impl App {
                 self.backend.rate(video_id, status, previous);
             }
             RowAction::ToggleLibrary(track) => {
+                if track.is_spotify() {
+                    self.toast_error("Spotify library changes are unavailable");
+                    return;
+                }
                 if !self.signed_in() {
                     self.toast_error("Sign in to save songs");
                     return;
@@ -7332,6 +7353,24 @@ impl App {
                 playlist_id,
                 video_id,
             } => {
+                if crate::model::is_spotify_id(&video_id) {
+                    if playlist_id.starts_with("private:") {
+                        let mut found = None;
+                        self.for_each_track(|track| {
+                            if track.video_id == video_id {
+                                found = Some(track.clone());
+                            }
+                        });
+                        if let Some(track) = found {
+                            self.add_private_tracks(&playlist_id, &[track]);
+                        } else {
+                            self.toast_error("Track metadata is unavailable");
+                        }
+                        return;
+                    }
+                    self.toast_error("Use a private playlist for Spotify tracks");
+                    return;
+                }
                 // A local playlist's own target list (`widgets::row_menu`) only ever offers
                 // other local playlists, so this id names one — `video_id` is that track's
                 // canonical path, per `Track.local_path`'s own doc comment.

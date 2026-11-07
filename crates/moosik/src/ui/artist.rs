@@ -620,7 +620,7 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         };
         ui.add_space(14.0);
         let mut dots = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // No songs, no Play: a channel page can carry a banner and a shelf of videos but no
             // top-songs shelf at all, and a leading button with nothing behind it is a dead end.
             if !a.top_songs.is_empty() {
@@ -631,14 +631,16 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
             }
             // Mix leads the pair: when both are on offer, starting a mix is the one worth
             // reaching for first.
-            if let Some(target) = &a.actions.mix
+            if !a.id.starts_with("spotify:")
+                && let Some(target) = &a.actions.mix
                 && widgets::icon_button(ui, &p, crate::icons::Icon::Radio, 20.0, false)
                     .on_hover_text("Mix")
                     .clicked()
             {
                 play_target = Some(target.clone());
             }
-            if let Some(target) = &a.actions.shuffle
+            if !a.id.starts_with("spotify:")
+                && let Some(target) = &a.actions.shuffle
                 && widgets::icon_button(ui, &p, crate::icons::Icon::Shuffle, 20.0, false)
                     .on_hover_text("Shuffle")
                     .clicked()
@@ -656,7 +658,7 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
             if let Some(subscribed) = a
                 .actions
                 .subscribed
-                .filter(|_| own_channel != Some(a.id.as_str()))
+                .filter(|_| !a.id.starts_with("spotify:") && own_channel != Some(a.id.as_str()))
             {
                 // The count rides the button only while the audience line above shows something
                 // else (a monthly listener total). When the line *is* the subscriber count,
@@ -729,6 +731,10 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         (action, description.flatten())
     };
 
+    if open_combined && let Some(route) = combined {
+        app.navigate(route);
+        return;
+    }
     if play_clicked {
         // Already on this list: the button showed Pause, so this is resume/pause, not a restart.
         let tracks = app

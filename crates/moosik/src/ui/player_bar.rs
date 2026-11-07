@@ -129,7 +129,13 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // and the credits share the field width from this column, so a short title leaves
     // the credits the whole room instead of almost none. No thumb width when signed
     // out: the thumbs do not draw, so the title keeps the room.
-    let thumbs_w = if app.signed_in() { 72.0 } else { 0.0 };
+    let ratable = app.signed_in()
+        && app
+            .now
+            .track
+            .as_ref()
+            .is_some_and(|track| track.provider() == crate::model::Provider::YouTubeMusic);
+    let thumbs_w = if ratable { 72.0 } else { 0.0 };
     // The seek bar is wider than the transport, and its elapsed-time label hangs left of
     // the bar at subtitle height — the title has to clear the label, not just the buttons,
     // or long titles sit underneath it. The total stands in for the elapsed (at least as
@@ -197,7 +203,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|t| widgets::subtitle_width(ui, &crate::ui::track_subtitle(t), None))
         .unwrap_or(0.0)
-        .max(widgets::text_width(ui, &title, &theme::medium(13.0)));
+        .max(
+            widgets::text_width(ui, &title, &theme::medium(13.0))
+                + if app.now.track.is_some() { 22.0 } else { 0.0 },
+        );
     let text_w = (content_w + 8.0)
         .clamp(24.0, FIELD_MAX_W)
         .min((transport_start - thumbs_w - 8.0 - title_x).max(0.0))
@@ -241,7 +250,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     let title_hit = widgets::marquee_line(
         ui,
         title_pos,
-        field_w,
+        title_field_w,
         &title,
         title_font,
         p.text,
@@ -342,9 +351,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // Borrow the track to read `like`; the whole `Track` was being deep-cloned every frame
     // just for this. `video_id` is only cloned on an actual click.
     let mut rate: Option<RowAction> = None;
-    if app.signed_in()
-        && let Some(track) = app.now.track.as_ref()
-    {
+    if ratable && let Some(track) = app.now.track.as_ref() {
         let thumbs = Rect::from_min_size(
             egui::pos2(thumbs_x, rect.center().y - 16.0),
             vec2(thumbs_w, 32.0),

@@ -2331,6 +2331,7 @@ pub fn track_row<'a>(ui: &mut Ui, palette: &Palette, row: TrackRow<'a>) -> RowCl
         quiet_like,
         add_to,
     } = row;
+    let show_rating = show_rating && menu.as_ref().is_none_or(|menu| !menu.track.is_spotify());
     let mut link = None;
     // `click_and_drag`, not `click`: a row inside the open playlist's own editable track list
     // can be dragged to reorder it (see `spec_rows`, the only place that ever reads a drag
@@ -2881,6 +2882,7 @@ fn row_menu_with_button(
 ) -> Option<super::ui::RowAction> {
     use super::ui::RowAction;
     let t = menu.track;
+    let youtube = t.local_path.is_none() && !t.is_spotify();
     let id = match menu.queue_index {
         Some(index) => ui.id().with(("ytm-queue-row-menu", index)),
         None => ui.id().with(("ytm-row-menu", t.video_id.as_str())),
@@ -2935,7 +2937,8 @@ fn row_menu_with_button(
 
             // Block one: what to do with it now. No title header — you know which row you
             // right-clicked, and a truncated one only ate a row's worth of height.
-            if menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked() {
+            if !t.is_spotify() && menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked()
+            {
                 choice = Some(RowAction::StartMix(t.video_id.clone()));
                 mui.close();
             }
@@ -3018,10 +3021,16 @@ fn row_menu_with_button(
                 .playlists
                 .iter()
                 .filter(|p| {
-                    p.editable && p.source == wanted_source && !p.id.starts_with("private:")
+                    !t.is_spotify()
+                        && p.editable
+                        && p.source == wanted_source
+                        && !p.id.starts_with("private:")
                 })
                 .collect();
-            let removable = menu.playlist_id.zip(t.set_video_id.as_deref());
+            let removable = menu
+                .playlist_id
+                .zip(t.set_video_id.as_deref())
+                .filter(|_| !t.is_spotify());
             // A download item shows for every YouTube song, so the block is there whenever the
             // song is one, or has a library or playlist move to offer.
             if token.is_some() || youtube || !targets.is_empty() || removable.is_some() {
@@ -3267,6 +3276,8 @@ pub(crate) fn page_menu_with_layout(
                 })
             };
             let has_tracks = !menu.tracks.is_empty() || pending.is_some();
+            let spotify = menu.page_id.starts_with("spotify:")
+                || menu.tracks.iter().any(|track| track.is_spotify());
             // Only the playlists you can actually add to, and only ones of the same source —
             // same rule as a row's picker, and for the same reason. Signed-out pages carry no
             // playlists, so the item hides itself with no auth check.
@@ -3279,29 +3290,34 @@ pub(crate) fn page_menu_with_layout(
                 .playlists
                 .iter()
                 .filter(|p| {
-                    p.editable && p.source == wanted_source && !p.id.starts_with("private:")
+                    !spotify
+                        && p.editable
+                        && p.source == wanted_source
+                        && !p.id.starts_with("private:")
                 })
                 .collect();
             // Offline: save the whole page to disk. Only for YouTube tracks — a folder of local
             // files is already on disk.
-            let downloadable = has_tracks && menu.tracks.iter().all(|t| t.local_path.is_none());
+            let downloadable =
+                has_tracks && !spotify && menu.tracks.iter().all(|t| t.local_path.is_none());
             let mut groups = MenuGroups::default();
 
             // Playing it.
             groups.start(mui, palette, menu.radio_id.is_some() || has_tracks);
             // A page with a playlist/album id starts a mix of the whole thing; only a page
             // without one (a folder) falls back to seeding from the first song.
-            if let Some(radio) = menu.radio_id {
+            if let Some(radio) = menu.radio_id.filter(|_| !spotify) {
                 if menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked() {
                     choice = Some(RowAction::StartMixPlaylist(radio.to_owned()));
                     mui.close();
                 }
-            } else if let Some(first) = menu.tracks.first() {
+            } else if let Some(first) = menu.tracks.first().filter(|track| !track.is_spotify()) {
                 if menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked() {
                     choice = Some(RowAction::StartMix(first.video_id.clone()));
                     mui.close();
                 }
             } else if pending.is_some()
+                && !spotify
                 && menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked()
             {
                 // An album card's radio id comes with the album itself.
@@ -3327,7 +3343,7 @@ pub(crate) fn page_menu_with_layout(
             }
 
             // Keeping it.
-            let save_as_new = menu.save_as_new.filter(|_| has_tracks);
+            let save_as_new = menu.save_as_new.filter(|_| has_tracks && !spotify);
             groups.start(
                 mui,
                 palette,
@@ -3912,6 +3928,7 @@ fn card_menu(
     match menu {
         CardMenu::Track(row) => row_menu(ui, palette, response, row),
         CardMenu::Artist(artist) => {
+            let youtube = !artist.id.starts_with("spotify:");
             let popup = card_popup(
                 ui,
                 palette,
@@ -3921,7 +3938,8 @@ fn card_menu(
             popup
                 .show(|mui| {
                     let mut choice = None;
-                    if let Some(target) = &artist.actions.mix
+                    if youtube
+                        && let Some(target) = &artist.actions.mix
                         && menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked()
                     {
                         choice = Some(RowAction::PlayTarget {
@@ -3930,7 +3948,8 @@ fn card_menu(
                         });
                         mui.close();
                     }
-                    if let Some(target) = &artist.actions.shuffle
+                    if youtube
+                        && let Some(target) = &artist.actions.shuffle
                         && menu_item(mui, palette, Icon::Shuffle, "Shuffle play", None).clicked()
                     {
                         choice = Some(RowAction::PlayTarget {
@@ -3943,9 +3962,10 @@ fn card_menu(
                     groups.start(
                         mui,
                         palette,
-                        artist.actions.mix.is_some() || artist.actions.shuffle.is_some(),
+                        youtube
+                            && (artist.actions.mix.is_some() || artist.actions.shuffle.is_some()),
                     );
-                    if let Some(subscribed) = artist.actions.subscribed {
+                    if let Some(subscribed) = artist.actions.subscribed.filter(|_| youtube) {
                         groups.start(mui, palette, true);
                         let label = if subscribed {
                             "Unsubscribe"
@@ -3974,7 +3994,8 @@ fn card_menu(
                         )));
                         mui.close();
                     }
-                    if let Some(token) = &artist.actions.dont_recommend
+                    if youtube
+                        && let Some(token) = &artist.actions.dont_recommend
                         && menu_item(mui, palette, Icon::ListX, "Don't recommend artist", None)
                             .clicked()
                     {

@@ -269,9 +269,6 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .is_some_and(|pl| app.is_playing_any(&pl.tracks));
 
-    // Read everything the header and its ••• menu need while `app.playlist` / `app.library`
-    // are borrowed: the menu takes the real track slice, not a per-frame clone of a list that
-    // is 5000 rows on Liked Music. Only the outcomes cross back out to act on `app`.
     let (out, menu_action, write, rail_ref, in_library, menu_description, is_expanding) = {
         let crate::app::App {
             settings,
@@ -805,7 +802,29 @@ fn confirm_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::meta_text;
+    use super::{meta_text, projected_meta};
+
+    fn track(duration: Option<u64>) -> crate::model::Track {
+        let mut track = crate::listening::Metadata::default().to_track();
+        track.duration = duration;
+        track
+    }
+
+    #[test]
+    fn projected_meta_uses_visible_count_and_complete_duration() {
+        assert_eq!(projected_meta(&[track(Some(74))]), "1 track • 1:14");
+        assert_eq!(
+            projected_meta(&[track(Some(60)), track(Some(90))]),
+            "2 tracks • 2:30"
+        );
+    }
+
+    #[test]
+    fn projected_meta_omits_incomplete_or_empty_duration() {
+        assert_eq!(projected_meta(&[track(Some(60)), track(None)]), "2 tracks");
+        assert_eq!(projected_meta(&[track(Some(0))]), "1 track");
+        assert_eq!(projected_meta(&[]), "0 tracks");
+    }
 
     #[test]
     fn a_partial_length_is_not_shown() {

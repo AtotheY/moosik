@@ -1027,6 +1027,7 @@ fn controls(app: &mut App, ui: &mut egui::Ui, m: &Metrics, bottom: Rect, top: Re
     if app.signed_in()
         && side_room >= 72.0
         && let Some(track) = app.now.track.as_ref()
+        && track.provider() == crate::model::Provider::YouTubeMusic
     {
         let thumbs =
             Rect::from_min_size(pos2(column.left(), row.center().y - 16.0), vec2(72.0, 32.0));

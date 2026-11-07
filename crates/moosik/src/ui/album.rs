@@ -82,7 +82,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         };
         let kind_label = kind;
         let meta = meta_line(a);
-        let like_id = a.like_id.clone();
+        let like_id = a.like_id.clone().filter(|_| !a.id.starts_with("spotify:"));
         let in_library = a.in_library;
         let art_top = ui.cursor().top();
         let out = crate::ui::page_header(
@@ -151,7 +151,10 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             remove_from_library: false,
                             context_only: false,
                             // The album's own radio seeds from its audio playlist id.
-                            radio_id: a.like_id.as_deref(),
+                            radio_id: a
+                                .like_id
+                                .as_deref()
+                                .filter(|_| !a.id.starts_with("spotify:")),
                             save_as_new: None,
                             tracks_pending: None,
                         },
