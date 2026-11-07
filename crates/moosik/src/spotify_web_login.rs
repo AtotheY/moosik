@@ -13,6 +13,16 @@ pub async fn capture() -> anyhow::Result<String> {
 }
 
 #[cfg(target_os = "windows")]
+pub async fn clear_profile() -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(windows::clear_profile).await?
+}
+
+#[cfg(not(target_os = "windows"))]
+pub async fn clear_profile() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 pub fn capture_here(output: &Path) -> anyhow::Result<()> {
     windows::capture_here(output)
 }
@@ -49,6 +59,7 @@ mod windows {
     const COOKIE_URL: &str = "https://open.spotify.com/";
     const CANCELED: &str = "Spotify sign-in was canceled or did not finish";
     const MAX_COOKIE: u64 = 64 * 1024;
+    const PROFILE_DIR: &str = "spotify-login";
 
     struct Cleanup(PathBuf);
 
@@ -173,6 +184,30 @@ mod windows {
             .context("Could not find Spotify sign-in storage")
     }
 
+    pub fn clear_profile() -> Result<()> {
+        clear_profile_in(&config_dir()?)
+    }
+
+    fn clear_profile_in(config: &Path) -> Result<()> {
+        let profile = config.join(PROFILE_DIR);
+        let metadata = match std::fs::symlink_metadata(&profile) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("Could not read the Spotify sign-in profile"),
+        };
+        let config = config
+            .canonicalize()
+            .context("Could not find Spotify sign-in storage")?;
+        let profile = profile
+            .canonicalize()
+            .context("Could not find the Spotify sign-in profile")?;
+        ensure!(
+            metadata.is_dir() && profile == config.join(PROFILE_DIR),
+            "The Spotify sign-in profile is outside its storage"
+        );
+        std::fs::remove_dir_all(profile).context("Could not clear the Spotify sign-in profile")
+    }
+
     fn validate_output(output: &Path) -> Result<()> {
         let name = output
             .file_name()
@@ -245,7 +280,7 @@ mod windows {
     }
 
     fn run_window() -> Result<String> {
-        let profile = config_dir()?.join("spotify-login");
+        let profile = config_dir()?.join(PROFILE_DIR);
         std::fs::create_dir_all(&profile)
             .context("Could not create the Spotify sign-in profile")?;
         let mut event_loop = EventLoopBuilder::new().build();
@@ -394,7 +429,25 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::{auth_url, valid_header};
+        use super::{PROFILE_DIR, auth_url, clear_profile_in, valid_header};
+
+        #[test]
+        fn sign_out_removes_only_the_app_owned_login_profile() {
+            let config = tempfile::tempdir().unwrap();
+            let profile = config.path().join(PROFILE_DIR);
+            let cookies = profile.join("Default").join("Network");
+            std::fs::create_dir_all(&cookies).unwrap();
+            std::fs::write(cookies.join("Cookies"), "old account").unwrap();
+            let other = config.path().join("youtube-login");
+            std::fs::create_dir(&other).unwrap();
+            std::fs::write(other.join("Cookies"), "unrelated account").unwrap();
+
+            clear_profile_in(config.path()).unwrap();
+            clear_profile_in(config.path()).unwrap();
+
+            assert!(!profile.exists());
+            assert!(other.join("Cookies").is_file());
+        }
 
         #[test]
         fn captured_sessions_only_contain_the_expected_cookies() {

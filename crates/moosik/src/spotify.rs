@@ -90,6 +90,7 @@ pub async fn sign_out() -> Result<()> {
         .try_lock()
         .map_err(|_| anyhow::anyhow!("Finish Spotify sign-in before signing out"))?;
     let mut cached = TRANSPORT.get_or_init(|| Mutex::new(None)).lock().await;
+    crate::spotify_web_login::clear_profile().await?;
     match std::fs::remove_file(session_path()?) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
