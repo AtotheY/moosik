@@ -16,6 +16,7 @@ pub(crate) struct PlaylistPicker {
     liked_override: Option<bool>,
     loading: bool,
     query: String,
+    focus_search: bool,
 }
 
 impl PlaylistPicker {
@@ -115,31 +116,39 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
         }
     }
     let palette = app.palette;
-    let choice = egui::Popup::menu(button)
+    let popup = egui::Popup::menu(button)
         .align(egui::RectAlign::TOP_START)
-        .gap(6.0)
-        .frame(widgets::menu_frame(ui, &palette))
-        .width(260.0)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .gap(8.0)
+        .frame(widgets::menu_frame(ui, &palette).inner_margin(12))
+        .width(300.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    if button.clicked() {
+        picker.focus_search = !popup.is_open();
+    }
+    let choice = popup
         .show(|ui| {
-            ui.label(egui::RichText::new("Add to playlist").font(theme::semibold(13.0)));
-            ui.add(
-                egui::TextEdit::singleline(&mut picker.query)
-                    .hint_text("Find a playlist")
-                    .background_color(palette.surface_active)
-                    .desired_width(234.0),
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(
+                egui::RichText::new("Add to playlist")
+                    .font(theme::semibold(18.0))
+                    .color(palette.text),
             );
+            ui.add_space(4.0);
+            let opening = picker.focus_search;
+            let search = playlist_search(ui, &palette, &mut picker.query, opening);
+            if !ui.is_sizing_pass() {
+                picker.focus_search = false;
+            }
+            ui.add_space(4.0);
+
             let query = picker.query.trim().to_lowercase();
             let mut action = None;
             let liked = picker.is_liked(track);
-            if "liked songs".contains(&query) {
-                let save = widgets::menu_item(
-                    ui,
-                    &palette,
-                    if liked { Icon::Check } else { Icon::Heart },
-                    "Liked Songs",
-                    None,
-                )
+            let show_liked = "liked songs".contains(&query);
+            if show_liked {
+                let save = playlist_choice(ui, &palette, "Liked Songs", liked, true, |ui, rect| {
+                    super::liked_music::paint_cover(ui, &palette, rect);
+                })
                 .on_hover_text(if liked {
                     "Remove from Liked Songs"
                 } else {
@@ -164,25 +173,59 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
                 }
             }
             match picker.choices_for(&track.video_id) {
-                Some(choices) if !choices.playlists.is_empty() => {
-                    widgets::menu_divider(ui, &palette);
-                    egui::ScrollArea::vertical()
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            for (playlist, saved) in &choices.playlists {
-                                if !query.is_empty()
-                                    && !playlist.title.to_lowercase().contains(&query)
-                                {
-                                    continue;
-                                }
+                Some(choices) => {
+                    let mut matches = choices
+                        .playlists
+                        .iter()
+                        .filter(|(playlist, _)| {
+                            query.is_empty() || playlist.title.to_lowercase().contains(&query)
+                        })
+                        .peekable();
+                    if matches.peek().is_some() {
+                        if show_liked {
+                            widgets::menu_divider(ui, &palette);
+                        }
+                        ui.label(
+                            egui::RichText::new("Your playlists")
+                                .font(theme::semibold(12.0))
+                                .color(palette.secondary),
+                        );
+                        let list_height =
+                            (ui.ctx().content_rect().height() - theme::PLAYER_BAR_HEIGHT - 140.0)
+                                .clamp(44.0, 284.0);
+                        let mut list = egui::ScrollArea::vertical()
+                            .max_height(list_height)
+                            .min_scrolled_height(list_height)
+                            .auto_shrink([false, true]);
+                        if opening || search.changed() {
+                            list = list.vertical_scroll_offset(0.0);
+                        }
+                        list.show(ui, |ui| {
+                            for (playlist, saved) in matches {
                                 let add = ui
-                                    .add_enabled_ui(!saved, |ui| {
-                                        widgets::menu_item(
+                                    .push_id(&playlist.id, |ui| {
+                                        playlist_choice(
                                             ui,
                                             &palette,
-                                            if *saved { Icon::Check } else { Icon::ListPlus },
                                             &playlist.title,
-                                            None,
+                                            *saved,
+                                            !saved,
+                                            |ui, rect| {
+                                                let art = super::art_texture(
+                                                    &mut app.images,
+                                                    &app.backend,
+                                                    ui.ctx(),
+                                                    playlist.thumbnail.as_ref(),
+                                                    rect.width(),
+                                                );
+                                                widgets::paint_art(
+                                                    ui,
+                                                    &palette,
+                                                    rect,
+                                                    art,
+                                                    widgets::ArtShape::Square,
+                                                );
+                                            },
                                         )
                                     })
                                     .inner;
@@ -194,15 +237,17 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
                                 }
                             }
                         });
-                }
-                Some(_) => {
-                    ui.label("No editable playlists");
+                    } else if query.is_empty() {
+                        playlist_status(ui, &palette, "No editable playlists");
+                    } else if !show_liked {
+                        playlist_status(ui, &palette, "No matching playlists");
+                    }
                 }
                 _ if picker.loading => {
-                    ui.label("Loading playlists…");
+                    playlist_status(ui, &palette, "Loading playlists…");
                 }
                 _ => {
-                    ui.label("Could not load playlists");
+                    playlist_status(ui, &palette, "Could not load playlists");
                     if widgets::menu_item(ui, &palette, Icon::RefreshCw, "Retry", None).clicked() {
                         picker.loading = true;
                         app.backend
@@ -219,6 +264,130 @@ fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
     if let Some(action) = choice {
         app.row_action(action);
     }
+}
+
+fn playlist_search(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    query: &mut String,
+    focus: bool,
+) -> egui::Response {
+    let field = widgets::input_frame(palette)
+        .fill(palette.panel)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(Icon::Search.image(palette.secondary, 15.0));
+                ui.add(
+                    egui::TextEdit::singleline(query)
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .font(theme::regular(13.0))
+                        .hint_text(egui::RichText::new("Find a playlist").color(palette.secondary))
+                        .desired_width(ui.available_width()),
+                )
+            })
+            .inner
+        });
+    if focus && !ui.is_sizing_pass() {
+        field.inner.request_focus();
+    }
+    if field.inner.has_focus() {
+        ui.painter().rect_stroke(
+            field.response.rect,
+            theme::RADIUS,
+            egui::Stroke::new(1.0, palette.secondary),
+            egui::StrokeKind::Inside,
+        );
+    }
+    field.inner
+}
+
+fn playlist_choice(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    title: &str,
+    saved: bool,
+    enabled: bool,
+    paint_cover: impl FnOnce(&egui::Ui, Rect),
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, saved, title)
+    });
+    if ui.is_rect_visible(rect) {
+        let t = if enabled {
+            widgets::lit(ui, &response)
+        } else {
+            0.0
+        };
+        if widgets::held(&response) || t > 0.0 {
+            let fill = if widgets::held(&response) {
+                palette.surface_active
+            } else {
+                palette.surface_hover.gamma_multiply(t)
+            };
+            ui.painter().rect_filled(rect, theme::RADIUS, fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                theme::RADIUS,
+                egui::Stroke::new(1.0, palette.secondary),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let offset = widgets::press_offset(&response);
+        let cover = Rect::from_center_size(
+            rect.left_center() + vec2(22.0, 0.0) + offset,
+            vec2(32.0, 32.0),
+        );
+        paint_cover(ui, cover);
+        let label = widgets::truncate_to(
+            ui,
+            title,
+            theme::medium(14.0),
+            (rect.width() - 84.0).max(0.0),
+        );
+        crate::emoji::paint_line(
+            ui,
+            rect.left_center() + vec2(48.0, 0.0) + offset,
+            &label,
+            theme::medium(14.0),
+            palette.text,
+        );
+        let (icon, color) = if saved {
+            (Icon::Check, palette.text)
+        } else {
+            (Icon::Plus, palette.secondary)
+        };
+        icon.image(color, 16.0).paint_at(
+            ui,
+            Rect::from_center_size(
+                rect.right_center() - vec2(16.0, 0.0) + offset,
+                vec2(16.0, 16.0),
+            ),
+        );
+        if enabled && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    response
+}
+
+fn playlist_status(ui: &mut egui::Ui, palette: &theme::Palette, message: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(message)
+            .font(theme::regular(13.0))
+            .color(palette.secondary),
+    );
+    ui.add_space(4.0);
 }
 
 /// The player bar's cover is drawn 56pt across and is always on screen.
