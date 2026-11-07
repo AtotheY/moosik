@@ -2062,7 +2062,10 @@ impl App {
         let backend = Backend::new(cc.egui_ctx.clone())?;
         backend.set_audio_quality(settings.quality.format());
         // One handle per process; a failure just means running without OS media controls.
-        let media = crate::media::Media::new(cc.egui_ctx.clone(), window_hwnd(cc));
+        let hwnd = window_hwnd(cc);
+        #[cfg(target_os = "windows")]
+        crate::tray::set_player_window(hwnd);
+        let media = crate::media::Media::new(cc.egui_ctx.clone(), hwnd);
         // libmpv is initialised on the first play, not here — see `Player`.
         let player = Some(Player::new());
         // A stored session is only a claim until YouTube confirms it — cookies expire between
