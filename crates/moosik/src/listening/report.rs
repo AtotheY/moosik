@@ -86,6 +86,8 @@ pub struct Report {
     pub albums: Vec<Group>,
     pub genres: Vec<Group>,
     pub sources: Vec<Group>,
+    #[serde(default)]
+    pub providers: Vec<Group>,
     pub days: BTreeMap<String, f64>,
     pub hours: [f64; 24],
     pub weekdays: [f64; 7],
@@ -103,7 +105,7 @@ pub struct Report {
 impl Report {
     pub fn recap(&self) -> String {
         let mut s = format!(
-            "# My Moosik recap\n\n{}\n\n- Listening time: {}\n- Qualified plays: {}\n- Different songs: {}\n- Artists: {}\n- New songs first heard in this period: {}\n- Active days: {}\n- Longest day streak: {}\n- Completed listens: {}\n- Skips: {}\n\n## Top songs\n\n",
+            "# My Moosik recap\n\n{}\n\n- Listening time: {}\n- Qualified plays: {}\n- Different songs: {}\n- Artists: {}\n- New songs first heard in this period: {}\n- Active days: {}\n- Longest day streak: {}\n- Completed listens: {}\n- Skips: {}\n",
             self.query.label,
             clock(self.listen_ms),
             self.plays,
@@ -115,6 +117,45 @@ impl Report {
             self.completed,
             self.skips
         );
+        let provider_total: f64 = self
+            .providers
+            .iter()
+            .map(|provider| provider.listen_ms.max(0.0))
+            .sum();
+        if let Some(most_used) = self
+            .providers
+            .iter()
+            .filter(|provider| provider.listen_ms > 0.0)
+            .max_by(|left, right| left.listen_ms.total_cmp(&right.listen_ms))
+        {
+            let leaders: Vec<_> = self
+                .providers
+                .iter()
+                .filter(|provider| provider.listen_ms == most_used.listen_ms)
+                .map(|provider| plain(&provider.name))
+                .collect();
+            s += "\n## Providers\n\nAcross all providers in this date range.\n\n";
+            if leaders.len() == 1 {
+                s += &format!("Most-used provider: {}.\n\n", leaders[0]);
+            } else {
+                s += &format!("Most-used providers: {} (tied).\n\n", leaders.join(", "));
+            }
+            for provider in self
+                .providers
+                .iter()
+                .filter(|provider| provider.listen_ms > 0.0)
+            {
+                s += &format!(
+                    "- {}: {} · {:.1}% of observed listening time · {} qualified plays · {} songs\n",
+                    plain(&provider.name),
+                    clock(provider.listen_ms),
+                    provider.listen_ms / provider_total * 100.0,
+                    provider.plays,
+                    provider.tracks
+                );
+            }
+        }
+        s += "\n## Top songs\n\n";
         for (i, r) in self
             .tracks
             .iter()
@@ -206,6 +247,53 @@ fn groups(map: HashMap<String, (Group, HashSet<String>)>) -> Vec<Group> {
     rows
 }
 const FACTOR: &str = "max(0,min(g.end_ms,?2)-max(g.start_ms,?1))*1.0/max(1,g.end_ms-g.start_ms)";
+
+fn qualified_play(time: f64, duration: f64) -> u64 {
+    let threshold = if duration > 0.0 {
+        30_000.0_f64.min(duration * 500.0)
+    } else {
+        30_000.0
+    };
+    u64::from(time >= threshold && time > 0.0)
+}
+
+fn provider_groups(db: &Connection, q: &Query) -> Result<Vec<Group>> {
+    let sql = format!(
+        "SELECT s.source,s.track_id,s.duration,coalesce(sum(g.listen_ms*({FACTOR})),0)
+        FROM sessions s JOIN segments g ON g.session_id=s.id AND g.end_ms>?1 AND g.start_ms<?2
+        WHERE s.started_ms<?2 AND s.last_ms>=?1
+        GROUP BY s.id"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut rows = stmt.query(params![q.from, q.to])?;
+    let mut providers = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let source: String = row.get(0)?;
+        let track: String = row.get(1)?;
+        let duration: f64 = row.get(2)?;
+        let time: f64 = row.get(3)?;
+        if time <= 0.0 {
+            continue;
+        }
+        let (id, name) = match source.as_str() {
+            "youtube" | "downloaded" => ("youtube", "YouTube Music"),
+            "spotify" => ("spotify", "Spotify"),
+            "local" => ("local", "Local"),
+            "" => ("", "Unknown"),
+            source => (source, source),
+        };
+        add_group(
+            &mut providers,
+            id.to_owned(),
+            name.to_owned(),
+            &track,
+            time,
+            qualified_play(time, duration),
+        );
+    }
+    Ok(groups(providers))
+}
+
 pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
     let mut report = Report {
         query: q.clone(),
@@ -228,6 +316,7 @@ pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
         albums: vec![],
         genres: vec![],
         sources: vec![],
+        providers: provider_groups(db, q)?,
         days: BTreeMap::new(),
         hours: [0.0; 24],
         weekdays: [0.0; 7],
@@ -280,12 +369,7 @@ pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
         } else {
             0.0
         };
-        let threshold = if duration > 0.0 {
-            30_000.0_f64.min(duration * 500.0)
-        } else {
-            30_000.0
-        };
-        let play = u64::from(time >= threshold && time > 0.0);
+        let play = qualified_play(time, duration);
         let completion =
             u64::from(coverage >= 0.9 && outcome != "active" && last >= q.from && last < q.to);
         let skip = u64::from(
@@ -525,6 +609,103 @@ pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_totals_include_all_sources_clip_time_and_merge_downloaded_tracks() {
+        let dir = std::env::temp_dir().join(format!(
+            "moosik-report-providers-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let db = super::super::store::open(&dir.join("db")).unwrap();
+        let spotify_id = "spotify:track:3TO7bbrUKrOSPGRTB5MeCz";
+        for (session, track, source, start, end, duration, listen) in [
+            ("stream", "same-song", "youtube", 0, 40_000, 60.0, 40_000.0),
+            (
+                "download",
+                "same-song",
+                "downloaded",
+                40_000,
+                60_000,
+                60.0,
+                20_000.0,
+            ),
+            (
+                "spotify", spotify_id, "spotify", 60_000, 100_000, 60.0, 40_000.0,
+            ),
+            (
+                "local",
+                "local-song",
+                "local",
+                15_000,
+                35_000,
+                30.0,
+                20_000.0,
+            ),
+            ("silent", "silent-song", "local", 36_000, 38_000, 30.0, 0.0),
+            (
+                "unknown",
+                "other-song",
+                "other-source",
+                20_000,
+                25_000,
+                60.0,
+                5_000.0,
+            ),
+        ] {
+            let metadata = Metadata {
+                id: track.to_owned(),
+                title: "Song".to_owned(),
+                duration,
+                ..Default::default()
+            };
+            db.execute(
+                "INSERT INTO sessions(id,track_id,title,metadata,context,source,started_ms,last_ms,ended_ms,outcome,duration,coverage_ms) VALUES (?1,?2,'Song',?3,'{}',?4,?5,?6,?6,'ended',?7,?8)",
+                params![session, track, serde_json::to_string(&metadata).unwrap(), source, start, end, duration, listen],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO segments(session_id,start_ms,end_ms,position_start,position_end,listen_ms,media_ms,paused_ms,buffer_ms,muted_ms,unobserved_ms,day,hour,weekday,offset_seconds,volume,speed) VALUES (?1,?2,?3,0,(?3-?2)/1000.0,?4,?4,0,0,0,0,'2026-10-26',12,0,0,70,1)",
+                params![session, start, end, listen],
+            ).unwrap();
+        }
+        let report = build(
+            &db,
+            &Query {
+                from: 10_000,
+                to: 80_000,
+                source: "spotify".to_owned(),
+                label: "Selected range".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.listen_ms, 20_000.0);
+        assert_eq!(report.plays, 0);
+        assert_eq!(report.tracks.len(), 1);
+        assert_eq!(report.tracks[0].id, spotify_id);
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.sources[0].id, "spotify");
+        let providers: HashMap<_, _> = report
+            .providers
+            .iter()
+            .map(|provider| (provider.id.as_str(), provider))
+            .collect();
+        assert_eq!(providers.len(), 4);
+        assert_eq!(providers["youtube"].listen_ms, 50_000.0);
+        assert_eq!(providers["youtube"].tracks, 1);
+        assert_eq!(providers["youtube"].plays, 1);
+        assert!(!providers.contains_key("downloaded"));
+        assert_eq!(providers["spotify"].listen_ms, 20_000.0);
+        assert_eq!(providers["spotify"].plays, 0);
+        assert_eq!(providers["local"].listen_ms, 20_000.0);
+        assert_eq!(providers["local"].tracks, 1);
+        assert_eq!(providers["local"].plays, 1);
+        assert_eq!(providers["other-source"].listen_ms, 5_000.0);
+        assert_eq!(report.providers[0].id, "youtube");
+        assert!(report.recap().contains("52.6% of observed listening time"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn range_clips_time_and_collaborators_do_not_double_total() {
         let dir =
@@ -571,6 +752,10 @@ mod tests {
                 .all(|a| a.listen_ms == 5000.0)
         );
         assert_eq!(report.plays, 1);
+        assert_eq!(report.providers.len(), 1);
+        assert_eq!(report.providers[0].id, "youtube");
+        assert_eq!(report.providers[0].listen_ms, 5000.0);
+        assert_eq!(report.providers[0].plays, 1);
         assert_eq!(report.completed, 1);
         assert_eq!(report.artists.len(), 2);
         assert!(report.artists.iter().all(|a| a.listen_ms == 5000.0));
@@ -585,6 +770,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.listen_ms, 0.0);
+        assert_eq!(empty.providers[0].listen_ms, 5000.0);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

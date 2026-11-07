@@ -38,6 +38,8 @@ pub struct View {
     from: String,
     to: String,
     source: String,
+    source_history_range: Option<(i64, i64)>,
+    source_history: Vec<String>,
     search: String,
     sort: usize,
     selected: Option<String>,
@@ -155,16 +157,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 app.listening_view.period = PERIODS[i].0;
                 refresh = true;
             }
-            let source_names = ["All sources", "YouTube", "Downloaded", "Local files"];
-            let source_ids = ["", "youtube", "downloaded", "local"];
-            let source = source_ids
-                .iter()
-                .position(|s| *s == app.listening_view.source)
-                .unwrap_or(0);
-            if let Some(i) = dropdown(ui, &p, "stats-source", source_names[source], &source_names) {
-                app.listening_view.source = source_ids[i].into();
-                refresh = true;
-            }
+            source_filter(app, ui, &p, &mut refresh);
             if widgets::outline_button(ui, &p, "Share my week").clicked() {
                 app.listening_view.period = Period::Week;
                 app.listening_view.source.clear();
@@ -245,9 +238,18 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             empty(
                 ui,
                 &p,
-                "No listening in this period",
-                "Play something in Moosik, or choose another date range.",
+                if query.source.is_empty() {
+                    "No listening in this period"
+                } else {
+                    "No listening for this source"
+                },
+                "Play something in Moosik, or choose another source or date range.",
             );
+            let providers = relevant_providers(app, Some(&report));
+            if app.listening_view.tab == Tab::Overview && providers.len() > 1 {
+                most_used_provider(ui, &p, &report);
+                provider_breakdown(ui, &p, &providers);
+            }
         } else {
             match app.listening_view.tab {
                 Tab::Overview => overview(app, ui, &report),
@@ -267,6 +269,127 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
 }
+
+fn relevant_providers(app: &App, report: Option<&Report>) -> Vec<Group> {
+    let mut providers: Vec<_> = report
+        .into_iter()
+        .flat_map(|report| &report.providers)
+        .filter(|provider| provider.listen_ms.is_finite() && provider.listen_ms > 0.0)
+        .cloned()
+        .collect();
+    for provider in app.connected_providers() {
+        let id = match provider {
+            crate::model::Provider::YouTubeMusic => "youtube",
+            crate::model::Provider::Spotify => "spotify",
+            crate::model::Provider::Local => "local",
+        };
+        if !providers.iter().any(|provider| provider.id == id) {
+            providers.push(Group {
+                id: id.to_owned(),
+                name: provider.name().to_owned(),
+                ..Group::default()
+            });
+        }
+    }
+    providers.sort_by(|left, right| {
+        right
+            .listen_ms
+            .total_cmp(&left.listen_ms)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    providers
+}
+
+fn source_filter(app: &mut App, ui: &mut egui::Ui, p: &theme::Palette, refresh: &mut bool) {
+    let range = app
+        .listening_view
+        .query()
+        .ok()
+        .map(|query| (query.from, query.to));
+    let report = app
+        .listening
+        .report
+        .clone()
+        .filter(|report| range == Some((report.query.from, report.query.to)));
+    if app.listening_view.source_history_range != range {
+        app.listening_view.source_history_range = range;
+        app.listening_view.source_history.clear();
+    }
+    if let Some(report) = &report {
+        if report.query.source.is_empty() {
+            app.listening_view.source_history = report
+                .sources
+                .iter()
+                .map(|source| source.id.clone())
+                .collect();
+        } else {
+            for source in &report.sources {
+                if !app.listening_view.source_history.contains(&source.id) {
+                    app.listening_view.source_history.push(source.id.clone());
+                }
+            }
+        }
+    }
+    let providers = relevant_providers(app, report.as_deref());
+    let mut options = vec![(String::new(), "All sources".to_owned())];
+    for provider in &providers {
+        if provider.id.is_empty() {
+            continue;
+        }
+        let label = match provider.id.as_str() {
+            "youtube" => "YouTube Music streams",
+            "spotify" => "Spotify",
+            "local" => "Local files",
+            _ => provider.name.as_str(),
+        };
+        options.push((provider.id.clone(), label.to_owned()));
+    }
+    if providers.iter().any(|provider| provider.id == "youtube")
+        && (!app.downloads.entries.is_empty()
+            || app
+                .listening_view
+                .source_history
+                .iter()
+                .any(|source| source == "downloaded"))
+    {
+        options.push((
+            "downloaded".to_owned(),
+            "Downloaded YouTube Music".to_owned(),
+        ));
+    }
+    if report.is_some()
+        && (providers.len() <= 1
+            || !options
+                .iter()
+                .any(|(id, _)| id == &app.listening_view.source))
+        && !app.listening_view.source.is_empty()
+    {
+        app.listening_view.source.clear();
+        *refresh = true;
+    }
+    if providers.len() <= 1 && (app.listening_view.source.is_empty() || report.is_some()) {
+        return;
+    }
+    if !options
+        .iter()
+        .any(|(id, _)| id == &app.listening_view.source)
+    {
+        options.push((
+            app.listening_view.source.clone(),
+            source_label(&app.listening_view.source).to_owned(),
+        ));
+    }
+    let selected = options
+        .iter()
+        .position(|(id, _)| id == &app.listening_view.source)
+        .unwrap_or(0);
+    let labels: Vec<_> = options.iter().map(|(_, label)| label.as_str()).collect();
+    if let Some(index) = dropdown(ui, p, "stats-source", &options[selected].1, &labels) {
+        app.listening_view.source = options[index].0.clone();
+        *refresh = true;
+    }
+}
+
 fn dropdown(
     ui: &mut egui::Ui,
     p: &theme::Palette,
@@ -275,12 +398,17 @@ fn dropdown(
     options: &[&str],
 ) -> Option<usize> {
     let response = widgets::outline_button(ui, p, &format!("{current}  ⌄"));
+    let width = options
+        .iter()
+        .map(|label| widgets::text_width(ui, label, &theme::medium(13.0)) + 48.0)
+        .fold(190.0, f32::max)
+        .min((ui.ctx().content_rect().width() - theme::PAGE_INSET_X * 2.0).max(0.0));
     let mut choice = None;
     egui::Popup::from_response(&response)
         .id(egui::Id::new(id))
         .kind(egui::PopupKind::Menu)
         .frame(widgets::menu_frame(ui, p))
-        .width(190.0)
+        .width(width)
         .gap(4.0)
         .open_memory(if response.clicked() {
             Some(egui::SetOpenCommand::Toggle)
@@ -431,6 +559,8 @@ fn metric(ui: &mut egui::Ui, p: &theme::Palette, label: &str, value: &str) {
 }
 fn overview(app: &mut App, ui: &mut egui::Ui, r: &Report) {
     let p = app.palette;
+    let providers = relevant_providers(app, Some(r));
+    let compare_providers = providers.len() > 1;
     // One dominant number and a quiet activity chart; no dashboard of eight equal cards.
     egui::Frame::new()
         .fill(p.glass_state(p.surface, 0.35))
@@ -440,11 +570,11 @@ fn overview(app: &mut App, ui: &mut egui::Ui, r: &Report) {
             ui.set_width(ui.available_width());
             if ui.available_width() > 680.0 {
                 columns(ui, 2, |cols| {
-                    summary(&mut cols[0], &p, r);
+                    summary(&mut cols[0], &p, r, compare_providers);
                     activity(&mut cols[1], &p, r);
                 });
             } else {
-                summary(ui, &p, r);
+                summary(ui, &p, r, compare_providers);
                 ui.add_space(20.0);
                 activity(ui, &p, r);
             }
@@ -508,6 +638,7 @@ fn overview(app: &mut App, ui: &mut egui::Ui, r: &Report) {
             }
         }
     }
+    provider_breakdown(ui, &p, &providers);
     section(ui, &p, "Listening habits", None);
     if ui.available_width() > 640.0 {
         columns(ui, 2, |cols| {
@@ -581,7 +712,7 @@ fn overview(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         heatmap(ui, &p, r);
     });
 }
-fn summary(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
+fn summary(ui: &mut egui::Ui, p: &theme::Palette, r: &Report, compare_providers: bool) {
     small(ui, p, "Listening time");
     ui.add_space(6.0);
     ui.label(
@@ -595,6 +726,9 @@ fn summary(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
         p,
         format!("{} · {}", r.query.label, count(r.active_days, "active day")),
     );
+    if compare_providers {
+        most_used_provider(ui, p, r);
+    }
     if r.query.from > 0 && r.previous_ms > 0.0 {
         ui.add_space(6.0);
         let change = (r.listen_ms / r.previous_ms - 1.0) * 100.0;
@@ -606,6 +740,142 @@ fn summary(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
                 clock(r.previous_ms)
             ),
         );
+    }
+}
+fn most_used_provider(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
+    let providers: Vec<_> = r
+        .providers
+        .iter()
+        .filter(|provider| provider.listen_ms.is_finite() && provider.listen_ms > 0.0)
+        .collect();
+    let total: f64 = providers.iter().map(|provider| provider.listen_ms).sum();
+    let Some(top) = providers
+        .iter()
+        .max_by(|left, right| left.listen_ms.total_cmp(&right.listen_ms))
+    else {
+        return;
+    };
+    let leaders: Vec<_> = providers
+        .iter()
+        .filter(|provider| provider.listen_ms == top.listen_ms)
+        .map(|provider| provider.name.as_str())
+        .collect();
+    let tied = leaders.len() > 1;
+    let name = leaders.join(" · ");
+    ui.add_space(12.0);
+    small(
+        ui,
+        p,
+        if tied {
+            "Top providers tied"
+        } else {
+            "Most-used provider"
+        },
+    );
+    if !r.query.source.is_empty() {
+        small(ui, p, "Across all providers for these dates");
+    }
+    ui.add(egui::Label::new(RichText::new(&name).font(theme::semibold(18.0)).color(p.text)).truncate())
+        .on_hover_text(format!("{name}\nBased on recorded listening time across all providers in the selected period. YouTube Music includes downloaded songs."));
+    small(
+        ui,
+        p,
+        format!(
+            "{} · {} of listening time{}",
+            clock(top.listen_ms),
+            source_share(top.listen_ms, total),
+            if tied { " each" } else { "" }
+        ),
+    );
+}
+
+fn source_share(time: f64, total: f64) -> String {
+    if total <= 0.0 || time <= 0.0 {
+        return "0%".to_owned();
+    }
+    let share = (time / total * 100.0).clamp(0.0, 100.0);
+    if share < 1.0 {
+        "<1%".to_owned()
+    } else {
+        format!("{share:.0}%")
+    }
+}
+
+fn provider_breakdown(ui: &mut egui::Ui, p: &theme::Palette, providers: &[Group]) {
+    if providers.len() <= 1 {
+        return;
+    }
+    section(ui, p, "Listening by provider", None);
+    small(
+        ui,
+        p,
+        "All providers for the selected dates, regardless of the source filter.",
+    );
+    let total: f64 = providers
+        .iter()
+        .map(|provider| provider.listen_ms.max(0.0))
+        .sum();
+    ui.add_space(8.0);
+    for provider in providers {
+        let share = source_share(provider.listen_ms, total);
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), theme::ROW_HEIGHT),
+            Sense::hover(),
+        );
+        let icon_rect = Rect::from_center_size(
+            pos2(rect.left() + 10.0, rect.top() + 15.0),
+            vec2(20.0, 20.0),
+        );
+        widgets::source_name_indicator(
+            ui,
+            p,
+            icon_rect,
+            &provider.name,
+            ui.id().with(("stats-provider-icon", &provider.id)),
+        );
+        let value = format!("{} · {share}", clock(provider.listen_ms));
+        let value_width = widgets::text_width(ui, &value, &theme::regular(13.0));
+        let name_rect = Rect::from_min_max(
+            pos2(icon_rect.right() + 8.0, rect.top()),
+            pos2(
+                (rect.right() - value_width - 12.0).max(icon_rect.right() + 8.0),
+                rect.top() + 30.0,
+            ),
+        );
+        clipped(ui, &provider.name, name_rect, theme::medium(13.0), p.text);
+        ui.painter().text(
+            pos2(rect.right(), rect.top() + 15.0),
+            Align2::RIGHT_CENTER,
+            &value,
+            theme::regular(13.0),
+            p.secondary,
+        );
+        let bar = Rect::from_min_size(
+            pos2(rect.left(), rect.top() + 36.0),
+            vec2(rect.width(), 4.0),
+        );
+        ui.painter().rect_filled(bar, 2.0, p.surface);
+        if total > 0.0 && provider.listen_ms > 0.0 {
+            let fill = Rect::from_min_size(
+                bar.min,
+                vec2(
+                    bar.width() * (provider.listen_ms / total).clamp(0.0, 1.0) as f32,
+                    bar.height(),
+                ),
+            );
+            ui.painter().rect_filled(fill, 2.0, p.accent);
+        }
+        response.on_hover_text(format!(
+            "{} · {} · {} qualified plays · {share} of recorded listening time{}",
+            provider.name,
+            clock(provider.listen_ms),
+            provider.plays,
+            if provider.id == "youtube" {
+                "\nIncludes streamed and downloaded YouTube Music songs."
+            } else {
+                ""
+            }
+        ));
     }
 }
 fn activity(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
@@ -876,6 +1146,7 @@ pub(crate) fn regular_song(
             rank: None,
             trend: track.trend,
             title: &track.title,
+            source: Some(track.source_name()),
             album_id: track.album_id.as_deref(),
             subtitle: track_subtitle(track),
             duration: track.duration,
@@ -1451,8 +1722,9 @@ fn history(app: &mut App, ui: &mut egui::Ui, r: &Report) {
 }
 fn source_label(s: &str) -> &str {
     match s {
-        "youtube" => "YouTube",
-        "downloaded" => "Downloaded",
+        "youtube" => "YouTube Music",
+        "spotify" => "Spotify",
+        "downloaded" => "Downloaded YouTube Music",
         "local" => "Local files",
         _ => s,
     }
@@ -1470,6 +1742,7 @@ fn outcome_label(s: &str) -> &str {
 }
 fn recap(app: &mut App, ui: &mut egui::Ui, r: &Report) {
     let p = app.palette;
+    let compare_providers = relevant_providers(app, Some(r)).len() > 1;
     egui::Frame::new()
         .fill(p.glass_state(p.surface, 0.4))
         .corner_radius(theme::ART_RADIUS_MAX)
@@ -1484,13 +1757,13 @@ fn recap(app: &mut App, ui: &mut egui::Ui, r: &Report) {
             ui.add_space(16.0);
             if ui.available_width() > 650.0 {
                 columns(ui, 2, |cols| {
-                    recap_numbers(&mut cols[0], &p, r);
+                    recap_numbers(&mut cols[0], &p, r, compare_providers);
                     recap_art(app, &mut cols[1], r);
                 });
             } else {
                 recap_art(app, ui, r);
                 ui.add_space(16.0);
-                recap_numbers(ui, &p, r);
+                recap_numbers(ui, &p, r, compare_providers);
             }
             ui.add_space(20.0);
             columns(ui, 3, |cols| {
@@ -1543,13 +1816,16 @@ fn recap(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         );
     }
 }
-fn recap_numbers(ui: &mut egui::Ui, p: &theme::Palette, r: &Report) {
+fn recap_numbers(ui: &mut egui::Ui, p: &theme::Palette, r: &Report, compare_providers: bool) {
     ui.label(
         RichText::new(clock(r.listen_ms))
             .font(theme::bold(42.0))
             .color(p.text),
     );
     small(ui, p, "with your music");
+    if compare_providers {
+        most_used_provider(ui, p, r);
+    }
     ui.add_space(20.0);
     if let Some(a) = r.artists.first() {
         small(ui, p, "Your top artist");
