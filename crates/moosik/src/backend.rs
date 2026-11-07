@@ -273,6 +273,7 @@ pub enum Event {
         library: Library,
         failed_provider: Option<(Provider, String)>,
         epoch: u64,
+        songs_generation: u64,
     },
     LibraryProviderRetried {
         epoch: u64,
@@ -282,11 +283,13 @@ pub enum Event {
     },
     LibraryMore {
         epoch: u64,
+        songs_generation: u64,
         section: crate::api::LibrarySection,
         page: crate::innertube::Page,
     },
     LibraryMoreFailed {
         epoch: u64,
+        songs_generation: u64,
         section: crate::api::LibrarySection,
         error: String,
     },
@@ -306,6 +309,7 @@ pub enum Event {
     LibraryFailed {
         error: String,
         epoch: u64,
+        songs_generation: u64,
     },
     SubscriptionChanged {
         channel_id: String,
@@ -2055,7 +2059,13 @@ impl Backend {
         });
     }
 
-    pub fn fetch_library(&self, sort: crate::api::LibrarySortParam, epoch: u64, youtube: bool) {
+    pub fn fetch_library(
+        &self,
+        sort: crate::api::LibrarySortParam,
+        epoch: u64,
+        songs_generation: u64,
+        youtube: bool,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match crate::providers::library(
@@ -2074,11 +2084,13 @@ impl Backend {
                         library: loaded.value,
                         failed_provider: loaded.failed_provider,
                         epoch,
+                        songs_generation,
                     }
                 }
                 Err(e) => Event::LibraryFailed {
                     error: format!("{e:#}"),
                     epoch,
+                    songs_generation,
                 },
             };
             Self::emit(&tx, &ctx, event);
@@ -2388,6 +2400,7 @@ impl Backend {
         section: crate::api::LibrarySection,
         token: String,
         epoch: u64,
+        songs_generation: u64,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
@@ -2396,9 +2409,11 @@ impl Backend {
                     section,
                     page,
                     epoch,
+                    songs_generation,
                 },
                 Err(e) => Event::LibraryMoreFailed {
                     epoch,
+                    songs_generation,
                     section,
                     error: format!("{e:#}"),
                 },

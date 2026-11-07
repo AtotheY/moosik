@@ -1607,6 +1607,7 @@ pub struct App {
     pub(crate) library_loading: bool,
     pub(crate) library_error: Option<String>,
     pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
+    library_songs_generation: u64,
     pub(crate) library_failed_provider: Option<(crate::model::Provider, String)>,
     pub(crate) library_source_retry: Option<(crate::model::Provider, u64)>,
     library_source_retry_id: u64,
@@ -2262,6 +2263,7 @@ impl App {
             library_loading: false,
             library_error: None,
             library_paging_errors: Vec::new(),
+            library_songs_generation: 0,
             library_failed_provider: None,
             library_source_retry: None,
             library_source_retry_id: 0,
@@ -4266,11 +4268,17 @@ impl App {
         {
             return;
         }
-        self.library_loading = true;
         self.library_source_retry = None;
+        self.fetch_library();
+    }
+
+    fn fetch_library(&mut self) {
+        self.library_loading = true;
+        self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
         self.backend.fetch_library(
             self.library_sort.param(),
             self.browsing_epoch,
+            self.library_songs_generation,
             self.signed_in(),
         );
     }
@@ -4758,9 +4766,7 @@ impl App {
         self.library_error = None;
         self.resync_local_playlists();
         if self.has_library_account() {
-            self.library_loading = true;
-            self.backend
-                .fetch_library(sort.param(), self.browsing_epoch, self.signed_in());
+            self.fetch_library();
         }
     }
 
@@ -5200,14 +5206,38 @@ impl App {
             crate::api::LibrarySection::Albums => self.library.albums.loading = true,
             crate::api::LibrarySection::Playlists => self.library.playlists.loading = true,
         }
-        self.backend
-            .fetch_library_more(section, token, self.browsing_epoch);
+        self.backend.fetch_library_more(
+            section,
+            token,
+            self.browsing_epoch,
+            self.library_songs_generation,
+        );
     }
 
     pub(crate) fn retry_library_more(&mut self, section: crate::api::LibrarySection) {
         self.library_paging_errors
             .retain(|(failed, _)| *failed != section);
         self.load_more_library(section);
+    }
+
+    fn remove_spotify_library_song(&mut self, video_id: &str) {
+        self.library
+            .songs
+            .items
+            .retain(|song| song.video_id != video_id);
+        if self.library_loading {
+            self.fetch_library();
+        } else if matches!(
+            self.library_source_retry,
+            Some((crate::model::Provider::Spotify, _))
+        ) {
+            self.library_source_retry = None;
+            self.retry_library_provider();
+        } else if crate::providers::restart_spotify_song_paging(&mut self.library.songs) {
+            self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
+            self.library_paging_errors
+                .retain(|(section, _)| *section != crate::api::LibrarySection::Songs);
+        }
     }
 
     pub(crate) fn can_retry_library_provider(&self) -> bool {
@@ -6213,7 +6243,10 @@ impl App {
                     library,
                     failed_provider,
                     epoch,
-                } if epoch == self.browsing_epoch => {
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && songs_generation == self.library_songs_generation =>
+                {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
                     self.library = library;
@@ -6308,16 +6341,15 @@ impl App {
                     section,
                     page,
                     epoch,
-                } if epoch == self.browsing_epoch => {
-                    let next = page.next;
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && (section != crate::api::LibrarySection::Songs
+                        || songs_generation == self.library_songs_generation) =>
+                {
                     match section {
-                        crate::api::LibrarySection::Songs => self.library.songs.extend(
-                            page.items
-                                .into_iter()
-                                .filter_map(|e| e.track().cloned())
-                                .collect(),
-                            next,
-                        ),
+                        crate::api::LibrarySection::Songs => {
+                            crate::providers::append_library_songs(&mut self.library.songs, page)
+                        }
                         crate::api::LibrarySection::Artists => self.library.artists.extend(
                             page.items
                                 .into_iter()
@@ -6326,7 +6358,7 @@ impl App {
                                     _ => None,
                                 })
                                 .collect(),
-                            next,
+                            page.next,
                         ),
                         crate::api::LibrarySection::Albums => self.library.albums.extend(
                             page.items
@@ -6336,7 +6368,7 @@ impl App {
                                     _ => None,
                                 })
                                 .collect(),
-                            next,
+                            page.next,
                         ),
                         crate::api::LibrarySection::Playlists => {
                             self.library.playlists.extend(
@@ -6347,7 +6379,7 @@ impl App {
                                         _ => None,
                                     })
                                     .collect(),
-                                next,
+                                page.next,
                             );
                             self.apply_playlist_order();
                         }
@@ -6385,7 +6417,11 @@ impl App {
                     section,
                     error,
                     epoch,
-                } if epoch == self.browsing_epoch => {
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && (section != crate::api::LibrarySection::Songs
+                        || songs_generation == self.library_songs_generation) =>
+                {
                     tracing::warn!(?section, %error, "could not load another library page");
                     self.library_paging_errors
                         .retain(|(failed, _)| *failed != section);
@@ -6401,7 +6437,13 @@ impl App {
                     }
                 }
                 Event::LibraryMoreFailed { .. } => {}
-                Event::LibraryFailed { error, epoch } if epoch == self.browsing_epoch => {
+                Event::LibraryFailed {
+                    error,
+                    epoch,
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && songs_generation == self.library_songs_generation =>
+                {
                     self.library_loading = false;
                     self.library_error = Some(error);
                 }
@@ -7060,10 +7102,7 @@ impl App {
                         self.toast("Added to Spotify Liked Songs");
                     } else {
                         self.liked_music.remove_spotify_track(&track.video_id);
-                        self.library
-                            .songs
-                            .items
-                            .retain(|song| song.video_id != track.video_id);
+                        self.remove_spotify_library_song(&track.video_id);
                         if self.history.current() == &Route::LikedMusic {
                             self.request_liked_music(crate::model::Provider::Spotify, false);
                         }

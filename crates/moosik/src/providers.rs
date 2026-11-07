@@ -364,6 +364,46 @@ pub async fn library_more(api: &Api, section: LibrarySection, token: &str) -> Re
     .await
 }
 
+pub(crate) fn restart_spotify_song_paging(songs: &mut Paged<Track>) -> bool {
+    let Some(mut cursor) = songs
+        .next
+        .as_deref()
+        .and_then(|token| Cursor::decode(token).ok())
+    else {
+        return false;
+    };
+    if cursor.spotify.is_none() {
+        return false;
+    }
+    cursor.spotify = Some(moosik_spotify::library_start_cursor(
+        moosik_spotify::LibrarySection::Songs,
+    ));
+    cursor.spotify_next = true;
+    songs.next = cursor.encode();
+    songs.loading = false;
+    true
+}
+
+pub(crate) fn append_library_songs(songs: &mut Paged<Track>, page: Page) {
+    let mut tracks: Vec<_> = page
+        .items
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Song(track) | Entry::Video(track) => Some(track),
+            _ => None,
+        })
+        .collect();
+    if tracks.iter().any(Track::is_spotify) {
+        let existing: HashSet<_> = songs
+            .items
+            .iter()
+            .map(|track| track.video_id.as_str())
+            .collect();
+        tracks.retain(|track| !track.is_spotify() || !existing.contains(track.video_id.as_str()));
+    }
+    songs.extend(tracks, page.next);
+}
+
 async fn continued_page<F, Fut>(mut cursor: Cursor, mut fetch: F) -> Result<Page>
 where
     F: FnMut(Source, String) -> Fut,
@@ -695,6 +735,51 @@ mod tests {
         )
         .unwrap()
         .into_track()
+    }
+
+    #[tokio::test]
+    async fn restarting_spotify_songs_recovers_the_shifted_page_boundary() {
+        let spotify_song = |index| song(&format!("spotify:track:{index:022}"), "Saved song");
+        let mut songs = merge_page(
+            Paged::new(
+                vec![song("youtube", "YouTube song")],
+                Some("yt-next".into()),
+            ),
+            Paged::new(
+                (1..50).map(spotify_song).collect(),
+                Some("offset-50".into()),
+            ),
+        );
+        songs.loading = true;
+
+        assert!(restart_spotify_song_paging(&mut songs));
+        assert!(!songs.loading);
+        let cursor = Cursor::decode(songs.next.as_deref().unwrap()).unwrap();
+        let page = continued_page(cursor, |source, token| {
+            assert_eq!(source, Source::Spotify);
+            assert_eq!(
+                token,
+                moosik_spotify::library_start_cursor(moosik_spotify::LibrarySection::Songs)
+            );
+            std::future::ready(Ok(Page {
+                items: (1..=50).map(spotify_song).map(Entry::Song).collect(),
+                next: None,
+            }))
+        })
+        .await
+        .unwrap();
+        append_library_songs(&mut songs, page);
+
+        assert_eq!(songs.items.len(), 51);
+        assert_eq!(songs.items[0].video_id, "youtube");
+        assert_eq!(
+            songs.items.last().unwrap().video_id,
+            spotify_song(50).video_id
+        );
+        let cursor = Cursor::decode(songs.next.as_deref().unwrap()).unwrap();
+        assert_eq!(cursor.youtube.as_deref(), Some("yt-next"));
+        assert!(cursor.spotify.is_none());
+        assert!(!restart_spotify_song_paging(&mut songs));
     }
 
     #[tokio::test]
