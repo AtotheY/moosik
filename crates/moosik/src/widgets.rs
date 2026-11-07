@@ -3848,7 +3848,27 @@ pub fn art_card(
     )
 }
 
-/// Library cards also support dragging and can suppress playback while selecting a batch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn art_card_with_sources(
+    ui: &mut Ui,
+    palette: &Palette,
+    width: f32,
+    texture: Option<&egui::TextureHandle>,
+    title: &str,
+    subtitle: &str,
+    source: Option<&str>,
+    sources: &[(crate::model::Provider, bool)],
+    shape: ArtShape,
+    menu: Option<CardMenu<'_>>,
+    playing: bool,
+    selected: bool,
+) -> CardClick {
+    interactive_art_card_with_sources(
+        ui, palette, width, texture, title, subtitle, source, sources, shape, menu, playing,
+        selected, false, true,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn interactive_art_card(
     ui: &mut Ui,
@@ -3857,6 +3877,42 @@ pub(crate) fn interactive_art_card(
     texture: Option<&egui::TextureHandle>,
     title: &str,
     subtitle: &str,
+    source: Option<&str>,
+    shape: ArtShape,
+    menu: Option<CardMenu<'_>>,
+    playing: bool,
+    selected: bool,
+    draggable: bool,
+    show_play: bool,
+) -> CardClick {
+    interactive_art_card_with_sources(
+        ui,
+        palette,
+        width,
+        texture,
+        title,
+        subtitle,
+        source,
+        &[],
+        shape,
+        menu,
+        playing,
+        selected,
+        draggable,
+        show_play,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn interactive_art_card_with_sources(
+    ui: &mut Ui,
+    palette: &Palette,
+    width: f32,
+    texture: Option<&egui::TextureHandle>,
+    title: &str,
+    subtitle: &str,
+    source: Option<&str>,
+    sources: &[(crate::model::Provider, bool)],
     shape: ArtShape,
     menu: Option<CardMenu<'_>>,
     playing: bool,
@@ -3874,6 +3930,12 @@ pub(crate) fn interactive_art_card(
         },
     );
     let mut play = false;
+    let mut source_choice = None;
+    let source_verb = if matches!(&menu, Some(CardMenu::Track(_))) {
+        "Play from"
+    } else {
+        "Open on"
+    };
 
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::same(theme::RADIUS);
@@ -3952,6 +4014,37 @@ pub(crate) fn interactive_art_card(
             theme::medium(13.0),
             palette.text,
         );
+        let source_w = if !sources.is_empty() {
+            let source_rect = Rect::from_min_size(
+                art.left_bottom() + vec2(0.0, 22.0),
+                vec2(sources.len() as f32 * 28.0, 24.0),
+            );
+            let mut choices = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(response.id.with("sources"))
+                    .max_rect(source_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            choices.spacing_mut().item_spacing.x = 4.0;
+            for &(provider, selected) in sources {
+                if provider_button(&mut choices, palette, provider, selected, source_verb).clicked()
+                {
+                    source_choice = Some(provider);
+                }
+            }
+            sources.len() as f32 * 28.0
+        } else if let Some(source) = source {
+            source_name_indicator(
+                ui,
+                palette,
+                Rect::from_center_size(art.left_bottom() + vec2(12.0, 34.0), vec2(20.0, 20.0)),
+                source,
+                response.id.with("source"),
+            );
+            28.0
+        } else {
+            0.0
+        };
         crate::emoji::paint_line(
             ui,
             art.left_bottom() + vec2(source_w, 34.0),
@@ -3969,6 +4062,7 @@ pub(crate) fn interactive_art_card(
     // survive its card scrolling out from under it.
     let action = menu.and_then(|m| card_menu(ui, palette, &response, m));
     CardClick {
+        source: source_choice,
         response,
         play,
         action,

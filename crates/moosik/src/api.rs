@@ -1136,6 +1136,8 @@ impl Api {
                     id: a.browse_id.get_raw().to_owned(),
                     title: a.title,
                     artist: String::new(),
+                    artists: Vec::new(),
+                    explicit: None,
                     year: a.year,
                     kind: a.category,
                     thumbnail: last_thumb(&a.thumbnails),
@@ -2766,7 +2768,13 @@ fn map_album_ref(a: ytmapi_rs::parse::SearchResultAlbum) -> model::AlbumRef {
     model::AlbumRef {
         id: a.album_id.get_raw().to_owned(),
         title: a.title,
+        artists: if a.artist.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![model::ArtistLink::plain(a.artist.clone())]
+        },
         artist: a.artist,
+        explicit: Some(is_explicit(&a.explicit)),
         year: (!a.year.is_empty()).then_some(a.year),
         kind: Some(album_kind(&a.album_type).to_owned()),
         thumbnail: last_thumb(&a.thumbnails),
@@ -2892,6 +2900,11 @@ fn map_artist(a: GetArtist) -> model::Artist {
                     id: al.album_id.get_raw().to_owned(),
                     title: al.title,
                     artist: a.name.clone(),
+                    artists: vec![model::ArtistLink {
+                        name: a.name.clone(),
+                        id: Some(a.channel_id.get_raw().to_owned()),
+                    }],
+                    explicit: Some(is_explicit(&al.explicit)),
                     year: (!al.year.is_empty()).then_some(al.year),
                     // The preview's own type label is deprecated upstream; the full-list
                     // expansion carries the category string instead.
@@ -3030,6 +3043,89 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_album_search_keeps_artist_credit_and_explicitness() {
+        for (explicit, expected) in [("IsExplicit", true), ("NotExplicit", false)] {
+            let album = map_album_ref(
+                serde_json::from_value(serde_json::json!({
+                    "title": "An album",
+                    "artist": "Ann & Bo",
+                    "year": "2024",
+                    "explicit": explicit,
+                    "album_id": "MPREb_album",
+                    "album_type": "Album",
+                    "thumbnails": []
+                }))
+                .unwrap(),
+            );
+            assert_eq!(album.id, "MPREb_album");
+            assert_eq!(album.title, "An album");
+            assert_eq!(album.artist, "Ann & Bo");
+            assert_eq!(album.artists, vec![model::ArtistLink::plain("Ann & Bo")]);
+            assert_eq!(album.explicit, Some(expected));
+            assert_eq!(album.year.as_deref(), Some("2024"));
+            assert_eq!(album.kind.as_deref(), Some("Album"));
+        }
+    }
+
+    #[test]
+    fn typed_album_search_keeps_missing_artist_credit_empty() {
+        let album = map_album_ref(
+            serde_json::from_value(serde_json::json!({
+                "title": "An album",
+                "artist": " ",
+                "year": "",
+                "explicit": "NotExplicit",
+                "album_id": "MPREb_album",
+                "album_type": "Single",
+                "thumbnails": []
+            }))
+            .unwrap(),
+        );
+        assert!(album.artists.is_empty());
+        assert_eq!(album.artist, " ");
+        assert!(album.year.is_none());
+    }
+
+    #[test]
+    fn typed_artist_album_preview_keeps_page_credit_and_explicitness() {
+        for (explicit, expected) in [("IsExplicit", true), ("NotExplicit", false)] {
+            let artist = map_artist(
+                serde_json::from_value(serde_json::json!({
+                    "name": "Ann",
+                    "channel_id": "UCann",
+                    "subscribed": false,
+                    "thumbnails": [],
+                    "top_releases": {
+                        "albums": {
+                            "results": [{
+                                "title": "An album",
+                                "year": "2024",
+                                "album_id": "MPREb_album",
+                                "library_status": "BOOKMARK_BORDER",
+                                "thumbnails": [],
+                                "explicit": explicit
+                            }]
+                        }
+                    }
+                }))
+                .unwrap(),
+            );
+            let model::Entry::Album(album) = &artist.shelves[0].items[0] else {
+                panic!("expected an album");
+            };
+            assert_eq!(album.artist, "Ann");
+            assert_eq!(
+                album.artists,
+                vec![model::ArtistLink {
+                    name: "Ann".to_owned(),
+                    id: Some("UCann".to_owned()),
+                }]
+            );
+            assert_eq!(album.explicit, Some(expected));
+        }
+    }
 
     /// An empty shell — what a private playlist looks like without a recognised session —
     /// is detectable, so it gets a plain error instead of the typed parser's key error.

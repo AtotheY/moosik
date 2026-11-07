@@ -219,6 +219,8 @@ pub struct AlbumRef {
     pub id: String,
     pub title: String,
     pub artist: String,
+    pub artists: Vec<ArtistLink>,
+    pub explicit: Option<bool>,
     pub year: Option<String>,
     /// `"Album"`, `"Single"` or `"EP"` when the source labels it. Used to split a full
     /// discography; search hits leave it empty.

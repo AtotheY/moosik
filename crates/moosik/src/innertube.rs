@@ -451,6 +451,15 @@ fn year_segment(segs: &[Segment]) -> Option<String> {
         .map(|s| s.text.clone())
 }
 
+fn album_kind_segment(segs: &[Segment]) -> Option<String> {
+    segs.first()
+        .filter(|s| {
+            s.target.is_none()
+                && matches!(s.text.as_str(), "Album" | "Single" | "EP" | "Compilation")
+        })
+        .map(|s| s.text.clone())
+}
+
 /// The descriptive text of a row whose fields do not link — an artist's audience, a playlist's
 /// author. Drops a leading type word when there is something after it.
 fn plain_tail(segs: &[Segment]) -> String {
@@ -478,6 +487,16 @@ fn plain_album_artist(segs: &[Segment]) -> String {
         .map(|s| s.text.as_str())
         .collect::<Vec<_>>()
         .join(" • ")
+}
+
+fn album_artist_links(segs: &[Segment]) -> Vec<crate::model::ArtistLink> {
+    let linked = linked_artists(segs);
+    if !linked.is_empty() {
+        return linked;
+    }
+    non_empty(plain_album_artist(segs))
+        .map(|name| vec![crate::model::ArtistLink::plain(name)])
+        .unwrap_or_default()
 }
 
 /// Whether a playlist card's own menu offers to edit it — which is what makes it a playlist
@@ -997,8 +1016,10 @@ fn parse_search_row(row: &Value) -> Option<Entry> {
             title,
             // The album's artist is a linked field; the year is the bare four digits.
             artist: artist_line(&segs).unwrap_or_else(|| plain_album_artist(&segs)),
+            artists: album_artist_links(&segs),
+            explicit: is_explicit(row).then_some(true),
             year: year_segment(&segs),
-            kind: None,
+            kind: album_kind_segment(&segs),
             thumbnail: thumb,
         })),
         Target::Browse { id, page } if page == PAGE_PLAYLIST && !is_episodes_for_later(&id) => {
@@ -2521,14 +2542,11 @@ fn parse_card(item: &Value) -> Option<Entry> {
         Target::Browse { id, page } if page == PAGE_ALBUM => Some(Entry::Album(AlbumRef {
             id,
             title,
-            artist: String::new(),
+            artist: artist_line(&segs).unwrap_or_else(|| plain_album_artist(&segs)),
+            artists: album_artist_links(&segs),
+            explicit: is_explicit(card).then_some(true),
             year,
-            // "Album", "Single" or "EP" as YouTube labels it, which is what lets a caller split
-            // a full discography by type.
-            kind: fields
-                .first()
-                .filter(|k| matches!(**k, "Album" | "Single" | "EP"))
-                .map(|k| (*k).to_owned()),
+            kind: album_kind_segment(&segs),
             thumbnail: thumb,
         })),
         Target::Browse { id, page } if page == PAGE_ARTIST => Some(Entry::Artist(ArtistRef {
@@ -2794,6 +2812,134 @@ mod tests {
         }})
     }
 
+    #[test]
+    fn album_rows_and_cards_keep_each_linked_credit_and_explicit_badge() {
+        let byline = serde_json::json!([
+            {"text": "Album"}, {"text": " • "},
+            {"text": "Ann", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCann",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}
+            }}},
+            {"text": " & "},
+            {"text": "Bo", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCbo",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}
+            }}},
+            {"text": " • "}, {"text": "2024"}
+        ]);
+        let mut row = album_row("An album", byline.clone());
+        let badge = serde_json::json!([{
+            "musicInlineBadgeRenderer": {"icon": {"iconType": "MUSIC_EXPLICIT_BADGE"}}
+        }]);
+        row["musicResponsiveListItemRenderer"]["badges"] = badge.clone();
+        let card = serde_json::json!({"musicTwoRowItemRenderer": {
+            "title": {"runs": [{"text": "An album"}]},
+            "subtitle": {"runs": byline},
+            "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"],
+            "badges": badge
+        }});
+        for entry in [
+            parse_search_row(&row["musicResponsiveListItemRenderer"]),
+            parse_card(&card),
+        ] {
+            let Some(Entry::Album(album)) = entry else {
+                panic!("expected an album");
+            };
+            assert_eq!(
+                album.artists,
+                vec![
+                    crate::model::ArtistLink {
+                        name: "Ann".to_owned(),
+                        id: Some("UCann".to_owned()),
+                    },
+                    crate::model::ArtistLink {
+                        name: "Bo".to_owned(),
+                        id: Some("UCbo".to_owned()),
+                    },
+                ]
+            );
+            assert_eq!(album.explicit, Some(true));
+            assert_eq!(album.year.as_deref(), Some("2024"));
+            assert_eq!(album.kind.as_deref(), Some("Album"));
+            assert_eq!(album.artist, "Ann, Bo");
+        }
+    }
+
+    #[test]
+    fn album_rows_and_cards_only_keep_proven_release_kinds() {
+        for (label, expected) in [
+            ("Album", Some("Album")),
+            ("Single", Some("Single")),
+            ("EP", Some("EP")),
+            ("Compilation", Some("Compilation")),
+            ("2024", None),
+            ("Unknown", None),
+            ("", None),
+        ] {
+            let byline = serde_json::json!([{"text": label}]);
+            let row = album_row("An album", byline.clone());
+            let card = serde_json::json!({"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "An album"}]},
+                "subtitle": {"runs": byline},
+                "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"]
+            }});
+            for entry in [
+                parse_search_row(&row["musicResponsiveListItemRenderer"]),
+                parse_card(&card),
+            ] {
+                let Some(Entry::Album(album)) = entry else {
+                    panic!("expected an album");
+                };
+                assert_eq!(album.kind.as_deref(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn album_rows_and_cards_never_credit_kind_or_year() {
+        for (byline, expected) in [
+            (
+                serde_json::json!([
+                    {"text": "Album"}, {"text": " • "}, {"text": "Various Artists"},
+                    {"text": " • "}, {"text": "2024"}
+                ]),
+                vec![crate::model::ArtistLink::plain("Various Artists")],
+            ),
+            (
+                serde_json::json!([
+                    {"text": "Single"}, {"text": " • "}, {"text": "2024"}
+                ]),
+                Vec::new(),
+            ),
+        ] {
+            let row = album_row("An album", byline.clone());
+            let card = serde_json::json!({"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "An album"}]},
+                "subtitle": {"runs": byline},
+                "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"]
+            }});
+            for entry in [
+                parse_search_row(&row["musicResponsiveListItemRenderer"]),
+                parse_card(&card),
+            ] {
+                let Some(Entry::Album(album)) = entry else {
+                    panic!("expected an album");
+                };
+                assert_eq!(album.artists, expected);
+                assert_eq!(
+                    album.artist,
+                    expected
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                assert_eq!(album.explicit, None);
+                assert_eq!(album.year.as_deref(), Some("2024"));
+            }
+        }
+    }
+
     /// The three bylines the Albums tab returned for `moves like jagger livw` (2026-10-19):
     /// a linked artist, an unlinked one, and none at all. The year never ends up in the artist.
     #[test]
@@ -3017,6 +3163,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{fixture}: no The Man Who"));
             assert_eq!(album.year.as_deref(), Some("1999"), "{fixture}");
             assert_eq!(album.artist, "Travis", "{fixture}");
+            assert_eq!(album.kind.as_deref(), Some("Album"), "{fixture}");
         }
     }
 
