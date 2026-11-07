@@ -51,7 +51,6 @@ pub struct Presence {
     pub title: String,
     /// The credited artists, already joined.
     pub artist: String,
-    pub album: Option<String>,
     /// The cover URL the model carries, used as a fallback when there is no video id.
     pub thumbnail: Option<String>,
     /// A music video rather than an audio track. The model's `wide` flag: it decides which still
@@ -70,18 +69,13 @@ impl Presence {
             .name("YouTube Music via Moosik.dev")
             .status_display_type(StatusDisplayType::Details);
         // Discord also uses details for the compact member-list status.
-        let title = self.title.trim();
-        let artist = self.artist.trim();
-        let line = match (title.is_empty(), artist.is_empty()) {
-            (false, false) => format!("{title} - {artist}"),
-            (true, _) => artist.to_owned(),
-            _ => title.to_owned(),
-        };
-        if let Some(details) = field(&line) {
-            activity = activity.details(details);
-        }
-        if let Some(state) = self.album.as_deref().and_then(field) {
-            activity = activity.state(state);
+        if let Some(title) = field(&self.title) {
+            activity = activity.details(title);
+            if let Some(artist) = field(&self.artist) {
+                activity = activity.state(artist);
+            }
+        } else if let Some(artist) = field(&self.artist) {
+            activity = activity.details(artist);
         }
         // Only while playing: a paused track has no end, and a bar that kept running would lie.
         if let Some(end) = self.end_unix {
@@ -99,9 +93,6 @@ impl Presence {
             self.wide,
         ) {
             assets = assets.large_image(image);
-            if let Some(text) = field(&self.title) {
-                assets = assets.large_text(text);
-            }
         }
         activity = activity.assets(assets);
         let mut buttons = Vec::new();
@@ -313,7 +304,6 @@ mod tests {
             room: None,
             title: "Never Gonna Give You Up".into(),
             artist: "Rick Astley".into(),
-            album: Some("Whenever You Need Somebody".into()),
             thumbnail: Some("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj".into()),
             wide: false,
             playing: true,
@@ -327,9 +317,9 @@ mod tests {
         let json = serde_json::to_value(presence().activity()).unwrap();
         assert_eq!(json["type"], 2, "Listening");
         assert_eq!(json["name"], "YouTube Music via Moosik.dev");
-        assert_eq!(json["details"], "Never Gonna Give You Up - Rick Astley");
-        assert_eq!(json["state"], "Whenever You Need Somebody");
-        assert_eq!(json["status_display_type"], 2, "show title and artist");
+        assert_eq!(json["details"], "Never Gonna Give You Up");
+        assert_eq!(json["state"], "Rick Astley");
+        assert_eq!(json["status_display_type"], 2, "show the song title");
         assert_eq!(json["timestamps"]["end"], 1_700_000_000_000i64);
         // The model's square cover, rewritten to the size Discord draws — not the `i.ytimg`
         // still, whose art-track letterboxing survives Discord's centre crop as bars.
@@ -337,7 +327,7 @@ mod tests {
             json["assets"]["large_image"],
             "https://lh3.googleusercontent.com/abc=w544-h544-l90-rj"
         );
-        assert_eq!(json["assets"]["large_text"], "Never Gonna Give You Up");
+        assert!(json["assets"].get("large_text").is_none());
         assert_eq!(
             json["buttons"],
             serde_json::json!([
@@ -383,7 +373,7 @@ mod tests {
             json["assets"]["small_image"],
             "https://moosik.dev/assets/discord/paused.png"
         );
-        assert_eq!(json["details"], "Never Gonna Give You Up - Rick Astley");
+        assert_eq!(json["details"], "Never Gonna Give You Up");
     }
 
     /// When the model carries no cover, or one too long for Discord's proxy, the short still
@@ -477,6 +467,19 @@ mod tests {
         assert!(json["assets"].get("large_image").is_none());
     }
 
+    #[test]
+    fn a_blank_title_shows_the_artist_once() {
+        for title in ["", "   "] {
+            let track = Presence {
+                title: title.into(),
+                ..presence()
+            };
+            let json = serde_json::to_value(track.activity()).unwrap();
+            assert_eq!(json["details"], "Rick Astley");
+            assert!(json.get("state").is_none());
+        }
+    }
+
     /// The two text fields are capped, and an empty one is left out entirely rather than sent as
     /// a blank line.
     #[test]
@@ -484,7 +487,6 @@ mod tests {
         let long = Presence {
             title: "t".repeat(TEXT_LIMIT + 40),
             artist: "   ".into(),
-            album: None,
             ..presence()
         };
         let json = serde_json::to_value(long.activity()).unwrap();

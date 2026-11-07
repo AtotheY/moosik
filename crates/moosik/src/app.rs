@@ -3056,7 +3056,6 @@ impl App {
                 .map(|a| a.name.clone())
                 .collect::<Vec<_>>()
                 .join(", "),
-            album: track.album.clone(),
             thumbnail: track.thumbnail.as_deref().map(str::to_owned),
             wide: track.wide,
             playing,
