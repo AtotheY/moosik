@@ -287,6 +287,19 @@ fn normalized(value: &str) -> String {
         .join(" ")
 }
 
+fn normalized_song_title(value: &str) -> String {
+    let title = normalized(value);
+    if let Some((base, version)) = title
+        .strip_suffix(')')
+        .and_then(|title| title.rsplit_once(" ("))
+        && !version.trim().is_empty()
+        && !version.contains(['(', ')'])
+    {
+        return format!("{base} - {}", version.trim());
+    }
+    title
+}
+
 fn song_metadata(entry: &Entry) -> Option<SongMetadata> {
     let Entry::Song(track) = entry else {
         return None;
@@ -294,7 +307,7 @@ fn song_metadata(entry: &Entry) -> Option<SongMetadata> {
     if track.wide || track.artists.is_empty() || track.video_id.is_empty() {
         return None;
     }
-    let title = normalized(&track.title);
+    let title = normalized_song_title(&track.title);
     let mut artists: Vec<_> = track
         .artists
         .iter()
@@ -1177,6 +1190,36 @@ mod tests {
         video.track_mut().unwrap().wide = true;
         let spotify = song(Provider::Spotify, "sp", "Song", &["Artist"], Some(200));
         assert_eq!(group_entries(&[video, spotify], true).len(), 2);
+    }
+
+    #[test]
+    fn song_versions_match_across_suffix_punctuation() {
+        let credits = ["Lele", "Petre Stefan", "Manele VTM"];
+        let youtube = song(
+            Provider::YouTubeMusic,
+            "yt",
+            "Peter Parker (Balkanic Version)",
+            &credits,
+            Some(199),
+        );
+        let spotify = song(
+            Provider::Spotify,
+            "sp",
+            "Peter Parker - Balkanic Version",
+            &credits,
+            Some(198),
+        );
+        let remix = song(
+            Provider::Spotify,
+            "remix",
+            "Peter Parker - Live",
+            &credits,
+            Some(198),
+        );
+        let groups = group_entries(&[youtube.clone(), spotify.clone(), remix.clone()], true);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].variants, [youtube, spotify]);
+        assert_eq!(groups[1].variants, [remix]);
     }
 
     #[test]
