@@ -354,7 +354,9 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     if count == 0 && !app.organizer.page_failed {
         app.load_more_library(crate::api::LibrarySection::Playlists);
     }
-    let selected_id = match app.current_route() {
+    let route = app.current_route();
+    let liked_selected = route == Route::LikedMusic;
+    let selected_id = match route {
         Route::Playlist(id) => Some(id),
         _ => None,
     };
@@ -430,25 +432,32 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                     }
                 };
                 let p = &library.playlists.items[i];
+                let is_liked = crate::model::is_liked_auto(&p.id);
                 let row = RailRow {
                     id: &p.id,
-                    title: &p.title,
+                    title: if is_liked {
+                        super::liked_music::TITLE
+                    } else {
+                        &p.title
+                    },
                     // The section header already says Playlists; the row says who made it,
                     // when it is someone else's list, and how much is in it when it is yours.
-                    detail: p.detail(),
-                    thumbnail: p.thumbnail.as_ref(),
+                    detail: if is_liked { String::new() } else { p.detail() },
+                    thumbnail: if is_liked { None } else { p.thumbnail.as_ref() },
                     folder: None,
                     depth,
                     pinned: app.settings.playlist_layout.pins.contains(&p.id),
                 };
                 let art = art_texture(images, backend, ui.ctx(), row.thumbnail, ROW_ART_PT);
-                let selected = selected_id.as_deref() == Some(row.id);
+                let selected =
+                    (liked_selected && is_liked) || selected_id.as_deref() == Some(row.id);
                 let response = if rail {
                     rail_row_compact(ui, palette, &row, art, selected)
                 } else {
                     rail_row(ui, palette, &row, art, selected)
                 };
-                let accepts = p.editable
+                let accepts = !is_liked
+                    && p.editable
                     && super::song_drag::payload(ui.ctx()).is_some_and(|d| {
                         if p.id.starts_with("private:") {
                             true
@@ -516,6 +525,7 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 let is_local = p.source == crate::model::PlaylistSource::Local;
                 if response.secondary_clicked()
                     && !is_local
+                    && !is_liked
                     && !rail_cache.contains_key(&p.id)
                     && playlist.as_ref().map(|pl| pl.id.as_str()) != Some(p.id.as_str())
                 {
@@ -525,11 +535,14 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                     .then(|| local_playlists.iter().find(|lp| lp.id == p.id))
                     .flatten()
                     .map(|lp| crate::app::build_local_playlist(lp, local_tracks));
-                let cached = local_view.as_ref().or_else(|| {
-                    rail_cache
-                        .get(&p.id)
-                        .or_else(|| playlist.as_ref().filter(|pl| pl.id == p.id))
-                });
+                let cached = local_view
+                    .as_ref()
+                    .or_else(|| {
+                        rail_cache
+                            .get(&p.id)
+                            .or_else(|| playlist.as_ref().filter(|pl| pl.id == p.id))
+                    })
+                    .filter(|_| !is_liked);
                 let tracks: &[crate::model::Track] =
                     cached.map(|pl| pl.tracks.items.as_slice()).unwrap_or(&[]);
                 if let Some(action) = widgets::page_menu_with_layout(
@@ -539,11 +552,11 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                     widgets::PageMenu {
                         page_id: &p.id,
                         tracks,
-                        artist_id: p.author_id.as_deref(),
+                        artist_id: p.author_id.as_deref().filter(|_| !is_liked),
                         playlists: &library.playlists.items,
                         signed_in,
                         // There is no real YouTube URL for a local playlist to share.
-                        share_url: if is_local {
+                        share_url: if is_local || is_liked {
                             String::new()
                         } else {
                             crate::model::playlist_url(&p.id)
@@ -551,17 +564,16 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                         // Not here: the description only arrives with the fetch, so Info would
                         // pop into an open menu. The playlist page's own ••• offers it.
                         has_info: false,
-                        manage: p.editable || p.id.starts_with("private:"),
-                        remove_from_library: !is_local
-                            && !p.editable
-                            && !crate::model::is_liked_auto(&p.id),
+                        manage: !is_liked && (p.editable || p.id.starts_with("private:")),
+                        remove_from_library: !is_local && !is_liked && !p.editable,
                         context_only: true,
                         // A local playlist has no YouTube radio to start.
-                        radio_id: (!is_local).then_some(p.id.as_str()),
+                        radio_id: (!is_local && !is_liked).then_some(p.id.as_str()),
                         save_as_new: None,
                         // The songs a right-click has only just asked for: the menu opens
                         // complete, and an item picked before they land waits for them.
-                        tracks_pending: cached.is_none().then_some(crate::ui::PageKind::Playlist),
+                        tracks_pending: (!is_liked && cached.is_none())
+                            .then_some(crate::ui::PageKind::Playlist),
                     },
                     Some((row.pinned, child || layout.is_filed(&p.id))),
                 ) {
@@ -648,7 +660,11 @@ fn rail_art(
             .image(palette.secondary, 22.0)
             .paint_at(ui, Rect::from_center_size(rect.center(), vec2(22.0, 22.0)));
     } else {
-        widgets::paint_art(ui, palette, rect, art, ArtShape::Square);
+        if crate::model::is_liked_auto(row.id) {
+            super::liked_music::paint_cover(ui, palette, rect);
+        } else {
+            widgets::paint_art(ui, palette, rect, art, ArtShape::Square);
+        }
         if row.pinned {
             let center = rect.left_top() + vec2(7.0, 7.0);
             ui.painter().circle_filled(center, 7.0, palette.accent);

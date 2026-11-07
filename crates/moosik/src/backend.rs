@@ -21,8 +21,8 @@ use crate::auth::{self, AuthState};
 use crate::downloads;
 use crate::images;
 use crate::model::{
-    Album, Artist, Entry, Library, MoodPlaylists, Playlist, Provider, SearchResults, SearchScope,
-    Shelf, Track,
+    Album, Artist, Entry, Library, MoodPlaylists, Paged, Playlist, Provider, SearchResults,
+    SearchScope, Shelf, Track,
 };
 use crate::player;
 use crate::search_cache::{
@@ -208,6 +208,11 @@ pub enum Event {
     LikedScanDone {
         complete: bool,
         epoch: u64,
+    },
+    LikedMusicPage {
+        provider: Provider,
+        epoch: u64,
+        result: Result<Paged<Track>, String>,
     },
     AlbumLoaded {
         id: String,
@@ -581,6 +586,7 @@ impl Event {
                 | Event::LibraryLoaded { .. }
                 | Event::LibraryMore { .. }
                 | Event::LikedPage { .. }
+                | Event::LikedMusicPage { result: Ok(_), .. }
                 | Event::SearchDone { .. }
                 | Event::ScopedSearchDone { .. }
                 | Event::ArtistLoaded { .. }
@@ -615,6 +621,7 @@ impl Event {
                 | Event::PlaylistSuggestions { .. }
                 | Event::LibraryLoaded { .. }
                 | Event::LibraryFailed { .. }
+                | Event::LikedMusicPage { .. }
                 | Event::ExploreLoaded { .. }
                 | Event::ExploreFailed { .. }
                 | Event::ReleasesLoaded { .. }
@@ -652,6 +659,9 @@ impl Event {
             | Event::PlaylistFailed { error, .. }
             | Event::PlaylistMoreFailed { error, .. }
             | Event::LibraryMoreFailed { error, .. }
+            | Event::LikedMusicPage {
+                result: Err(error), ..
+            }
             | Event::SidebarPlaylistsFailed { error, .. }
             | Event::LibraryFailed { error, .. }
             | Event::SubscriptionFailed { error, .. }
@@ -2087,6 +2097,62 @@ impl Backend {
             }
         });
     }
+
+    pub fn fetch_liked_music(&self, provider: Provider, token: Option<String>, epoch: u64) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let token = token.or_else(|| {
+                (provider == Provider::Spotify).then(|| {
+                    moosik_spotify::library_start_cursor(moosik_spotify::LibrarySection::Songs)
+                })
+            });
+            let result: anyhow::Result<Paged<Track>> = async {
+                let page = match (provider, token.as_deref()) {
+                    (Provider::YouTubeMusic, None) => {
+                        return Ok(api.playlist("VLLM").await?.tracks);
+                    }
+                    (Provider::YouTubeMusic, Some(token)) => {
+                        api.playlist_more(token.to_owned()).await?
+                    }
+                    (Provider::Spotify, Some(token)) => {
+                        crate::spotify::library_more(crate::api::LibrarySection::Songs, token)
+                            .await?
+                    }
+                    _ => anyhow::bail!("Liked Music is unavailable for {}", provider.name()),
+                };
+                anyhow::ensure!(
+                    page.next
+                        .as_deref()
+                        .is_none_or(|next| { !next.is_empty() && Some(next) != token.as_deref() }),
+                    "Liked Music continuation did not advance"
+                );
+                let items: Vec<_> = page
+                    .items
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Song(track) | Entry::Video(track) => Some(track),
+                        _ => None,
+                    })
+                    .collect();
+                anyhow::ensure!(
+                    provider != Provider::YouTubeMusic || !items.is_empty() || page.next.is_some(),
+                    "YouTube Music returned an empty Liked Music continuation"
+                );
+                Ok(Paged::new(items, page.next))
+            }
+            .await;
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::LikedMusicPage {
+                    provider,
+                    epoch,
+                    result: result.map_err(|error| format!("{error:#}")),
+                },
+            );
+        });
+    }
+
     /// The next page of a playlist's tracks.
     ///
     /// Retried a couple of times on failure, unlike every other single-shot fetch in this file:

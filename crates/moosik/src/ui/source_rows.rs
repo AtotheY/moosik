@@ -1,4 +1,4 @@
-use crate::app::{App, Route};
+use crate::app::{App, PlaylistSort, Route};
 use crate::model::{Entry, Provider};
 use crate::source_groups::{Group, entry_provider, group_entries};
 use crate::ui::ListClick;
@@ -19,6 +19,10 @@ pub(crate) struct State {
 }
 
 impl State {
+    pub(crate) fn len(&self) -> usize {
+        self.groups.len()
+    }
+
     pub(crate) fn set_entries(&mut self, entries: &[Entry], revision: u64, enabled: bool) {
         if self.revision == Some((revision, enabled)) {
             return;
@@ -37,6 +41,39 @@ impl State {
             })
             .collect();
         self.revision = Some((revision, enabled));
+    }
+
+    pub(crate) fn sort_playlist(&mut self, sort: PlaylistSort, preferred: Provider) {
+        if sort == PlaylistSort::Default {
+            return;
+        }
+        let mut rows: Vec<_> = std::mem::take(&mut self.groups)
+            .into_iter()
+            .zip(std::mem::take(&mut self.labels))
+            .collect();
+        let title = |(group, _): &(Group, String)| {
+            group
+                .preferred_entry(preferred, None)
+                .and_then(Entry::track)
+                .map(|track| track.title.to_lowercase())
+                .unwrap_or_default()
+        };
+        let duration = |(group, _): &(Group, String)| {
+            group
+                .preferred_entry(preferred, None)
+                .and_then(Entry::track)
+                .and_then(|track| track.duration)
+                .unwrap_or(0)
+        };
+        match sort {
+            PlaylistSort::Default => {}
+            PlaylistSort::Reverse => rows.reverse(),
+            PlaylistSort::TitleAsc => rows.sort_by_cached_key(title),
+            PlaylistSort::TitleDesc => rows.sort_by_cached_key(|row| std::cmp::Reverse(title(row))),
+            PlaylistSort::DurationAsc => rows.sort_by_key(duration),
+            PlaylistSort::DurationDesc => rows.sort_by_key(|row| std::cmp::Reverse(duration(row))),
+        }
+        (self.groups, self.labels) = rows.into_iter().unzip();
     }
 
     pub(crate) fn set_tracks(&mut self, tracks: &[crate::model::Track], enabled: bool) {
@@ -130,6 +167,26 @@ pub(crate) fn draw(
     salt: &str,
     playback: Playback,
 ) -> bool {
+    draw_with_options(app, ui, state, salt, playback, false)
+}
+
+pub(crate) fn draw_playlist(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    state: &mut State,
+    salt: &str,
+) -> bool {
+    draw_with_options(app, ui, state, salt, Playback::List, true)
+}
+
+pub(super) fn draw_with_options(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    state: &State,
+    salt: &str,
+    playback: Playback,
+    playlist_rows: bool,
+) -> bool {
     let preferred = app.settings.preferred_provider;
     let signed_in = app.signed_in();
     let now_id = app.now.track.as_ref().map(|track| track.video_id.as_str());
@@ -157,7 +214,7 @@ pub(crate) fn draw(
             backend,
             stats,
             liked,
-            state.groups.len(),
+            state.len(),
             |index| {
                 let group = &state.groups[index];
                 let mut spec = crate::ui::entry_row_spec(
@@ -166,6 +223,10 @@ pub(crate) fn draw(
                     library,
                     signed_in,
                 );
+                if playlist_rows {
+                    spec.number = Some(index + 1);
+                    spec.quiet_like = true;
+                }
                 if group.is_combined()
                     && matches!(
                         group.variants[selected[index]],

@@ -508,6 +508,7 @@ pub enum Route {
     Listening,
     Queue,
     Library,
+    LikedMusic,
     Profile,
     Settings,
     Artist(String),
@@ -546,16 +547,28 @@ impl Route {
             "stats" => Some(Route::Listening),
             "queue" => Some(Route::Queue),
             "library" => Some(Route::Library),
+            "liked" => Some(Route::LikedMusic),
             "profile" => Some(Route::Profile),
             "settings" => Some(Route::Settings),
             other => match other.split_once(':') {
                 Some(("artist", id)) => Some(Route::Artist(id.to_owned())),
                 Some(("artistliked", id)) => Some(Route::ArtistLiked(id.to_owned())),
                 Some(("album", id)) => Some(Route::Album(id.to_owned())),
-                Some(("playlist", id)) => Some(Route::Playlist(id.to_owned())),
+                Some(("playlist", id)) => Some(Route::Playlist(id.to_owned()).canonical()),
                 Some(("homeshelf", title)) => Some(Route::HomeShelf(title.to_owned())),
                 _ => None,
             },
+        }
+    }
+
+    fn canonical(self) -> Self {
+        match &self {
+            Self::Playlist(id)
+                if crate::model::is_liked_auto(id) || id == "spotify:collection:tracks" =>
+            {
+                Self::LikedMusic
+            }
+            _ => self,
         }
     }
 }
@@ -1575,6 +1588,7 @@ pub struct App {
     /// cached to disk. There is no liked-by-artist endpoint — see `crate::liked`'s own doc — so
     /// this is what the artist page's "You Liked" section and the player bar's backfill read.
     pub(crate) liked: crate::liked::Index,
+    pub(crate) liked_music: ui::liked_music::State,
     /// A liked scan is in flight.
     pub(crate) liked_scanning: bool,
     /// The in-flight scan is a full one: its pages accumulate in `liked_buffer` and are swapped
@@ -2213,6 +2227,7 @@ impl App {
             library_loaded: false,
             library_sort: LibrarySort::Latest,
             liked: crate::liked::Index::default(),
+            liked_music: ui::liked_music::State::default(),
             liked_scanning: false,
             liked_full_scan: false,
             liked_buffer: Vec::new(),
@@ -3720,7 +3735,7 @@ impl App {
     }
 
     pub(crate) fn navigate(&mut self, route: Route) {
-        if self.history.push(route) {
+        if self.history.push(route.canonical()) {
             self.scroll_to_top = true;
             self.note_route_entered();
             self.ensure_route_loaded();
@@ -3871,6 +3886,7 @@ impl App {
             Route::ArtistLiked(id) => self.load_artist(id),
             Route::Album(id) => self.load_album(id),
             Route::Playlist(id) => self.load_playlist(id),
+            Route::LikedMusic => self.load_liked_music(),
             Route::Mood(params) => self.load_mood_playlists(params),
             Route::Library => self.load_library(),
             Route::Home => self.load_home(),
@@ -3947,6 +3963,10 @@ impl App {
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
+        if Route::Playlist(id.clone()).canonical() == Route::LikedMusic {
+            self.navigate(Route::LikedMusic);
+            return;
+        }
         self.note_playback_choice();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
@@ -4032,6 +4052,21 @@ impl App {
         self.liked_buffer.clear();
         self.backend
             .fetch_liked(self.account_epoch, self.liked_full_scan);
+    }
+
+    fn load_liked_music(&mut self) {
+        for provider in self.connected_providers() {
+            if ui::liked_music::SOURCES.contains(&provider) {
+                self.request_liked_music(provider, false);
+            }
+        }
+    }
+
+    pub(crate) fn request_liked_music(&mut self, provider: crate::model::Provider, more: bool) {
+        if let Some(token) = self.liked_music.request(provider, more) {
+            self.backend
+                .fetch_liked_music(provider, token, self.browsing_epoch);
+        }
     }
 
     /// Write the liked index out when it has changed. Serialising a few thousand tracks is a
@@ -4438,6 +4473,7 @@ impl App {
                 self.playlist_for = None;
                 self.playlist_error = None;
             }
+            Route::LikedMusic => self.liked_music.clear_errors(),
             Route::Mood(_) => {
                 self.mood_playlists_params = None;
                 self.mood_playlists_error = None;
@@ -5138,6 +5174,27 @@ impl App {
             .playlists
             .items
             .extend(self.local_playlists.iter().map(local_playlist_ref));
+        if self.has_library_account()
+            && !self
+                .library
+                .playlists
+                .iter()
+                .any(|playlist| crate::model::is_liked_auto(&playlist.id))
+        {
+            self.library.playlists.items.insert(
+                0,
+                crate::model::PlaylistRef {
+                    id: "VLLM".to_owned(),
+                    title: ui::liked_music::TITLE.to_owned(),
+                    author: String::new(),
+                    author_id: None,
+                    track_count: None,
+                    thumbnail: None,
+                    editable: false,
+                    source: crate::model::PlaylistSource::YouTube,
+                },
+            );
+        }
         self.apply_playlist_order();
         self.refresh_local_home();
     }
@@ -5194,6 +5251,10 @@ impl App {
         // Before the repeat check below: searching the same thing again still moves it up.
         self.search_history.record(&query);
         self.save_search_history();
+        if query == "spotify:collection:tracks" {
+            self.navigate(Route::LikedMusic);
+            return;
+        }
         if let Some(uri) = crate::spotify::resource_uri(&query) {
             if !crate::spotify::is_signed_in() {
                 self.settings_tab = ui::settings::SettingsTab::Providers;
@@ -5205,7 +5266,7 @@ impl App {
                 Some(Route::Album(uri))
             } else if uri.starts_with("spotify:artist:") {
                 Some(Route::Artist(uri))
-            } else if uri.starts_with("spotify:playlist:") || uri == "spotify:collection:tracks" {
+            } else if uri.starts_with("spotify:playlist:") {
                 Some(Route::Playlist(uri))
             } else {
                 None
@@ -5962,6 +6023,14 @@ impl App {
                     self.save_liked_if_dirty();
                 }
                 Event::LikedScanDone { .. } => {}
+                Event::LikedMusicPage {
+                    provider,
+                    epoch,
+                    result,
+                } if epoch == self.browsing_epoch => {
+                    self.liked_music.loaded(provider, result);
+                }
+                Event::LikedMusicPage { .. } => {}
                 // A further page of one section, appended in order.
                 Event::LibraryMore {
                     section,
@@ -7555,6 +7624,7 @@ impl App {
         self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
         self.backend.set_browsing_epoch(self.browsing_epoch);
         self.artist_sources.clear();
+        self.liked_music = ui::liked_music::State::default();
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();
         self.library_source_rows = ui::source_rows::State::default();
@@ -8111,6 +8181,10 @@ impl App {
     /// anything new stays after them in YouTube's own order (a stable sort by rank). Ids the
     /// saved list does not know about rank last, so a new playlist appears at the end.
     fn apply_playlist_order(&mut self) {
+        let mut has_liked = false;
+        self.library.playlists.items.retain(|playlist| {
+            !crate::model::is_liked_auto(&playlist.id) || !std::mem::replace(&mut has_liked, true)
+        });
         order_by_saved(
             &mut self.library.playlists.items,
             &self.settings.playlist_order,
@@ -8882,11 +8956,16 @@ impl App {
     /// A track's rating, from the first copy that holds it. Everything is kept in sync by
     /// [`Self::set_like`], so any copy answers for all of them.
     fn like_of(&self, video_id: &str) -> LikeStatus {
-        self.q
-            .tracks()
-            .iter()
-            .find(|t| t.video_id == video_id)
+        self.liked_music
+            .youtube_track(video_id)
             .map(|t| t.like)
+            .or_else(|| {
+                self.q
+                    .tracks()
+                    .iter()
+                    .find(|t| t.video_id == video_id)
+                    .map(|t| t.like)
+            })
             .or_else(|| {
                 self.now
                     .track
@@ -8900,6 +8979,7 @@ impl App {
     /// Set a track's library membership everywhere it appears. Same lists as
     /// [`Self::set_like`]: the toggle arrives optimistically and reverts on failure.
     fn set_library_state(&mut self, video_id: &str, in_library: bool) {
+        self.liked_music.set_library_state(video_id, in_library);
         let set = |t: &mut Track| {
             if t.video_id == video_id {
                 t.in_library = in_library;
@@ -9109,15 +9189,28 @@ impl App {
                 }
             }
         }
+        let copy = copy.or_else(|| {
+            self.liked_music
+                .youtube_track(video_id)
+                .cloned()
+                .map(|mut track| {
+                    track.like = like;
+                    track
+                })
+        });
         match like {
             LikeStatus::Like => {
                 if let Some(track) = copy {
+                    self.liked_music.set_youtube_rating(track.clone(), like);
                     self.liked.set_liked(track);
                     self.liked_dirty = true;
                 }
             }
             // Dislike is not liked: the index is the liked set and nothing else.
             LikeStatus::Indifferent | LikeStatus::Dislike => {
+                if let Some(track) = copy {
+                    self.liked_music.set_youtube_rating(track, like);
+                }
                 self.liked.set_unliked(video_id);
                 self.liked_dirty = true;
             }
@@ -9740,6 +9833,7 @@ impl eframe::App for App {
                             Route::ArtistLiked(_) => ui::artist_liked::page(self, ui),
                             Route::Album(_) => ui::album::page(self, ui),
                             Route::Playlist(_) => ui::playlist::page(self, ui),
+                            Route::LikedMusic => ui::liked_music::page(self, ui),
                             Route::Mood(_) => ui::mood::page(self, ui),
                         }
                     });

@@ -14,6 +14,7 @@ pub mod history;
 pub mod home;
 pub mod home_order;
 pub mod library;
+pub(crate) mod liked_music;
 pub mod listening;
 pub mod lyrics;
 pub mod mood;
