@@ -95,16 +95,21 @@ session to plaintext.
 
 ## Publishing an update
 
-Review and commit the intended Moosik source changes first. Bump the workspace
-version to a new public `major.minor.patch`, refresh the lockfile, and write
-`release-notes/<version>.md`. The fork's `+ark.N` development suffix is accepted
-when comparing installed clients, but public releases use numeric versions.
+Merging to `main` starts **Release merged main**. It tags the current merged
+commit with the next public patch version and starts **Moosik release** on that
+tag. Several close merges can ship together. An explicitly higher workspace
+version selects a major or minor release. Each build checkout stamps the tag
+version into the manifest and lockfile. The tagged source stays on reviewed
+main history and branch protection applies as usual.
 
-The **Moosik release** workflow builds macOS, Windows x64 and Ubuntu 24.04 amd64
-packages in parallel. Dispatch it on `main` to rehearse all three builds and warm
-the release caches. A branch dispatch only uploads workflow artifacts. A reviewed `moosik-v<version>` tag on
-`main` runs the same checks and publishes the complete GitHub release. For example,
-`moosik-v0.1.15` must match workspace version `0.1.15`.
+Write `release-notes/<version>.md` for curated notes. Otherwise the tag carries
+GitHub-generated release notes. To reproduce a tagged build, check out the tag
+and run `python3 scripts/public-version.py stamp <tag>` before building.
+
+Mac, Windows and Ubuntu packages build in parallel. A manual dispatch of
+**Moosik release** on a branch produces rehearsal artifacts. Dispatch it on a
+public tag to retry that version. Only verified, complete releases update the
+public feed.
 
 The release includes the initial-install DMG, the signed update ZIP, checksums, and
 `appcast.xml`. It stays a draft until all files are uploaded, then becomes Latest.

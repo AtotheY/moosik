@@ -1,0 +1,52 @@
+name: Release merged main
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: moosik-tag-main
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Tag merged code and start the signed public build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          tag=$(git tag --points-at HEAD --list 'moosik-v*' --sort=-v:refname | head -1)
+          if [[ -z "$tag" ]]; then
+            previous=$(git tag --merged HEAD --list 'moosik-v*' --sort=-v:refname | head -1)
+            version=$(python3 scripts/public-version.py next "$previous")
+            tag="moosik-v$version"
+            notes="$RUNNER_TEMP/notes.md"
+            if [[ -s "release-notes/$version.md" ]]; then
+              cp "release-notes/$version.md" "$notes"
+            else
+              gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+                -f tag_name="$tag" -f target_commitish="$sha" -f previous_tag_name="$previous" \
+                --jq .body > "$notes"
+            fi
+            git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+              tag --annotate "$tag" --file "$notes" "$sha"
+            git push origin "refs/tags/$tag"
+          fi
+          # Tags pushed with GITHUB_TOKEN do not start another push workflow.
+          # A retry after a successful dispatch must not start a duplicate release.
+          runs=$(gh run list --workflow moosik-release.yml --branch "$tag" --limit 10 --json status,conclusion)
+          if jq -e 'any(.[]; .status != "completed" or .conclusion == "success")' <<<"$runs" >/dev/null; then
+            exit 0
+          fi
+          gh workflow run moosik-release.yml --ref "$tag"
