@@ -61,8 +61,8 @@ pub struct Presence {
     /// stands in when there is no square cover.
     pub wide: bool,
     pub playing: bool,
-    /// When the track ends, in Unix seconds. Only set while playing; the bar is drawn from it.
-    pub end_unix: Option<i64>,
+    /// Start and end of a playing track with known duration, in Unix seconds.
+    pub timeline: Option<(i64, i64)>,
 }
 
 impl Presence {
@@ -72,7 +72,7 @@ impl Presence {
         let activity_name = format!("{source} via Moosik.dev");
         let mut activity = Activity::new()
             .activity_type(ActivityType::Listening)
-            .name(activity_name.clone())
+            .name(activity_name)
             .status_display_type(StatusDisplayType::Details);
         // Discord also uses details for the compact member-list status.
         if let Some(title) = field(&self.title) {
@@ -83,31 +83,27 @@ impl Presence {
         } else if let Some(artist) = field(&self.artist) {
             activity = activity.details(artist);
         }
-        // Only while playing: a paused track has no end, and a bar that kept running would lie.
         if self.playing
-            && let Some(end) = self.end_unix
+            && let Some((start, end)) = self.timeline
         {
-            activity = activity.timestamps(Timestamps::new().end(end.saturating_mul(1000)));
+            activity = activity.timestamps(
+                Timestamps::new()
+                    .start(start.saturating_mul(1000))
+                    .end(end.saturating_mul(1000)),
+            );
         }
-        let badge = if self.playing {
-            "https://moosik.dev/assets/discord/playing.gif"
-        } else {
-            "https://moosik.dev/assets/discord/paused.png"
-        };
-        let mut assets = Assets::new().small_image(badge).small_text(activity_name);
         let youtube_id = (self.provider == Provider::YouTubeMusic)
             .then_some(self.youtube_id.as_deref())
             .flatten();
         if let Some(image) = cover_url(youtube_id, self.thumbnail.as_deref(), self.wide) {
-            assets = assets.large_image(image);
+            activity = activity.assets(Assets::new().large_image(image));
         }
-        activity = activity.assets(assets);
         let mut buttons = Vec::new();
         if let Some(id) = youtube_id
             && moosik_resolve::VideoId::new(id).is_ok()
         {
             buttons.push(Button::new(
-                "Play song",
+                "Play on Moosik",
                 format!("https://moosik.dev/#play/{id}"),
             ));
         }
@@ -124,10 +120,12 @@ impl Presence {
                 "Listen along",
                 format!("https://moosik.dev/#join/{room}"),
             ));
-        } else {
-            buttons.push(Button::new("Try Moosik.dev", "https://moosik.dev"));
         }
-        activity.buttons(buttons)
+        if buttons.is_empty() {
+            activity
+        } else {
+            activity.buttons(buttons)
+        }
     }
 }
 
@@ -326,7 +324,7 @@ mod tests {
             thumbnail: Some("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj".into()),
             wide: false,
             playing: true,
-            end_unix: Some(1_700_000_000),
+            timeline: Some((1_699_999_800, 1_700_000_000)),
         }
     }
 
@@ -339,7 +337,7 @@ mod tests {
         assert_eq!(json["details"], "Never Gonna Give You Up");
         assert_eq!(json["state"], "Rick Astley");
         assert_eq!(json["status_display_type"], 2, "show the song title");
-        assert_eq!(json["assets"]["small_text"], "YouTube Music via Moosik.dev");
+        assert_eq!(json["timestamps"]["start"], 1_699_999_800_000i64);
         assert_eq!(json["timestamps"]["end"], 1_700_000_000_000i64);
         // The model's square cover, rewritten to the size Discord draws — not the `i.ytimg`
         // still, whose art-track letterboxing survives Discord's centre crop as bars.
@@ -351,8 +349,7 @@ mod tests {
         assert_eq!(
             json["buttons"],
             serde_json::json!([
-                {"label": "Play song", "url": "https://moosik.dev/#play/dQw4w9WgXcQ"},
-                {"label": "Try Moosik.dev", "url": "https://moosik.dev"}
+                {"label": "Play on Moosik", "url": "https://moosik.dev/#play/dQw4w9WgXcQ"}
             ])
         );
     }
@@ -368,7 +365,7 @@ mod tests {
         let json = serde_json::to_value(spotify.activity()).unwrap();
         assert_eq!(json["name"], "Spotify via Moosik.dev");
         assert_eq!(json["state"], "Rick Astley");
-        assert_eq!(json["assets"]["small_text"], "Spotify via Moosik.dev");
+        assert_eq!(json["timestamps"]["start"], 1_699_999_800_000i64);
         assert_eq!(
             json["buttons"][0],
             serde_json::json!({
@@ -408,10 +405,7 @@ mod tests {
         assert_eq!(json["name"], "Local via Moosik.dev");
         assert_eq!(json["state"], "Rick Astley");
         assert!(json["assets"].get("large_image").is_none());
-        assert_eq!(
-            json["buttons"],
-            serde_json::json!([{"label": "Try Moosik.dev", "url": "https://moosik.dev"}])
-        );
+        assert!(json.get("buttons").is_none());
         let serialized = serde_json::to_string(&json).unwrap();
         assert!(!serialized.contains("C:/Music"));
         assert!(!serialized.contains("dQw4w9WgXcQ"));
@@ -433,10 +427,7 @@ mod tests {
                 "label": "Listen along", "url": format!("https://moosik.dev/#join/{room}")
             })
         );
-        assert_eq!(
-            json["assets"]["small_image"],
-            "https://moosik.dev/assets/discord/playing.gif"
-        );
+        assert!(json["assets"].get("small_image").is_none());
     }
 
     /// Paused means no timestamps at all — the bar must not keep counting while the track is
@@ -445,15 +436,11 @@ mod tests {
     fn a_paused_track_carries_no_progress_bar() {
         let paused = Presence {
             playing: false,
-            end_unix: Some(1_700_000_000),
             ..presence()
         };
         let json = serde_json::to_value(paused.activity()).unwrap();
         assert!(json.get("timestamps").is_none());
-        assert_eq!(
-            json["assets"]["small_image"],
-            "https://moosik.dev/assets/discord/paused.png"
-        );
+        assert!(json["assets"].get("small_image").is_none());
         assert_eq!(json["details"], "Never Gonna Give You Up");
     }
 
@@ -530,10 +517,7 @@ mod tests {
             ..presence()
         };
         let json = serde_json::to_value(local.activity()).unwrap();
-        assert_eq!(
-            json["buttons"],
-            serde_json::json!([{"label": "Try Moosik.dev", "url": "https://moosik.dev"}])
-        );
+        assert!(json.get("buttons").is_none());
         assert_eq!(
             json["assets"]["large_image"],
             "https://example.test/cover.jpg"
