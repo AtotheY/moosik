@@ -64,10 +64,12 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     if app.update.notice
         && let Some(release) = &app.update.available
     {
-        let tip = if let Some(percent) = app.update.progress {
+        let tip = if app.update.refreshing || app.update.install_requested {
+            "Checking for the latest release…".to_owned()
+        } else if let Some(percent) = app.update.progress {
             format!("Downloading Moosik {} · {percent:.0}%", release.version)
         } else if release.installable() {
-            format!("Update to Moosik {} and restart", release.version)
+            "Update to the latest release and restart".to_owned()
         } else {
             format!("Moosik {} is available", release.version)
         };

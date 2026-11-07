@@ -122,6 +122,7 @@ pub enum Event {
     LocalScanFailed {
         error: String,
     },
+    LatestUpdate(Result<crate::update::Check, String>),
     /// The update check's answer: a newer release, or `None` when this build is the latest.
     /// `manual` is a click on "Check now", which wants an answer either way.
     UpdateChecked {
@@ -1229,6 +1230,18 @@ impl Backend {
                 },
             };
             Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    pub(crate) fn refresh_update(&self, feed: Option<String>) {
+        let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
+        self.rt.spawn(async move {
+            let result = crate::update::latest_for_install(&http, feed.as_deref()).await;
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::LatestUpdate(result.map_err(|e| format!("{e:#}"))),
+            );
         });
     }
 

@@ -1,4 +1,5 @@
-// Single-replica room relay. A room contains only its latest playback state.
+// Single-replica development relay.
+import { playback, sessionVersion, syncRoom } from './session.mjs';
 import http from 'node:http';
 import { publicState, validState } from './state.mjs';
 import { randomBytes } from 'node:crypto';
@@ -14,8 +15,8 @@ export function createRelay({ now = Date.now, ttl = 45_000, capacity = 4096 } = 
   }
   const sweep = setInterval(expire, 15_000).unref();
   const server = http.createServer({ requestTimeout: 5000, headersTimeout: 5000 }, async (req, res) => {
-    function reply(code, value) {
-      res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    function reply(code, value, headers = {}) {
+      res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers });
       res.end(value === undefined ? undefined : JSON.stringify(value));
     }
     if (req.url === '/rooms' && req.method === 'POST') {
@@ -33,17 +34,18 @@ export function createRelay({ now = Date.now, ttl = 45_000, capacity = 4096 } = 
       const id = randomBytes(16).toString('hex');
       const key = randomBytes(32).toString('hex');
       rooms.set(id, { key, state: null, seen: now() });
-      return reply(201, { id, key });
+      return reply(201, { id, key, session: sessionVersion });
     }
     const id = /^\/rooms\/([a-f0-9]{32})$/.exec(req.url)?.[1];
     const room = rooms.get(id);
     if (!room || now() - room.seen >= ttl) return reply(404);
     if (req.method === 'GET') {
-      const state = room.state;
-      return reply(200, state && { ...state, position: state.position +
-        (state.playing ? Math.max(0, now() - room.seen) / 1000 : 0) });
+      return reply(200, playback(room, now()), room.session ? { 'X-Moosik-Session': sessionVersion } : {});
     }
-    if (req.headers.authorization !== 'Bearer ' + room.key) return reply(403);
+    const host = req.headers.authorization === 'Bearer ' + room.key;
+    const sync = req.method === 'PUT' && req.headers['x-moosik-session'] === sessionVersion;
+    const guest = req.headers['x-moosik-listener'] || '';
+    if (!host && (!sync || req.headers.authorization || !/^[0-9a-f]{32}$/.test(guest))) return reply(403);
     if (req.method === 'DELETE') {
       rooms.delete(id);
       return reply(204);
@@ -58,6 +60,11 @@ export function createRelay({ now = Date.now, ttl = 45_000, capacity = 4096 } = 
         chunks.push(part);
       }
       const state = JSON.parse(Buffer.concat(chunks));
+      if (rooms.get(id) !== room || now() - room.seen >= ttl) return reply(404);
+      if (sync) {
+        const result = syncRoom(room, guest, host, state, now());
+        return reply(result.status, result.value);
+      }
       if (!validState(state)) return reply(400);
       room.state = publicState(state);
       room.seen = now();

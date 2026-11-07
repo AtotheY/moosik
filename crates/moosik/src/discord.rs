@@ -10,7 +10,9 @@
 //! split keeps the socket's blocking calls and the crate's own types out of the UI thread, and
 //! makes the presence's shape (and its tests) independent of the transport.
 //!
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use discord_rich_presence::activity::{
@@ -48,6 +50,7 @@ pub struct Presence {
     /// The video id, for the watch button. `None` for a local file, which has no page to open.
     pub youtube_id: Option<String>,
     pub room: Option<String>,
+    pub listeners: usize,
     pub title: String,
     /// The credited artists, already joined.
     pub artist: String,
@@ -71,7 +74,20 @@ impl Presence {
         // Discord also uses details for the compact member-list status.
         if let Some(title) = field(&self.title) {
             activity = activity.details(title);
-            if let Some(artist) = field(&self.artist) {
+            if self.listeners > 1 {
+                let suffix = format!("{} listening", self.listeners);
+                let artist: String = self
+                    .artist
+                    .trim()
+                    .chars()
+                    .take(TEXT_LIMIT - suffix.len() - 3)
+                    .collect();
+                activity = activity.state(if artist.is_empty() {
+                    suffix
+                } else {
+                    format!("{artist} · {suffix}")
+                });
+            } else if let Some(artist) = field(&self.artist) {
                 activity = activity.state(artist);
             }
         } else if let Some(artist) = field(&self.artist) {
@@ -159,21 +175,108 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
     Some(format!("https://i.ytimg.com/vi/{id}/{still}.jpg"))
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct SessionProfile {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+}
+
+fn valid_avatar_hash(hash: &str) -> bool {
+    let hash = hash.strip_prefix("a_").unwrap_or(hash);
+    hash.len() == 32
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A participant may only select a Discord CDN avatar, never an arbitrary image URL.
+pub(crate) fn avatar_url(key: &str) -> Option<Arc<str>> {
+    let path = if let Some(index) = key.strip_prefix("default/") {
+        if !matches!(index, "0" | "1" | "2" | "3" | "4" | "5") {
+            return None;
+        }
+        format!("embed/avatars/{index}")
+    } else {
+        let (id, hash) = key.split_once('/')?;
+        if id.is_empty()
+            || id.len() > 20
+            || !id.bytes().all(|b| b.is_ascii_digit())
+            || !valid_avatar_hash(hash)
+        {
+            return None;
+        }
+        format!("avatars/{id}/{hash}")
+    };
+    Some(format!("https://cdn.discordapp.com/{path}.png?size=64").into())
+}
+
+impl SessionProfile {
+    fn from_ready(user: &serde_json::Value) -> Self {
+        let name = user["global_name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| user["username"].as_str())
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect();
+        let avatar = user["id"]
+            .as_str()
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(|id| {
+                if let Some(hash) = user["avatar"].as_str().filter(|s| valid_avatar_hash(s)) {
+                    format!("{id}/{hash}")
+                } else {
+                    let discriminator = user["discriminator"]
+                        .as_str()
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .unwrap_or(0);
+                    let index = if discriminator == 0 {
+                        (id >> 22) % 6
+                    } else {
+                        u64::from(discriminator % 5)
+                    };
+                    format!("default/{index}")
+                }
+            });
+        Self { name, avatar }
+    }
+}
+
 /// A live integration: the channel to its worker thread. Dropping this stops the worker (and
 /// clears the presence), so the handle is held for as long as the setting is on.
 pub struct Discord {
+    connected: Arc<AtomicBool>,
     tx: Sender<Cmd>,
+    profile: Arc<Mutex<SessionProfile>>,
 }
 
 impl Discord {
     /// Start the worker. Nothing connects until the first [`set`](Self::set), and the worker keeps
     /// trying in the background if Discord is not running yet.
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        let connected = Arc::new(AtomicBool::new(false));
+        let profile = Arc::new(Mutex::new(SessionProfile::default()));
+        let worker_profile = profile.clone();
+        let worker_connected = Arc::clone(&connected);
         let _ = std::thread::Builder::new()
             .name("discord-rpc".into())
-            .spawn(move || run(rx));
-        Self { tx }
+            .spawn(move || run(rx, worker_connected, worker_profile, ctx));
+        Self {
+            tx,
+            connected,
+            profile,
+        }
+    }
+
+    pub(crate) fn session_profile(&self) -> SessionProfile {
+        self.profile.lock().unwrap().clone()
+    }
+
+    pub fn connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
     }
 
     /// Publish a presence. Cheap: a send on a channel.
@@ -204,7 +307,12 @@ enum Cmd {
 
 /// The worker's whole life: own the socket, keep it in sync with the last `Presence`, and get it
 /// back if Discord goes away.
-fn run(rx: mpsc::Receiver<Cmd>) {
+fn run(
+    rx: mpsc::Receiver<Cmd>,
+    connected: Arc<AtomicBool>,
+    profile: Arc<Mutex<SessionProfile>>,
+    ctx: egui::Context,
+) {
     let mut client: Option<DiscordIpcClient> = None;
     // What the app last asked for, and whether Discord has been told about it.
     let mut wanted: Option<Presence> = None;
@@ -254,7 +362,7 @@ fn run(rx: mpsc::Receiver<Cmd>) {
 
         // Connect (or reconnect) whenever there is something to show and it is time to try.
         if wanted.is_some() && client.is_none() && Instant::now() >= next_try {
-            client = connect();
+            client = connect(&profile);
             next_try = Instant::now() + RETRY_EVERY;
             if client.is_some() {
                 // Whatever happened while we were away has to be re-said.
@@ -270,9 +378,18 @@ fn run(rx: mpsc::Receiver<Cmd>) {
                 None => client.clear_activity(),
             });
             match sent {
-                Some(Ok(())) => dirty = false,
+                Some(Ok(())) => {
+                    if !connected.swap(true, Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
+                    dirty = false;
+                }
                 Some(Err(e)) => {
                     tracing::debug!(error = %e, "discord went away; will retry");
+                    if connected.swap(false, Ordering::Relaxed) {
+                        ctx.request_repaint();
+                    }
+                    *profile.lock().unwrap() = SessionProfile::default();
                     client = None;
                     next_try = Instant::now() + RETRY_EVERY;
                 }
@@ -285,13 +402,27 @@ fn run(rx: mpsc::Receiver<Cmd>) {
 
 /// One connection attempt. A failure is expected whenever Discord is not running, so it is logged
 /// at debug and retried rather than surfaced.
-fn connect() -> Option<DiscordIpcClient> {
+fn connect(profile: &Mutex<SessionProfile>) -> Option<DiscordIpcClient> {
     let mut client = DiscordIpcClient::new(APPLICATION_ID);
-    match client.connect() {
-        Ok(()) => {
+    // The crate's default handshake discards READY, which carries the local display name.
+    let ready = client
+        .connect_ipc()
+        .and_then(|_| {
+            client.send(
+                serde_json::json!({
+                    "v": 1, "client_id": APPLICATION_ID
+                }),
+                0,
+            )
+        })
+        .and_then(|_| client.recv());
+    match ready {
+        Ok((1, event)) if event["evt"] == "READY" => {
+            *profile.lock().unwrap() = SessionProfile::from_ready(&event["data"]["user"]);
             tracing::debug!("connected to Discord");
             Some(client)
         }
+        Ok(_) => None,
         Err(e) => {
             tracing::debug!(error = %e, "Discord is not reachable yet");
             None
@@ -303,10 +434,41 @@ fn connect() -> Option<DiscordIpcClient> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn room_pictures_use_discord_avatar_keys_only() {
+        let hash = "a_0123456789abcdef0123456789abcdef";
+        let user = serde_json::json!({ "id": "4194304", "global_name": "Sky", "avatar": hash });
+        let profile = SessionProfile::from_ready(&user);
+        assert_eq!(profile.name, "Sky");
+        assert_eq!(
+            avatar_url(profile.avatar.as_deref().unwrap()).as_deref(),
+            Some(
+                "https://cdn.discordapp.com/avatars/4194304/a_0123456789abcdef0123456789abcdef.png?size=64"
+            )
+        );
+        for (discriminator, expected) in [("0", "default/1"), ("0009", "default/4")] {
+            let user = serde_json::json!({ "id": "4194304", "discriminator": discriminator, "avatar": null });
+            assert_eq!(
+                SessionProfile::from_ready(&user).avatar.as_deref(),
+                Some(expected)
+            );
+        }
+        for invalid in [
+            "https://example.com/image",
+            "default/6",
+            "default/1?redirect=x",
+            "../0",
+            "12/abcd",
+        ] {
+            assert!(avatar_url(invalid).is_none());
+        }
+    }
+
     fn presence() -> Presence {
         Presence {
             youtube_id: Some("dQw4w9WgXcQ".into()),
             room: None,
+            listeners: 1,
             title: "Never Gonna Give You Up".into(),
             artist: "Rick Astley".into(),
             thumbnail: Some("https://lh3.googleusercontent.com/abc=w120-h120-l90-rj".into()),
@@ -347,13 +509,15 @@ mod tests {
     }
 
     #[test]
-    fn a_host_exposes_only_the_read_only_invite_and_the_song_button() {
+    fn a_host_shares_the_invite_and_group_size() {
         let room = "a".repeat(32);
         let host = Presence {
             room: Some(room.clone()),
+            listeners: 3,
             ..presence()
         };
         let json = serde_json::to_value(host.activity()).unwrap();
+        assert_eq!(json["state"], "Rick Astley · 3 listening");
         assert_eq!(json["buttons"].as_array().unwrap().len(), 2);
         assert_eq!(
             json["buttons"][1],

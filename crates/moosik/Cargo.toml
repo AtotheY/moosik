@@ -26,6 +26,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "g
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3"
+getrandom = "0.3"
 tokio.workspace = true
 # The crash report's prefilled issue URL.
 url.workspace = true
@@ -146,6 +147,7 @@ eframe = { workspace = true, features = ["wgpu"] }
 # The in-app sign-in window (`webview_login.rs`) on macOS: WKWebView through wry, with tao's event
 # loop in the child process that exists for the window.
 [target.'cfg(target_os = "macos")'.dependencies]
+roxmltree = "0.20"
 block2 = "0.6.2"
 security-framework = "=3.7.0"
 core-foundation = "=0.10.1"

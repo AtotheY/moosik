@@ -26,6 +26,7 @@ pub mod diagnostic;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 
+pub(crate) const LATEST_PAGE: &str = "https://github.com/AtotheY/moosik/releases/latest";
 const LATEST: &str = "https://api.github.com/repos/AtotheY/moosik/releases/latest";
 /// Where the project's releases live. A download or page URL outside it is never followed, even
 /// if the API's answer names one.
@@ -196,6 +197,7 @@ struct GhAsset {
     size: u64,
 }
 
+#[derive(Debug)]
 pub enum Check {
     Available(Release),
     Current,
@@ -204,8 +206,18 @@ pub enum Check {
 
 /// A missing first release is different from a published release that is already installed.
 pub async fn check(http: &reqwest::Client) -> Result<Check> {
+    check_release(http, LATEST, &current_version(), Install::current()).await
+}
+
+async fn check_release(
+    http: &reqwest::Client,
+    url: &str,
+    current: &str,
+    install: Install,
+) -> Result<Check> {
     let response = http
-        .get(LATEST)
+        .get(url)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(20))
@@ -225,12 +237,65 @@ pub async fn check(http: &reqwest::Client) -> Result<Check> {
         .context("could not read GitHub's answer")?;
     let release: GhRelease =
         serde_json::from_slice(&bytes).context("could not read GitHub's answer")?;
-    Ok(
-        match pick(release, &current_version(), Install::current()) {
-            Some(release) => Check::Available(release),
-            None => Check::Current,
-        },
-    )
+    Ok(match pick(release, current, install) {
+        Some(release) => Check::Available(release),
+        None => Check::Current,
+    })
+}
+
+/// The native bundle publishes one stable release in its appcast. Read its version only;
+/// Sparkle still evaluates eligibility and verifies the archive before installation.
+pub(crate) async fn latest_for_install(
+    http: &reqwest::Client,
+    feed: Option<&str>,
+) -> Result<Check> {
+    #[cfg(target_os = "macos")]
+    if let Some(url) = feed {
+        let response = http
+            .get(url)
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Check::NotPublished);
+        }
+        let xml = response.error_for_status()?.text().await?;
+        return check_appcast(&xml, &current_version());
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = feed;
+    check(http).await
+}
+
+#[cfg(target_os = "macos")]
+fn check_appcast(xml: &str, current: &str) -> Result<Check> {
+    const NS: &str = "http://www.andymatuschak.org/xml-namespaces/sparkle";
+    let doc = roxmltree::Document::parse(xml)?;
+    let channel = doc
+        .root_element()
+        .children()
+        .find(|n| n.has_tag_name("channel"))
+        .context("missing appcast channel")?;
+    let mut items = channel.children().filter(|n| n.has_tag_name("item"));
+    let item = items.next().context("empty update feed")?;
+    anyhow::ensure!(
+        items.next().is_none(),
+        "expected a single stable release in the update feed"
+    );
+    let version = item
+        .children()
+        .find(|n| n.has_tag_name((NS, "version")))
+        .and_then(|n| n.text())
+        .context("missing appcast version")?
+        .trim();
+    anyhow::ensure!(parse_version(version).is_some(), "invalid appcast version");
+    Ok(if newer(version, current) {
+        Check::Available(native_release(version.to_owned()))
+    } else {
+        Check::Current
+    })
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -645,6 +710,64 @@ mod tests {
         assert_eq!(
             feed_response(&[("HEAD", 405), ("GET", 404)]).await.unwrap(),
             FeedStatus::NotPublished
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_lookup_uses_the_new_releases_assets_and_checksums() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/latest", listener.local_addr().unwrap());
+        let installer = Install::WindowsMsi;
+        let server = tokio::spawn(async move {
+            for version in ["0.1.1", "0.1.2"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0; 4096];
+                let read = socket.read(&mut buf).await.unwrap();
+                assert!(
+                    String::from_utf8_lossy(&buf[..read])
+                        .to_ascii_lowercase()
+                        .contains("cache-control: no-cache")
+                );
+                let names = [
+                    installer.asset_name(version).unwrap(),
+                    format!("moosik-{version}-SHA256SUMS.txt"),
+                ];
+                let base = format!("{RELEASES}download/moosik-v{version}");
+                let body = serde_json::json!({
+                    "tag_name": format!("moosik-v{version}"),
+                    "html_url": format!("{RELEASES}tag/moosik-v{version}"),
+                    "assets": names.map(|name| serde_json::json!({"name":name, "browser_download_url":format!("{base}/{name}")})),
+                }).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let http = reqwest::Client::new();
+        for expected in ["0.1.1", "0.1.2"] {
+            let Check::Available(release) = check_release(&http, &url, "0.1.0", installer)
+                .await
+                .unwrap()
+            else {
+                panic!("missing release")
+            };
+            assert_eq!(release.version, expected);
+            let assets = release.download.unwrap();
+            assert!(
+                assets
+                    .url
+                    .ends_with(&installer.asset_name(expected).unwrap())
+            );
+            assert!(
+                assets
+                    .sums_url
+                    .ends_with(&format!("moosik-{expected}-SHA256SUMS.txt"))
+            );
+        }
+        server.await.unwrap();
+        assert!(
+            check_release(&http, &url, "0.1.0", installer)
+                .await
+                .is_err()
         );
     }
 

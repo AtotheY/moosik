@@ -2894,6 +2894,13 @@ fn add_button(ui: &mut Ui, palette: &Palette, rect: Rect, id: egui::Id) -> egui:
     response.on_hover_text("Add to playlist")
 }
 
+const SESSION_QUEUE: &str = "session-queue-available";
+
+/// A host has both a personal queue and a shared queue. Guests add to the shared one.
+pub(crate) fn set_session_queue_menu(ctx: &egui::Context, is_host: Option<bool>) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(SESSION_QUEUE), is_host));
+}
+
 /// A song's right-click menu, reporting the choice. Shared by every row and the player bar.
 ///
 /// The popup id is the video id, not the row index: indices shift as the virtualised range
@@ -2983,8 +2990,21 @@ fn row_menu_with_button(
                 }
                 mui.close();
             }
-            if menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked() {
+            let session_host = mui.ctx().data(|d| {
+                d.get_temp::<Option<bool>>(egui::Id::new(SESSION_QUEUE))
+                    .flatten()
+            });
+            if session_host != Some(false)
+                && menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked()
+            {
                 choice = Some(RowAction::AddToQueue(t.clone()));
+                mui.close();
+            }
+            if t.local_path.is_none()
+                && session_host.is_some()
+                && menu_item(mui, palette, Icon::ListPlus, "Add to session queue", None).clicked()
+            {
+                choice = Some(RowAction::AddToSession(t.clone()));
                 mui.close();
             }
             if let Some(i) = menu.queue_index
@@ -4729,7 +4749,9 @@ pub fn tab_strip(
     let left = ui.cursor().min.x;
     let right = ui.max_rect().right();
     let mut x = left;
-    let top = ui.cursor().min.y;
+    let first_top = ui.cursor().min.y;
+    let mut top = first_top;
+    let mut active = None;
     for (i, label) in labels.iter().enumerate() {
         let font = if i == selected {
             theme::semibold(14.0)
@@ -4738,7 +4760,14 @@ pub fn tab_strip(
         };
         let galley =
             ui.fonts_mut(|f| f.layout_no_wrap((*label).to_owned(), font, Color32::PLACEHOLDER));
+        if x > left && x + galley.size().x > right {
+            x = left;
+            top += HEIGHT;
+        }
         let rect = Rect::from_min_size(egui::pos2(x, top), vec2(galley.size().x, HEIGHT));
+        if i == selected {
+            active = Some(rect);
+        }
         let response = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
         let t = lit(ui, &response);
         let colour = if i == selected {
@@ -4764,32 +4793,14 @@ pub fn tab_strip(
         base,
         egui::Stroke::new(1.0, palette.outline.gamma_multiply(0.6)),
     );
-    // The bar under the open tab, over the hairline.
-    let mut x = left;
-    for (i, label) in labels.iter().enumerate() {
-        let w = ui.fonts_mut(|f| {
-            f.layout_no_wrap(
-                (*label).to_owned(),
-                if i == selected {
-                    theme::semibold(14.0)
-                } else {
-                    theme::medium(14.0)
-                },
-                Color32::PLACEHOLDER,
-            )
-            .size()
-            .x
-        });
-        if i == selected {
-            ui.painter().rect_filled(
-                Rect::from_min_size(egui::pos2(x, base - 2.0), vec2(w, 2.0)),
-                CornerRadius::same(1),
-                palette.accent,
-            );
-        }
-        x += w + GAP;
+    if let Some(rect) = active {
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.left_bottom() - vec2(0.0, 2.0), vec2(rect.width(), 2.0)),
+            CornerRadius::same(1),
+            palette.accent,
+        );
     }
-    ui.allocate_space(vec2(right - left, HEIGHT + 1.0));
+    ui.allocate_space(vec2(right - left, base - first_top + 1.0));
     clicked
 }
 
