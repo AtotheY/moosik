@@ -469,9 +469,9 @@ pub enum Event {
         error: String,
     },
     SpotifyTrackSaved(Result<Track, String>),
-    SpotifyEditablePlaylists {
+    EditablePlaylists {
         video_id: String,
-        result: Result<crate::spotify::EditablePlaylists, String>,
+        result: Result<crate::model::EditablePlaylists, String>,
     },
     /// A page's (album or playlist header) library toggle landed. `album` picks the page to
     /// repaint; `in_library` is the new state.
@@ -701,7 +701,7 @@ impl Event {
             | Event::RatingFailed { error, .. }
             | Event::LibraryToggleFailed { error, .. }
             | Event::SpotifyTrackSaved(Err(error))
-            | Event::SpotifyEditablePlaylists {
+            | Event::EditablePlaylists {
                 result: Err(error), ..
             }
             | Event::PageLibraryFailed { error, .. }
@@ -3014,18 +3014,21 @@ impl Backend {
         });
     }
 
-    pub fn fetch_spotify_editable_playlists(&self, video_id: String) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+    pub fn fetch_editable_playlists(&self, provider: Provider, video_id: String) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let result = crate::spotify::editable_playlists(&video_id)
-                .await
-                .map_err(|e| format!("{e:#}"));
+            let result = match provider {
+                Provider::YouTubeMusic => api.editable_playlists(&video_id).await,
+                Provider::Spotify => crate::spotify::editable_playlists(&video_id).await,
+                Provider::Local => Err(anyhow::anyhow!("Local tracks have no account playlists")),
+            }
+            .map_err(|e| format!("{e:#}"));
             Self::emit_browse(
                 &tx,
                 &ctx,
                 epoch,
-                Event::SpotifyEditablePlaylists { video_id, result },
+                Event::EditablePlaylists { video_id, result },
             );
         });
     }

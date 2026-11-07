@@ -3040,7 +3040,7 @@ pub(crate) fn track_row_with_slot<'a>(
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         actions.spacing_mut().item_spacing.x = 4.0;
-        if spotify_library_button(&mut actions, palette, menu.track.in_library, false).clicked() {
+        if playlist_save_button(&mut actions, palette, menu.track.in_library, false).clicked() {
             action = Some(super::ui::RowAction::SaveSpotifyTrack(menu.track.clone()));
         }
         if let Some((playlist_id, uid)) = spotify_removal
@@ -3120,7 +3120,7 @@ pub(crate) fn track_row_with_slot<'a>(
 /// The room a row's + button takes, left of the duration.
 const ADD_W: f32 = 40.0;
 
-pub(crate) fn spotify_library_button(
+pub(crate) fn playlist_save_button(
     ui: &mut Ui,
     palette: &Palette,
     saved: bool,

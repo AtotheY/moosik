@@ -1651,7 +1651,7 @@ pub struct App {
     playlist_for: Option<String>,
     playlist_revision: u64,
     spotify_playlist_remove_pending: bool,
-    pub(crate) spotify_playlist_picker: ui::player_bar::SpotifyPlaylistPicker,
+    pub(crate) playlist_picker: ui::player_bar::PlaylistPicker,
     /// How the open playlist's track list is currently shown — client-side and session-only,
     /// reset whenever a different playlist opens (see [`PlaylistSort`]'s own doc comment for
     /// why this can't be a server order the way [`LibrarySort`] is).
@@ -2276,7 +2276,7 @@ impl App {
             playlist_for: None,
             playlist_revision: 0,
             spotify_playlist_remove_pending: false,
-            spotify_playlist_picker: ui::player_bar::SpotifyPlaylistPicker::default(),
+            playlist_picker: ui::player_bar::PlaylistPicker::default(),
             playlist_sort: PlaylistSort::default(),
             playlist_sort_pending: false,
             playlist_original_order: None,
@@ -6996,8 +6996,18 @@ impl App {
                         &error,
                     ));
                 }
-                Event::SpotifyEditablePlaylists { video_id, result } => {
-                    self.spotify_playlist_picker.loaded(&video_id, result);
+                Event::EditablePlaylists { video_id, result } => {
+                    self.playlist_picker.loaded(&video_id, result);
+                    if let Some(playlist) = &self.playlist
+                        && playlist.source == crate::model::PlaylistSource::YouTube
+                        && playlist.editable
+                        && playlist
+                            .tracks
+                            .iter()
+                            .any(|track| track.video_id == video_id)
+                    {
+                        self.playlist_picker.note_saved(&video_id, &playlist.id);
+                    }
                 }
                 Event::PageLibraryToggled { in_library, .. } => {
                     tracing::debug!(in_library, "page library toggle confirmed");
@@ -7090,9 +7100,8 @@ impl App {
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "saved to playlist");
                     self.toast("Saved to playlist");
+                    self.playlist_picker.note_saved(&video_id, &playlist_id);
                     if playlist_id.starts_with("spotify:playlist:") {
-                        self.spotify_playlist_picker
-                            .note_saved(&video_id, &playlist_id);
                         if self.playlist_is_for(&playlist_id) {
                             self.playlist_for = None;
                             self.load_playlist(playlist_id);
@@ -7107,6 +7116,7 @@ impl App {
                     message,
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "already in the playlist; asking");
+                    self.playlist_picker.note_saved(&video_id, &playlist_id);
                     // Not added (yet): "Add anyway" asks again, and counts it again.
                     self.bump_playlist_counts(&playlist_id, -1);
                     self.playlist_duplicate = Some(DuplicatePrompt {
@@ -7144,9 +7154,9 @@ impl App {
                     video_id,
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "removed from playlist");
+                    self.playlist_picker.invalidate(&video_id);
                     if playlist_id.starts_with("spotify:playlist:") {
                         self.spotify_playlist_remove_pending = false;
-                        self.spotify_playlist_picker.invalidate(&video_id);
                         self.bump_playlist_counts(&playlist_id, -1);
                         if self.playlist_is_for(&playlist_id) {
                             self.playlist_for = None;
@@ -7932,7 +7942,7 @@ impl App {
         self.library_source_retry = None;
         self.liked_music = ui::liked_music::State::default();
         self.spotify_playlist_remove_pending = false;
-        self.spotify_playlist_picker = ui::player_bar::SpotifyPlaylistPicker::default();
+        self.playlist_picker = ui::player_bar::PlaylistPicker::default();
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();
         self.library_source_rows = ui::source_rows::State::default();
@@ -8099,9 +8109,7 @@ impl App {
                 if crate::model::is_spotify_id(&video_id) {
                     if playlist_id.starts_with("spotify:playlist:") {
                         if crate::spotify::is_signed_in()
-                            && self
-                                .spotify_playlist_picker
-                                .can_add(&video_id, &playlist_id)
+                            && self.playlist_picker.can_add(&video_id, &playlist_id)
                         {
                             self.backend.add_spotify_to_playlist(playlist_id, video_id);
                         } else {
@@ -9498,6 +9506,8 @@ impl App {
     /// The liked index moves with them: an artist page must count a song the moment it is liked,
     /// not at the next scan.
     fn set_like(&mut self, video_id: &str, like: LikeStatus) {
+        self.playlist_picker
+            .note_liked(video_id, like == LikeStatus::Like);
         let mut copy: Option<Track> = None;
         let mut set = |t: &mut Track| {
             if t.video_id != video_id {

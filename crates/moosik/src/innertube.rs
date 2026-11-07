@@ -1750,6 +1750,52 @@ pub fn sign_in_prompt(root: &Value) -> bool {
         && find_key(root, "musicResponsiveListItemRenderer").is_none()
 }
 
+pub fn parse_editable_playlists(root: &Value) -> Option<crate::model::EditablePlaylists> {
+    let renderer = root["contents"]
+        .as_array()?
+        .iter()
+        .find_map(|section| section["addToPlaylistRenderer"].as_object())?;
+    let options = match renderer.get("playlists") {
+        Some(options) => options.as_array()?.as_slice(),
+        None => &[],
+    };
+    let playlists = options
+        .iter()
+        .filter_map(|item| {
+            let row = &item["playlistAddToOptionRenderer"];
+            let id = crate::model::bare_playlist_id(row["playlistId"].as_str()?);
+            if matches!(id, "" | "LM" | "WL" | "SE")
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                || !row["addToPlaylistServiceEndpoint"]
+                    .as_object()
+                    .is_some_and(|endpoint| !endpoint.is_empty())
+            {
+                return None;
+            }
+            let title = non_empty(text(&row["title"]))?;
+            Some((
+                PlaylistRef {
+                    id: format!("VL{id}"),
+                    title,
+                    author: String::new(),
+                    author_id: None,
+                    track_count: non_empty(text(&row["shortBylineText"])),
+                    thumbnail: thumbnail(row),
+                    editable: true,
+                    source: crate::model::PlaylistSource::YouTube,
+                },
+                false,
+            ))
+        })
+        .collect();
+    Some(crate::model::EditablePlaylists {
+        liked: None,
+        playlists,
+    })
+}
+
 /// The tracks of a playlist response, first page or continuation.
 ///
 /// Read from the playlist's own rows only: the playlist shelf on the first page, the append
@@ -5109,6 +5155,36 @@ mod tests {
         let bare = header("musicResponsiveHeaderRenderer", json!([]));
         assert!(find_header_toggle(&bare, "musicResponsiveHeaderRenderer").is_none());
         assert!(find_header_toggle(&bare, "musicDetailHeaderRenderer").is_none());
+    }
+
+    #[test]
+    fn youtube_playlist_picker_uses_writable_music_choices() {
+        let row = |id: &str, action: serde_json::Value| {
+            serde_json::json!({"playlistAddToOptionRenderer": {
+                "playlistId": id,
+                "title": {"runs": [{"text": "Playlist"}]},
+                "shortBylineText": {"runs": [{"text": "2 tracks"}]},
+                "addToPlaylistServiceEndpoint": action
+            }})
+        };
+        let response = serde_json::json!({"contents": [
+            {"addToPlaylistRenderer": {"playlists": [
+                row("LM", serde_json::json!({"likeEndpoint": {"status": "LIKE"}})),
+                row("WL", serde_json::json!({"playlistEditEndpoint": {}})),
+                row("SE", serde_json::json!({"playlistEditEndpoint": {}})),
+                row("PLreadOnly", serde_json::Value::Null),
+                row("PLmine", serde_json::json!({"playlistEditEndpoint": {}}))
+            ]}}
+        ]});
+        let picker = parse_editable_playlists(&response).unwrap();
+        assert_eq!(picker.liked, None);
+        assert_eq!(picker.playlists.len(), 1);
+        let (playlist, contains_track) = &picker.playlists[0];
+        assert_eq!(playlist.id, "VLPLmine");
+        assert_eq!(playlist.track_count.as_deref(), Some("2 tracks"));
+        assert!(playlist.editable);
+        assert!(!contains_track);
+        assert!(parse_editable_playlists(&serde_json::json!({"contents": []})).is_none());
     }
 
     /// A playlist you can add songs to says so in its own menu. Liked Music — an auto

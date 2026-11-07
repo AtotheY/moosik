@@ -262,6 +262,12 @@ pub struct PlaylistRef {
     pub source: PlaylistSource,
 }
 
+#[derive(Debug)]
+pub struct EditablePlaylists {
+    pub liked: Option<bool>,
+    pub playlists: Vec<(PlaylistRef, bool)>,
+}
+
 impl PlaylistRef {
     /// The line under a playlist's name: how much is in it when it is yours — or Liked Music,
     /// which has no maker — and who made it, with its size, when it is someone else's. What a

@@ -846,6 +846,27 @@ impl Api {
             .await
     }
 
+    pub async fn editable_playlists(&self, video_id: &str) -> Result<model::EditablePlaylists> {
+        anyhow::ensure!(
+            video_id.len() == 11
+                && video_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+            "invalid YouTube video ID"
+        );
+        let query = EditablePlaylistsQuery {
+            video_id: video_id.to_owned(),
+        };
+        let json = match self.client_ref().await? {
+            ClientRef::NoAuth(_) => anyhow::bail!("sign in to edit playlists"),
+            ClientRef::Browser(yt) => yt.json_query(query).await,
+        }
+        .map(ytmapi_rs::json::Json::into_inner)
+        .context("could not load YouTube Music playlists")?;
+        innertube::parse_editable_playlists(&json)
+            .context("YouTube Music returned an invalid playlist picker")
+    }
+
     /// One page of one library browse id, with a single re-import if the session has gone stale.
     async fn library_page(
         &self,
@@ -2154,6 +2175,42 @@ impl ytmapi_rs::query::PostQuery for FeedbackQuery {
 
     fn path(&self) -> &str {
         "feedback"
+    }
+}
+
+struct EditablePlaylistsQuery {
+    video_id: String,
+}
+
+impl ytmapi_rs::parse::ParseFrom<EditablePlaylistsQuery> for RawBrowse {
+    fn parse_from(
+        _: ytmapi_rs::parse::ProcessedResult<EditablePlaylistsQuery>,
+    ) -> ytmapi_rs::Result<Self> {
+        Ok(RawBrowse)
+    }
+}
+
+impl<A: AuthToken> ytmapi_rs::query::Query<A> for EditablePlaylistsQuery {
+    type Output = RawBrowse;
+    type Method = ytmapi_rs::query::PostMethod;
+}
+
+impl ytmapi_rs::query::PostQuery for EditablePlaylistsQuery {
+    fn header(&self) -> serde_json::Map<String, serde_json::Value> {
+        [
+            ("videoIds".to_owned(), serde_json::json!([self.video_id])),
+            ("excludeWatchLater".to_owned(), serde_json::json!(false)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn params(&self) -> Vec<(&str, std::borrow::Cow<'_, str>)> {
+        vec![]
+    }
+
+    fn path(&self) -> &str {
+        "playlist/get_add_to_playlist"
     }
 }
 

@@ -291,15 +291,9 @@ pub async fn add_playlist_item(playlist_id: &str, track_uri: &str) -> Result<()>
         .await?)
 }
 
-#[derive(Debug)]
-pub struct EditablePlaylists {
-    pub liked: Option<bool>,
-    pub playlists: Vec<(PlaylistRef, bool)>,
-}
-
-pub async fn editable_playlists(track_uri: &str) -> Result<EditablePlaylists> {
+pub async fn editable_playlists(track_uri: &str) -> Result<crate::model::EditablePlaylists> {
     let (liked, playlists) = transport().await?.editable_playlists(track_uri).await?;
-    Ok(EditablePlaylists {
+    Ok(crate::model::EditablePlaylists {
         liked,
         playlists: playlists
             .into_iter()
