@@ -1818,6 +1818,7 @@ pub struct App {
     pub(crate) help_open: bool,
     /// The open tab of the Settings page. Kept for the session, not saved.
     pub(crate) settings_tab: ui::settings::SettingsTab,
+    pub(crate) settings_provider: crate::model::Provider,
     #[cfg(target_os = "macos")]
     pub(crate) media_fallback: crate::media_fallback::State,
     /// The "Order of homepage" window is open.
@@ -5110,9 +5111,9 @@ impl App {
         );
     }
 
-    /// All sign-in entry points share the Account tab and its platform-aware choices.
     pub(crate) fn sign_in(&mut self) {
-        self.settings_tab = ui::settings::SettingsTab::Account;
+        self.settings_tab = ui::settings::SettingsTab::Providers;
+        self.settings_provider = crate::model::Provider::YouTubeMusic;
         self.detected_browsers = None;
         self.navigate(Route::Settings);
     }

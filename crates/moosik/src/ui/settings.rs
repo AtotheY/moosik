@@ -13,8 +13,9 @@ use egui::RichText;
 use crate::app::App;
 use crate::auth::AuthState;
 use crate::browser_cookies;
+use crate::model::Provider;
 use crate::settings::Opacity;
-use crate::settings::{Quality, Theme};
+use crate::settings::{HomeSource, Quality, Theme};
 use crate::theme;
 use crate::widgets;
 
@@ -24,19 +25,17 @@ pub enum SettingsTab {
     #[default]
     Appearance,
     Playback,
-    Library,
+    Providers,
     System,
-    Account,
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 5] = [
         SettingsTab::Appearance,
         SettingsTab::Playback,
-        SettingsTab::Library,
+        SettingsTab::Providers,
         SettingsTab::System,
-        SettingsTab::Account,
         SettingsTab::About,
     ];
 
@@ -44,9 +43,8 @@ impl SettingsTab {
         match self {
             SettingsTab::Appearance => "Appearance",
             SettingsTab::Playback => "Playback",
-            SettingsTab::Library => "Library",
+            SettingsTab::Providers => "Providers",
             SettingsTab::System => "System",
-            SettingsTab::Account => "Account",
             SettingsTab::About => "About",
         }
     }
@@ -55,31 +53,87 @@ impl SettingsTab {
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     // The title scrolls away with the page rather than staying pinned over it.
     crate::ui::page_scroll(app, "settings").show(ui, |ui| {
-        crate::ui::page_title(ui, &app.palette, "Settings");
-        // Capped, and held clear of the card's right edge: with the queue or lyrics open the
-        // card is narrower than the cap, and the switches sat on its edge, against the panel.
-        ui.set_max_width(COLUMN_MAX_W.min(ui.available_width() - RIGHT_GUTTER));
+        let mut column = ui.available_rect_before_wrap();
+        let width = column.width().min(COLUMN_MAX_W);
+        column.min.x += (column.width() - width) / 2.0;
+        column.max.x = column.min.x + width;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+            ui.set_width(width);
+            crate::ui::page_title(ui, &app.palette, "Settings");
 
-        let labels = SettingsTab::ALL.map(SettingsTab::label);
-        let current = SettingsTab::ALL
-            .iter()
-            .position(|t| *t == app.settings_tab)
-            .unwrap_or(0);
-        if let Some(i) = widgets::tab_strip(ui, &app.palette, &labels, current) {
-            app.settings_tab = SettingsTab::ALL[i];
-        }
-        ui.add_space(20.0);
+            ui.horizontal_wrapped(|ui| {
+                for tab in SettingsTab::ALL {
+                    if widgets::chip(ui, &app.palette, tab.label(), app.settings_tab == tab)
+                        .clicked()
+                    {
+                        app.settings_tab = tab;
+                    }
+                }
+            });
+            ui.add_space(20.0);
 
-        match app.settings_tab {
-            SettingsTab::Appearance => appearance(app, ui),
-            SettingsTab::Playback => playback(app, ui),
-            SettingsTab::Library => library(app, ui),
-            SettingsTab::System => system(app, ui),
-            SettingsTab::Account => account(app, ui),
-            SettingsTab::About => about(app, ui),
-        }
-        ui.add_space(16.0);
+            match app.settings_tab {
+                SettingsTab::Appearance => appearance(app, ui),
+                SettingsTab::Playback => playback(app, ui),
+                SettingsTab::Providers => providers(app, ui),
+                SettingsTab::System => system(app, ui),
+                SettingsTab::About => about(app, ui),
+            }
+            ui.add_space(16.0);
+        });
     });
+}
+
+fn providers(app: &mut App, ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        for provider in Provider::ALL {
+            if widgets::chip(
+                ui,
+                &app.palette,
+                provider.name(),
+                app.settings_provider == provider,
+            )
+            .clicked()
+            {
+                app.settings_provider = provider;
+            }
+        }
+    });
+    ui.add_space(20.0);
+    let available = app.available_providers();
+    if available.len() > 1 {
+        let p = app.palette;
+        let mut preferred = if available.contains(&app.settings.preferred_provider) {
+            app.settings.preferred_provider
+        } else {
+            available[0]
+        };
+        let mut changed = false;
+        widgets::setting_group(ui, &p, None, |ui, g| {
+            g.wide_row(
+                ui,
+                "Preferred source",
+                "Default for matching songs and profiles.",
+                |ui| {
+                    for &provider in &available {
+                        if widgets::chip(ui, &p, provider.name(), preferred == provider).clicked() {
+                            preferred = provider;
+                            changed = true;
+                        }
+                    }
+                },
+            );
+        });
+        if changed {
+            let ctx = ui.ctx().clone();
+            app.update_settings(&ctx, |s| s.preferred_provider = preferred);
+        }
+    }
+    match app.settings_provider {
+        Provider::YouTubeMusic => account(app, ui),
+        Provider::Spotify => spotify(app, ui),
+        Provider::Local => library(app, ui),
+    }
 }
 
 /// The About tab: the shortcuts window, then the app's own name, version and licence.
@@ -263,10 +317,7 @@ fn note(app: &App, ui: &mut egui::Ui, text: &str) {
 
 /// How wide the settings column gets. Past this the switches, right-aligned, drifted a window's
 /// width away from the words that name them.
-const COLUMN_MAX_W: f32 = 760.0;
-/// Room kept between the settings column and the card's right edge when the card is narrower
-/// than [`COLUMN_MAX_W`].
-const RIGHT_GUTTER: f32 = 40.0;
+const COLUMN_MAX_W: f32 = 1040.0;
 
 /// A titled row with a persisted on/off switch.
 fn toggle_row(
@@ -286,6 +337,7 @@ fn toggle_row(
 fn appearance(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     app_icon_picker(app, ui);
+    home_settings(app, ui);
 
     let mut theme_choice = app.settings.theme;
     // The mode on screen decides which themes are offered: a theme file says whether it is
@@ -479,79 +531,11 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
 
 fn playback(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
-    let mut quality = app.settings.quality;
-    let mut autoplay = app.settings.autoplay;
     let mut keep_order = app.settings.queue_click_keeps_order;
-    let mut normalise = app.settings.normalise_volume;
-    let mut scrobble = app.settings.scrobble;
-
-    widgets::setting_group(ui, &p, Some("Sound"), |ui, g| {
-        g.row(ui, "Audio quality", quality.detail(), |ui| {
-            for option in Quality::ALL.into_iter().rev() {
-                if widgets::chip(ui, &p, option.label(), quality == option).clicked() {
-                    quality = option;
-                }
-            }
-        });
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-normalise",
-            "Audio normaliser",
-            "Keeps the volume consistent between tracks.",
-            &mut normalise,
-        );
-    });
-
-    widgets::setting_group(ui, &p, Some("Queue and history"), |ui, g| {
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-autoplay",
-            "Autoplay",
-            "Plays similar songs when your queue ends.",
-            &mut autoplay,
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-queue-keep-order",
-            "Keep the songs you jump over",
-            "Playing a song further down Up next plays it now and keeps the songs before it.",
-            &mut keep_order,
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-scrobble",
-            "Save listening history",
-            "Adds what you play to your YouTube history.",
-            &mut scrobble,
-        );
-    });
-
-    let ctx = ui.ctx().clone();
-    app.update_settings(&ctx, |s| {
-        s.quality = quality;
-        s.autoplay = autoplay;
-        s.queue_click_keeps_order = keep_order;
-        s.normalise_volume = normalise;
-        s.scrobble = scrobble;
-    });
-}
-
-/// How songs, playlists and Home behave, and where local music is read from.
-fn library(app: &mut App, ui: &mut egui::Ui) {
-    let p = app.palette;
     let mut double_click = app.settings.double_click_to_play;
-    let mut playlist_sort = app.settings.playlist_default_sort;
-    let mut open_order = false;
+    let mut fullscreen_lyrics = app.settings.fullscreen_lyrics;
 
-    widgets::setting_group(ui, &p, Some("Songs and playlists"), |ui, g| {
+    widgets::setting_group(ui, &p, Some("Player"), |ui, g| {
         toggle_row(
             g,
             ui,
@@ -561,6 +545,42 @@ fn library(app: &mut App, ui: &mut egui::Ui) {
             "One click selects, two clicks play.",
             &mut double_click,
         );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-fullscreen-lyrics",
+            "Lyrics in fullscreen",
+            "Shows lyrics beside the cover when available.",
+            &mut fullscreen_lyrics,
+        );
+    });
+
+    widgets::setting_group(ui, &p, Some("Queue"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-queue-keep-order",
+            "Keep the songs you jump over",
+            "Playing a song further down Up next plays it now and keeps the songs before it.",
+            &mut keep_order,
+        );
+    });
+
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.queue_click_keeps_order = keep_order;
+        s.double_click_to_play = double_click;
+        s.fullscreen_lyrics = fullscreen_lyrics;
+    });
+}
+
+fn library(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut playlist_sort = app.settings.playlist_default_sort;
+
+    widgets::setting_group(ui, &p, Some("Songs and playlists"), |ui, g| {
         g.wide_row(
             ui,
             "Playlist order",
@@ -609,9 +629,7 @@ fn library(app: &mut App, ui: &mut egui::Ui) {
 
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
-        s.double_click_to_play = double_click;
         s.playlist_default_sort = playlist_sort;
-        s.home_strict_order = strict;
     });
 
     local_music(app, ui);
@@ -1090,5 +1108,9 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), SettingsTab::ALL.len());
         assert_eq!(SettingsTab::default(), SettingsTab::ALL[0]);
+        assert_eq!(
+            labels,
+            ["Appearance", "Playback", "Providers", "System", "About"]
+        );
     }
 }
