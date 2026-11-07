@@ -326,6 +326,16 @@ fn main() -> eframe::Result {
             .dx12
             .presentation_system =
             wgpu::Dx12SwapchainKind::from_env().unwrap_or(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+        let device_descriptor = setup.device_descriptor;
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = device_descriptor(adapter);
+            if adapter.get_info().backend == wgpu::Backend::Dx12 {
+                descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+                let limits = &mut descriptor.required_limits;
+                limits.max_non_sampler_bindings = limits.max_non_sampler_bindings.min(8192);
+            }
+            descriptor
+        });
         native_options.wgpu_options.wgpu_setup = WgpuSetup::CreateNew(setup);
     }
     // A test aid for debug builds: `MOOSIK_NO_VSYNC=1` stops the swap from waiting for the screen,

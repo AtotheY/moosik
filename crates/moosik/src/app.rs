@@ -35,6 +35,16 @@ const PLAYING_FAST_REPAINT: Duration = Duration::from_millis(250);
 /// promptly as it did when every tick was quick.
 const TRACK_END_WINDOW: f64 = 3.0;
 
+const SPOTIFY_PAUSE_GRACE: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SpotifyPause {
+    #[default]
+    None,
+    Waiting(Instant),
+    Released,
+}
+
 /// What decides when the next frame is due while a song plays.
 #[derive(Clone, Copy, Debug)]
 struct PlayingTick {
@@ -1701,6 +1711,7 @@ pub struct App {
     pub(crate) q: PlayQueue,
     /// Set once we have asked mpv to play, so we can tell "not started yet" from "track ended".
     pub(crate) playback_started: bool,
+    spotify_pause: SpotifyPause,
     /// Distinguishes a finished track from an attempt that never produced audio; see [`StallGuard`].
     stall: StallGuard,
     /// The generation of the most recent `Backend::play`/`play_video` call — every
@@ -2282,6 +2293,7 @@ impl App {
             now: NowPlaying::default(),
             q: PlayQueue::new(rng_seed()),
             playback_started: false,
+            spotify_pause: SpotifyPause::None,
             stall: StallGuard::default(),
             play_generation: 0,
             play_is_video: false,
@@ -3015,22 +3027,19 @@ impl App {
                     if self.playback_started && !self.now.paused {
                         self.toggle_playback();
                     }
-                    if let Some(player) = self.player.as_ref() {
-                        player.seek(0.0);
-                    }
+                    self.seek_to(0.0);
                 }
                 playwire::Event::Next => self.skip(1),
                 playwire::Event::Previous => self.skip(-1),
                 playwire::Event::SeekTo(position) => {
-                    if let Some(player) = self.player.as_ref() {
-                        player.seek(position.as_secs_f64());
-                    }
+                    self.seek_to(position.as_secs_f64());
                 }
                 playwire::Event::SeekBy(offset) => {
-                    if let Some(player) = self.player.as_ref() {
-                        let to = (player.state().position + offset).max(0.0);
-                        player.seek(to);
-                    }
+                    let position = self
+                        .q
+                        .resume_here()
+                        .unwrap_or_else(|| self.read_player_state().position);
+                    self.seek_to((position + offset).max(0.0));
                 }
                 playwire::Event::SetVolume(v) => self.set_user_volume(v * 100.0),
                 playwire::Event::SetShuffle(on) => self.set_shuffle(on),
@@ -3355,18 +3364,20 @@ impl App {
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
-        if self.listening.due()
+        if self.spotify_pause != SpotifyPause::Released
+            && self.listening.due()
             && let Some(player) = &self.player
         {
             self.listening.observe(player.listening_sample());
         }
-        if self.listening.active() {
+        if self.spotify_pause != SpotifyPause::Released && self.listening.active() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         // Kept in sync here rather than at every `toggle_pause`/`set_paused` call site — mpv is
         // the single source of truth for this, and every row/card's play-vs-pause glyph reads
         // it off `now` rather than reaching for the player directly.
         self.now.paused = state.paused;
+        self.release_paused_spotify(ctx, state);
         // Restore the saved position once its track is loaded, and keep `playback.json` fresh.
         self.poll_playback(ctx, &state);
         if self.playback_started {
@@ -3482,6 +3493,49 @@ impl App {
         if let Some(at) = self.stall.pending_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
+    }
+
+    fn release_paused_spotify(&mut self, ctx: &egui::Context, state: crate::player::PlayerState) {
+        if self.spotify_pause == SpotifyPause::Released {
+            return;
+        }
+        let current = self
+            .q
+            .current()
+            .filter(|&index| self.q.get(index).is_some_and(Track::is_spotify));
+        let Some(index) = current
+            .filter(|_| self.playback_started && state.paused && !state.idle && !self.following())
+        else {
+            self.spotify_pause = SpotifyPause::None;
+            return;
+        };
+        let now = Instant::now();
+        let SpotifyPause::Waiting(since) = self.spotify_pause else {
+            self.spotify_pause = SpotifyPause::Waiting(now);
+            ctx.request_repaint_after(SPOTIFY_PAUSE_GRACE);
+            return;
+        };
+        if let Some(remaining) = SPOTIFY_PAUSE_GRACE.checked_sub(now.duration_since(since))
+            && !remaining.is_zero()
+        {
+            ctx.request_repaint_after(remaining);
+            return;
+        }
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        let sample = player.listening_sample();
+        if sample.seeking || sample.buffering || !sample.paused || sample.idle {
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        self.listening.observe(sample);
+        self.listening.suspend(sample.position, "paused");
+        self.q.set_resume(Some((index, sample.position)));
+        self.playback_started = false;
+        self.spotify_pause = SpotifyPause::Released;
+        player.stop();
+        crate::spotify_drm::retire_idle_renderer();
     }
 
     /// Act on a restored position once its track is actually playing, and save the transport
@@ -3713,7 +3767,10 @@ impl App {
     pub(crate) fn toggle_playback(&mut self) {
         self.note_playback_choice();
         match (&self.player, self.playback_started) {
-            (Some(pl), true) => pl.toggle_pause(),
+            (Some(pl), true) => {
+                self.spotify_pause = SpotifyPause::None;
+                pl.toggle_pause();
+            }
             (Some(_), false) if !self.q.is_empty() => {
                 self.play_index(self.q.current().unwrap_or_else(|| self.q.first()))
             }
@@ -6523,6 +6580,7 @@ impl App {
                         if self.now.track.as_ref().is_some_and(Track::is_spotify) {
                             self.play_generation = self.backend.cancel_play();
                             self.playback_started = false;
+                            self.spotify_pause = SpotifyPause::None;
                             self.listening.finish("stopped");
                             self.stall.reset();
                             if let Some(player) = &self.player {
@@ -6666,6 +6724,12 @@ impl App {
                 }
                 Event::Resolving(..) => {}
                 Event::Playing(mut track, generation) if generation == self.play_generation => {
+                    if self.spotify_pause == SpotifyPause::Released {
+                        self.spotify_pause = SpotifyPause::None;
+                        if self.q.resume_here() == self.stall.start_position() {
+                            self.q.set_resume(None);
+                        }
+                    }
                     self.reconcile_state(&mut track);
                     let video_id = track.video_id.clone();
                     let wide = track.wide;
@@ -7145,7 +7209,7 @@ impl App {
         let Some(track) = tracks.get(index) else {
             return;
         };
-        if self.playback_started
+        if (self.playback_started || self.spotify_pause == SpotifyPause::Released)
             && self
                 .now
                 .track
@@ -7169,6 +7233,10 @@ impl App {
         // fall through and actually load the track rather than toggle (which would recurse).
         if self.q.current() == Some(index) && self.playback_started {
             self.toggle_playback();
+            return;
+        }
+        if self.q.current() == Some(index) && self.spotify_pause == SpotifyPause::Released {
+            self.play_index_restore(index);
             return;
         }
         self.q.remember_current();
@@ -7225,8 +7293,18 @@ impl App {
         // A restored queue — or a scrub before play — carries a position for this very track;
         // it rides the load as a per-file `start`, and is consumed here so a later frame does
         // not seek the newly opened file a second time.
-        let start_at = self.q.take_resume_for(index);
-        if retry {
+        let resuming_spotify = self.spotify_pause == SpotifyPause::Released
+            && track.is_spotify()
+            && self.q.resume_here().is_some();
+        let start_at = if resuming_spotify {
+            self.q.resume_here()
+        } else {
+            self.spotify_pause = SpotifyPause::None;
+            self.q.take_resume_for(index)
+        };
+        if resuming_spotify && self.listening.active() {
+            self.listening.suspend(start_at.unwrap_or(0.0), "resume");
+        } else if retry {
             self.listening.suspend(start_at.unwrap_or(0.0), "retry");
         } else {
             if self.listening.active()
@@ -7300,11 +7378,19 @@ impl App {
             // Next landing on the track already playing — a one-track queue under Repeat All, or
             // a shuffle with nothing else left — replays it. `play_index` would take that for a
             // click on the loaded track and pause it.
-            Some(next) if self.q.current() == Some(next) => self.play_index_restore(next),
+            Some(next) if self.q.current() == Some(next) => {
+                if self.spotify_pause == SpotifyPause::Released {
+                    self.q.set_resume(None);
+                }
+                self.play_index_restore(next);
+            }
             Some(next) => self.play_index(next),
             // At the end with Repeat One, "next" replays the current track.
             None if self.repeat == RepeatMode::One => {
                 if let Some(current) = self.q.current() {
+                    if self.spotify_pause == SpotifyPause::Released {
+                        self.q.set_resume(None);
+                    }
                     self.play_index_restore(current);
                 }
             }
@@ -7425,9 +7511,7 @@ impl App {
             return false;
         }
         if self.playback_started && !self.play_is_video {
-            if let Some(player) = self.player.as_ref() {
-                player.seek(0.0);
-            }
+            self.seek_to(0.0);
         } else {
             // A video carries its audio as a separately attached stream, and a post-load seek
             // moves only the video (see `player::set_start`), so restarting one means loading it
@@ -7444,6 +7528,9 @@ impl App {
     /// restored position instead.
     pub(crate) fn seek_to(&mut self, seconds: f64) {
         if self.playback_started {
+            if matches!(self.spotify_pause, SpotifyPause::Waiting(_)) {
+                self.spotify_pause = SpotifyPause::Waiting(Instant::now());
+            }
             if let Some(pl) = &self.player {
                 pl.seek(seconds);
             }
