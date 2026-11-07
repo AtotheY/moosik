@@ -2166,6 +2166,7 @@ pub(crate) struct PageHeader<'a> {
     /// The type line (`ALBUM · 1995`). Empty hides it.
     pub kind_label: &'a str,
     pub title: &'a str,
+    pub verification: Option<artist::VerificationMark>,
     /// A lowkey one-line description, between the title and the credits (Spotify-style). Only
     /// playlists fill it.
     pub description: Option<&'a str>,
@@ -2286,10 +2287,12 @@ pub(crate) fn page_header(
     // The title takes the largest size that still fits its column, down to a floor: a long
     // album or playlist name steps the type down rather than ellipsizing, so a one-word name
     // stays loud and a sentence-long one stays whole.
+    let title_w =
+        (text_w - artist::verification_width(usize::from(h.verification.is_some()))).max(0.0);
     let title_size = widgets::fit_size(
         ui,
         h.title,
-        text_w,
+        title_w,
         DETAIL_TITLE_MAX,
         DETAIL_TITLE_MIN,
         theme::bold,
@@ -2309,7 +2312,7 @@ pub(crate) fn page_header(
     } else {
         widgets::title_centre_under_label(KIND_BASELINE, KIND_TO_TITLE_AIR, title_size)
     };
-    let shown_title = widgets::truncate_to(ui, h.title, title_font.clone(), text_w);
+    let shown_title = widgets::truncate_to(ui, h.title, title_font.clone(), title_w);
     // Where the painted title's ink actually ends, measured before anything is drawn so the
     // whole block can be placed first.
     let title_ink = widgets::ink_drop(ui, &shown_title, &title_font);
@@ -2366,12 +2369,18 @@ pub(crate) fn page_header(
             palette.dim,
         );
     }
-    crate::emoji::paint_line(
+    let title_advance = crate::emoji::paint_line(
         ui,
         egui::pos2(tx, y),
         &shown_title,
         title_font.clone(),
         palette.text,
+    );
+    artist::paint_verification_marks(
+        ui,
+        palette.panel,
+        egui::pos2(tx + title_advance, y),
+        h.verification,
     );
     // The last text line painted, so the controls' baseline stays under it whether or not
     // the header has an artist line and a meta line.

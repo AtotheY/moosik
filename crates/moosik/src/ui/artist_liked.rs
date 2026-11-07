@@ -175,6 +175,7 @@ fn header(
                 kind_label: "",
                 source: Some("YouTube Music"),
                 title: "Liked songs",
+                verification: None,
                 description: None,
                 artists: &[],
                 second_plain: None,

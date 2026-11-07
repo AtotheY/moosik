@@ -276,6 +276,7 @@ fn identity_header(app: &mut App, ui: &mut egui::Ui, identity: &Identity) {
             circle: true,
             kind_label: identity.provider.name(),
             title: &identity.name,
+            verification: None,
             description: None,
             artists: &[],
             second_plain: identity.audience.as_deref(),

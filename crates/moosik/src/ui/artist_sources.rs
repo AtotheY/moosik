@@ -304,6 +304,14 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
         })
         .collect();
     let shelves = display_shelves(&sources, app.can_group_sources());
+    let marks = [Provider::YouTubeMusic, Provider::Spotify]
+        .into_iter()
+        .filter_map(|provider| {
+            app.artist_sources
+                .profile(provider)
+                .and_then(super::artist::VerificationMark::for_artist)
+        })
+        .collect::<Vec<_>>();
 
     super::page_scroll(app, "artist-sources").show(ui, |ui| {
         ui.add_space(theme::HEADER_TOP_PAD);
@@ -312,27 +320,6 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
         let art_size =
             super::HEADER_ART_PT.min((width - gutter - 224.0).max(super::HEADER_ART_FLOOR_PT));
         let text_width = (width - art_size - gutter).max(0.0);
-        let title_size = widgets::fit_size(
-            ui,
-            &name,
-            text_width,
-            super::DETAIL_TITLE_MAX,
-            super::DETAIL_TITLE_MIN,
-            theme::bold,
-        );
-        let title_font = theme::bold(title_size);
-        let title = widgets::truncate_to(ui, &name, title_font.clone(), text_width);
-        let title_bottom = title_size * 0.5 + widgets::ink_drop(ui, &title, &title_font);
-        let controls_height = if text_width < 224.0 { 72.0 } else { 32.0 };
-        let text_height = title_bottom + 16.0 + controls_height;
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(width, art_size.max(text_height)),
-            egui::Sense::hover(),
-        );
-        let art_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.left(), rect.center().y - art_size * 0.5),
-            egui::Vec2::splat(art_size),
-        );
         let art = super::art_texture(
             &mut app.images,
             &app.backend,
@@ -340,39 +327,54 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
             artwork.as_ref(),
             super::HEADER_ART_PT,
         );
-        widgets::paint_art(ui, &app.palette, art_rect, art, widgets::ArtShape::Circle);
-        let text_x = art_rect.right() + gutter;
-        let text_top = rect.center().y - text_height * 0.5;
-        crate::emoji::paint_line(
-            ui,
-            egui::pos2(text_x, text_top + title_size * 0.5),
-            &title,
-            title_font,
-            app.palette.text,
-        );
-        let mut controls = ui.new_child(
-            egui::UiBuilder::new()
-                .id_salt("artist-sources-profiles")
-                .max_rect(egui::Rect::from_min_size(
-                    egui::pos2(text_x, text_top + title_bottom + 16.0),
-                    egui::vec2(text_width, controls_height),
-                ))
-                .layout(if text_width < 224.0 {
-                    egui::Layout::top_down(egui::Align::Min)
-                } else {
-                    egui::Layout::left_to_right(egui::Align::Center)
-                }),
-        );
-        controls.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         let mut selected = None;
-        for source in &sources {
-            if widgets::outline_button(&mut controls, &app.palette, source.provider.name())
-                .clicked()
-            {
-                selected = Some(source.id.clone());
-            }
-        }
-        ui.advance_cursor_after_rect(rect.union(controls.min_rect()));
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gutter;
+            let (art_rect, _) =
+                ui.allocate_exact_size(egui::Vec2::splat(art_size), egui::Sense::hover());
+            widgets::paint_art(ui, &app.palette, art_rect, art, widgets::ArtShape::Circle);
+            ui.vertical(|ui| {
+                ui.set_width(text_width);
+                let title_width =
+                    (text_width - super::artist::verification_width(marks.len())).max(0.0);
+                let title_size = widgets::fit_size(
+                    ui,
+                    &name,
+                    title_width,
+                    super::DETAIL_TITLE_MAX,
+                    super::DETAIL_TITLE_MIN,
+                    theme::bold,
+                );
+                let title_font = theme::bold(title_size);
+                let title = widgets::truncate_to(ui, &name, title_font.clone(), title_width);
+                let (title_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(text_width, title_size + 4.0),
+                    egui::Sense::hover(),
+                );
+                let title_pos = title_rect.left_center();
+                let title_advance =
+                    crate::emoji::paint_line(ui, title_pos, &title, title_font, app.palette.text);
+                super::artist::paint_verification_marks(
+                    ui,
+                    app.palette.panel,
+                    title_pos + egui::vec2(title_advance, 0.0),
+                    marks.iter().copied(),
+                );
+                ui.add_space(6.0);
+                let inline = text_width >= 540.0;
+                for source in &sources {
+                    if profile_row(
+                        ui,
+                        &app.palette,
+                        source.provider,
+                        app.artist_sources.profile(source.provider),
+                        inline,
+                    ) {
+                        selected = Some(source.id.clone());
+                    }
+                }
+            });
+        });
         ui.add_space(8.0);
         if let Some(id) = selected {
             app.navigate(Route::Artist(id));
@@ -441,6 +443,92 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
             });
         }
     });
+}
+
+fn profile_row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    provider: Provider,
+    artist: Option<&Artist>,
+    inline: bool,
+) -> bool {
+    const LINK_WIDTH: f32 = 125.0;
+    const LINK_GAP: f32 = 12.0;
+    const TEXT_INSET: f32 = 6.0;
+    let details = artist
+        .into_iter()
+        .flat_map(Artist::audience_stats)
+        .collect::<Vec<_>>()
+        .join(widgets::FIELD_SEP);
+    let detail_label = || {
+        egui::Label::new(
+            egui::RichText::new(&details)
+                .font(theme::regular(13.0))
+                .color(palette.secondary),
+        )
+        .wrap()
+    };
+    let profile_link = |ui: &mut egui::Ui| {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(LINK_WIDTH, 28.0), egui::Sense::click());
+        let label = format!("Open {} profile", provider.name());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, ui.is_enabled(), &label)
+        });
+        let radius = egui::CornerRadius::same(theme::RADIUS_SMALL);
+        if response.hovered() || response.has_focus() {
+            ui.painter()
+                .rect_filled(rect, radius, palette.surface_hover);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(1.0, palette.text),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let center = |x| egui::pos2(x, rect.center().y);
+        ui.painter().text(
+            center(rect.left() + TEXT_INSET),
+            egui::Align2::LEFT_CENTER,
+            provider.name(),
+            theme::semibold(13.0),
+            palette.text,
+        );
+        crate::icons::Icon::ChevronRight
+            .image(palette.dim, 13.0)
+            .paint_at(
+                ui,
+                egui::Rect::from_center_size(center(rect.right() - 11.0), egui::Vec2::splat(13.0)),
+            );
+        response.on_hover_text(label).clicked()
+    };
+    if inline {
+        return ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = LINK_GAP;
+                let clicked = profile_link(ui);
+                if !details.is_empty() {
+                    ui.add(detail_label());
+                }
+                clicked
+            })
+            .inner;
+    }
+    let clicked = profile_link(ui);
+    if !details.is_empty() {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(TEXT_INSET);
+            ui.add(detail_label());
+        });
+        ui.add_space(4.0);
+    }
+    clicked
 }
 
 fn retry(app: &mut App) {

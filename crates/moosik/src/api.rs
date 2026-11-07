@@ -47,6 +47,8 @@ use crate::model::{self, Track, parse_duration};
 /// It also matters that this is a *default* header: the crate sets `User-Agent`, `X-Origin` and
 /// `Content-Type` per request, and those would override anything we passed the same way.
 const CONSENT_COOKIE: &str = "SOCS=CAI";
+const WEB_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0";
 
 /// Build the HTTP client `ytmapi-rs` will use.
 /// Build the HTTP client, optionally browsing as a brand account.
@@ -703,7 +705,7 @@ impl Api {
             Ok(json) => {
                 dump("MOOSIK_DUMP_ARTIST", &json);
                 if let Some(artist) = innertube::parse_artist(&json) {
-                    return Ok(artist);
+                    return Ok(self.with_artist_channel_badges(id, artist).await);
                 }
                 tracing::warn!(artist = %id, "artist page parsed to nothing; using the typed query");
             }
@@ -715,7 +717,39 @@ impl Api {
             ClientRef::NoAuth(yt) => run_artist(&yt, id).await?,
             ClientRef::Browser(yt) => run_artist(&yt, id).await?,
         };
-        Ok(map_artist(artist))
+        Ok(self
+            .with_artist_channel_badges(id, map_artist(artist))
+            .await)
+    }
+
+    async fn with_artist_channel_badges(
+        &self,
+        id: &str,
+        mut artist: model::Artist,
+    ) -> model::Artist {
+        if artist.verified || artist.official_artist_channel {
+            return artist;
+        }
+        let Some(id) = artist_badge_channel(id, &artist.id) else {
+            return artist;
+        };
+        let url = format!("https://www.youtube.com/channel/{id}");
+        let headers = [
+            ("User-Agent", WEB_USER_AGENT.into()),
+            ("Cookie", CONSENT_COOKIE.into()),
+        ];
+        let page = tokio::time::timeout(std::time::Duration::from_millis(1500), async {
+            self.http().await.get_query(&url, headers, &()).await
+        })
+        .await;
+        if let Ok(Ok(page)) = page
+            && page.status_code == 200
+        {
+            let badges = innertube::artist_channel_badges(&page.text, id);
+            artist.verified = badges.verified;
+            artist.official_artist_channel = badges.official_artist_channel;
+        }
+        artist
     }
 
     pub async fn get_album(&self, id: &str) -> Result<model::Album> {
@@ -1416,11 +1450,7 @@ impl Api {
         let signed_in = cookie.is_some();
         let headers = [
             // Same browser identity ytmapi-rs uses when bootstrapping a session.
-            (
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0"
-                    .into(),
-            ),
+            ("User-Agent", WEB_USER_AGENT.into()),
             ("Cookie", cookie.as_deref().unwrap_or(CONSENT_COOKIE).into()),
         ];
         let page = self
@@ -2850,6 +2880,20 @@ fn map_playlist_ref(p: ytmapi_rs::parse::SearchResultPlaylist) -> Option<model::
     }
 }
 
+fn artist_badge_channel<'a>(route: &'a str, subscription_channel: &'a str) -> Option<&'a str> {
+    let id = if subscription_channel.is_empty() {
+        route
+    } else {
+        subscription_channel
+    };
+    let suffix = id.strip_prefix("UC")?;
+    (suffix.len() == 22
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+    .then_some(id)
+}
+
 fn map_artist(a: GetArtist) -> model::Artist {
     let artist_thumb = last_thumb(&a.thumbnails);
     let top_songs = a
@@ -2930,6 +2974,9 @@ fn map_artist(a: GetArtist) -> model::Artist {
     model::Artist {
         id: a.channel_id.get_raw().to_owned(),
         name: a.name,
+        verified: false,
+        official_artist_channel: false,
+        followers: None,
         subscribers: a.subscribers.clone(),
         // The typed fallback carries one count and no way to tell short from long; it serves as
         // the sentence when the raw parser never ran, and the button loses its count rather than
@@ -3043,6 +3090,20 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artist_badge_lookup_uses_the_channel_linked_by_the_music_profile() {
+        let topic = "UCwgX_dLqGYna_7Fm8ecf4Ng";
+        let official = "UCzpl23pGTHVYqvKsgY0A-_w";
+        let root = serde_json::json!({"header": {"musicImmersiveHeaderRenderer": {
+            "title": {"runs": [{"text": "Doja Cat"}]},
+            "subscriptionButton": {"subscribeButtonRenderer": {"channelId": official}},
+        }}});
+        let artist = innertube::parse_artist(&root).unwrap();
+        assert_eq!(artist_badge_channel(topic, &artist.id), Some(official));
+        assert_eq!(artist_badge_channel(topic, ""), Some(topic));
+        assert_eq!(artist_badge_channel(topic, "UC../../invalid"), None);
+    }
 
     #[test]
     fn typed_album_search_keeps_artist_credit_and_explicitness() {

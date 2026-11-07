@@ -377,6 +377,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
                 circle: false,
                 kind_label: &kind_label,
                 title: &pl.title,
+                verification: None,
                 description: pl.description.as_deref(),
                 artists: &[],
                 second_plain: None,

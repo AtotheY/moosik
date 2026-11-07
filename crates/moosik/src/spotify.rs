@@ -272,8 +272,11 @@ pub async fn artist(id: &str) -> Result<Artist> {
     Ok(Artist {
         id: summary.uri,
         name: summary.name,
-        subscribers: summary.followers.map(format_count),
-        subscribers_long: summary
+        verified: artist.verified,
+        official_artist_channel: false,
+        subscribers: None,
+        subscribers_long: None,
+        followers: summary
             .followers
             .map(|count| format!("{} followers", format_count(count))),
         monthly_listeners: artist

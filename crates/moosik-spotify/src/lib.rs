@@ -1,6 +1,7 @@
 mod browse;
 mod model;
 mod transport;
+mod verification;
 mod web_auth;
 
 pub use browse::{

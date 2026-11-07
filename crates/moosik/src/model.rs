@@ -877,16 +877,15 @@ impl SearchResults {
 pub struct Artist {
     pub id: String,
     pub name: String,
+    pub verified: bool,
+    pub official_artist_channel: bool,
     /// The short count from `subscriberCountText` ("20.8M") — what fits on the Subscribe
     /// button. It carries no unit on purpose; the long form is [`Self::subscribers_long`].
     pub subscribers: Option<String>,
-    /// `"20.8M subscribers"`, complete and localised by YouTube. The header shows this under
-    /// the name when the artist has no monthly-audience line (a small artist), so the page
-    /// never prints the unitless button count as a sentence.
+    /// `"20.8M subscribers"`, complete and localised by YouTube.
     pub subscribers_long: Option<String>,
-    /// `"213M monthly audience"`, complete from YouTube. This is what the page shows under the
-    /// name; the subscriber count belongs on the Subscribe button and the view total on the
-    /// About section, which is where they were double-billed before.
+    pub followers: Option<String>,
+    /// Provider-formatted monthly audience or listener count with its label.
     pub monthly_listeners: Option<String>,
     pub views: Option<String>,
     pub actions: ArtistActions,
@@ -913,6 +912,20 @@ pub struct Artist {
     /// `Arc`-wrapped like every sibling feed (`home`/`explore`/`releases`/`moods`/
     /// `history_shelves`) so a per-frame snapshot is a refcount bump, not a deep clone.
     pub shelves: Arc<Vec<Shelf>>,
+}
+
+impl Artist {
+    pub(crate) fn audience_stats(&self) -> impl Iterator<Item = &str> {
+        [
+            self.monthly_listeners.as_deref(),
+            self.subscribers_long
+                .as_deref()
+                .or(self.followers.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|stat| !stat.trim().is_empty())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

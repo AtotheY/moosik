@@ -129,6 +129,34 @@ impl Transport {
         Ok(value)
     }
 
+    pub(crate) async fn artist_verified(&self, uri: &str) -> Result<bool> {
+        const STAGE: &str = "artist verification";
+        if self.inner.expires_at <= now_ms()? {
+            return Err(Error::AuthorizationExpired);
+        }
+        let url = self
+            .inner
+            .spclient
+            .join("/extended-metadata/v0/extended-metadata")
+            .map_err(|_| Error::Invalid("API path"))?;
+        let response = self
+            .inner
+            .http
+            .post(url)
+            .headers(self.inner.headers.clone())
+            .header("accept", "application/protobuf")
+            .timeout(Duration::from_secs(1))
+            .json(&json!({"entityRequest": [{
+                "entityUri": uri,
+                "query": [{"extensionKind": crate::verification::REPUTATION_EXTENSION, "etag": ""}]
+            }]}))
+            .send()
+            .await
+            .map_err(|_| Error::Network(STAGE))?;
+        let bytes = body(checked(response, STAGE)?, 16 * 1024, STAGE).await?;
+        Ok(crate::verification::verified(&bytes, uri).unwrap_or(false))
+    }
+
     pub async fn build_from_web_session(session: WebSession) -> Result<Self> {
         validate_web_session(&session)?;
         let now = now_ms()?;

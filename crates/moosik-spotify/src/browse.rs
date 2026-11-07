@@ -88,6 +88,7 @@ pub struct Album {
 
 pub struct Artist {
     pub summary: ArtistSummary,
+    pub verified: bool,
     pub description: Option<String>,
     pub monthly_listeners: Option<u64>,
     pub hero: Option<String>,
@@ -310,11 +311,15 @@ impl Transport {
 
     pub async fn artist(&self, input: &str) -> Result<Artist> {
         let uri = require_uri(input, "artist")?;
-        let response = self.query("queryArtistOverview", ARTIST_HASH, json!({"uri": uri, "locale": "", "preReleaseV2": false, "includeMusicVideoPreviews": false})).await?;
+        let (response, verified) = tokio::join!(
+            self.query("queryArtistOverview", ARTIST_HASH, json!({"uri": uri, "locale": "", "preReleaseV2": false, "includeMusicVideoPreviews": false})),
+            self.artist_verified(&uri),
+        );
+        let response = response?;
         let data = response
             .pointer("/data/artistUnion")
             .ok_or(Error::Invalid("artist"))?;
-        parse_artist(data, &uri)
+        parse_artist(data, &uri, verified.unwrap_or(false))
     }
 
     pub async fn library_page(
@@ -635,7 +640,7 @@ fn parse_album_tracks(data: &Value, album: &AlbumSummary) -> Result<Vec<CatalogT
         .collect())
 }
 
-fn parse_artist(data: &Value, uri: &str) -> Result<Artist> {
+fn parse_artist(data: &Value, uri: &str, verified: bool) -> Result<Artist> {
     let summary = artist_summary(data, Some(uri)).ok_or(Error::Invalid("artist"))?;
     let top_tracks = array(&data["discography"]["topTracks"]["items"])
         .iter()
@@ -692,6 +697,7 @@ fn parse_artist(data: &Value, uri: &str) -> Result<Artist> {
     }
     Ok(Artist {
         summary,
+        verified,
         description: text(data, "/profile/biography/text"),
         monthly_listeners: data["stats"]["monthlyListeners"].as_u64(),
         hero: image(&data["visuals"]["headerImage"]["sources"]),

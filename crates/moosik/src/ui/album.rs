@@ -101,6 +101,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                 circle: false,
                 kind_label: &kind_label,
                 title: &a.title,
+                verification: None,
                 description: None,
                 artists: &a.artists,
                 second_plain: None,

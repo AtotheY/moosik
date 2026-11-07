@@ -99,6 +99,58 @@ pub fn source_name_indicator(ui: &Ui, palette: &Palette, rect: Rect, source: &st
     });
 }
 
+pub(crate) const VERIFIED_MARK_WIDTH: f32 = 32.0;
+
+pub(crate) fn verification_mark(
+    ui: &Ui,
+    backdrop: Color32,
+    left_center: egui::Pos2,
+    provider: crate::model::Provider,
+    label: &str,
+) {
+    let rect = Rect::from_min_size(
+        left_center - vec2(0.0, 12.0),
+        vec2(VERIFIED_MARK_WIDTH, 24.0),
+    );
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let response = ui.interact(
+        rect,
+        ui.id().with(("verification-mark", provider, label)),
+        Sense::focusable_noninteractive(),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
+    let color = theme::verification_accent(provider, backdrop);
+    let focused = response.has_focus();
+    if focused {
+        ui.painter().hline(
+            rect.left()..=rect.right(),
+            rect.bottom(),
+            egui::Stroke::new(1.0, color),
+        );
+    }
+    crate::icons::paint_source(
+        ui,
+        Rect::from_center_size(left_center + vec2(10.0, 0.0), vec2(18.0, 18.0)),
+        provider.name(),
+        color,
+    );
+    Icon::Check.image(color, 12.0).paint_at(
+        ui,
+        Rect::from_center_size(left_center + vec2(25.0, 0.0), vec2(12.0, 12.0)),
+    );
+    let tooltip = if focused {
+        egui::Tooltip::for_widget(&response)
+    } else {
+        egui::Tooltip::for_enabled(&response)
+    };
+    tooltip.show(|ui| {
+        ui.label(label);
+    });
+}
+
 /// How lit a control is: `0.0` at rest, `1.0` hovered, moving between them over
 /// [`theme::HOVER_FADE_SECS`].
 ///

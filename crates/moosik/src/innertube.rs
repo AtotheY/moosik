@@ -2198,6 +2198,7 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
         .pointer("/header/musicImmersiveHeaderRenderer")
         .or_else(|| root.pointer("/header/musicVisualHeaderRenderer"))?;
     let name = non_empty(text(header.get("title")?))?;
+    let badges = channel_badge_styles(header.get("badges"));
 
     let subscribe = header.pointer("/subscriptionButton/subscribeButtonRenderer");
     let id = subscribe
@@ -2295,6 +2296,9 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
     Some(Artist {
         id,
         name,
+        verified: badges.verified,
+        official_artist_channel: badges.official_artist_channel,
+        followers: None,
         subscribers,
         subscribers_long,
         monthly_listeners,
@@ -2308,6 +2312,75 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
         top_songs_playlist,
         shelves: std::sync::Arc::new(shelves),
     })
+}
+
+#[derive(Default)]
+pub(crate) struct ArtistChannelBadges {
+    pub verified: bool,
+    pub official_artist_channel: bool,
+}
+
+fn channel_badge_styles(badges: Option<&Value>) -> ArtistChannelBadges {
+    let mut result = ArtistChannelBadges::default();
+    for badge in badges.and_then(Value::as_array).into_iter().flatten() {
+        match badge
+            .pointer("/metadataBadgeRenderer/style")
+            .and_then(Value::as_str)
+        {
+            Some("BADGE_STYLE_TYPE_VERIFIED") => result.verified = true,
+            Some("BADGE_STYLE_TYPE_VERIFIED_ARTIST") => result.official_artist_channel = true,
+            _ => {}
+        }
+    }
+    result
+}
+
+pub(crate) fn artist_channel_badges(html: &str, channel_id: &str) -> ArtistChannelBadges {
+    let Some(root) = ["var ytInitialData =", "window[\"ytInitialData\"] ="]
+        .into_iter()
+        .find_map(|marker| {
+            let (_, data) = html.split_once(marker)?;
+            serde_json::Deserializer::from_str(data)
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        })
+    else {
+        return ArtistChannelBadges::default();
+    };
+    if root
+        .pointer("/metadata/channelMetadataRenderer/externalId")
+        .and_then(Value::as_str)
+        != Some(channel_id)
+    {
+        return ArtistChannelBadges::default();
+    }
+    let mut badges = channel_badge_styles(root.pointer("/header/c4TabbedHeaderRenderer/badges"));
+    let title = root.pointer(concat!(
+        "/header/pageHeaderRenderer/content/pageHeaderViewModel",
+        "/title/dynamicTextViewModel/text/attachmentRuns"
+    ));
+    for image in title
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| {
+            attachment
+                .pointer("/element/type/imageType/image/sources")
+                .and_then(Value::as_array)
+        })
+        .flatten()
+    {
+        match image
+            .pointer("/clientResource/imageName")
+            .and_then(Value::as_str)
+        {
+            Some("CHECK_CIRCLE_FILLED") => badges.verified = true,
+            Some("AUDIO_BADGE") => badges.official_artist_channel = true,
+            _ => {}
+        }
+    }
+    badges
 }
 
 /// Whether a shelf is "From your library" — the signed-in artist page's own list of the items
@@ -3512,6 +3585,58 @@ mod tests {
         // The heading comes from the shelf itself, not a hardcoded one: every capture so far
         // calls it "Top songs", and the page used to print "Popular" over it.
         assert_eq!(a.top_songs_title.as_deref(), Some("Top songs"));
+    }
+
+    #[test]
+    fn music_artist_badges_require_explicit_profile_evidence() {
+        let mut root = json("artist");
+        let artist = parse_artist(&root).unwrap();
+        assert!(!artist.verified && !artist.official_artist_channel);
+        for (style, verified, official) in [
+            ("BADGE_STYLE_TYPE_VERIFIED", true, false),
+            ("BADGE_STYLE_TYPE_VERIFIED_ARTIST", false, true),
+            ("BADGE_STYLE_TYPE_MEDIA", false, false),
+        ] {
+            root["header"]["musicImmersiveHeaderRenderer"]["badges"] =
+                serde_json::json!([{"metadataBadgeRenderer": {"style": style}}]);
+            let artist = parse_artist(&root).unwrap();
+            assert_eq!(
+                (artist.verified, artist.official_artist_channel),
+                (verified, official)
+            );
+        }
+    }
+
+    #[test]
+    fn web_artist_badges_are_bound_to_the_requested_channel_title() {
+        let id = "UCzpl23pGTHVYqvKsgY0A-_w";
+        for (icon, verified, official) in [
+            ("CHECK_CIRCLE_FILLED", true, false),
+            ("AUDIO_BADGE", false, true),
+            ("MUSIC_EXPLICIT_BADGE", false, false),
+        ] {
+            let mut root = serde_json::json!({
+                "metadata": {"channelMetadataRenderer": {"externalId": id}},
+                "header": {"pageHeaderRenderer": {"content": {"pageHeaderViewModel": {}}}},
+            });
+            let header =
+                &mut root["header"]["pageHeaderRenderer"]["content"]["pageHeaderViewModel"];
+            header["title"]["dynamicTextViewModel"]["text"]["attachmentRuns"] = serde_json::json!([
+                {"element": {"type": {"imageType": {"image": {"sources": [
+                    {"clientResource": {"imageName": icon}}
+                ]}}}}}
+            ]);
+            let html = format!("<script>var ytInitialData = {root};</script>");
+            let badges = artist_channel_badges(&html, id);
+            assert_eq!(
+                (badges.verified, badges.official_artist_channel),
+                (verified, official)
+            );
+            let other = artist_channel_badges(&html, "UCtxdfwb9wfkoGocVUAJ-Bmg");
+            assert!(!other.verified && !other.official_artist_channel);
+        }
+        let consent = artist_channel_badges("<title>Before you continue</title>", id);
+        assert!(!consent.verified && !consent.official_artist_channel);
     }
 
     /// The hero is the letterboxed channel art, not the square portrait slot the avatar uses.
