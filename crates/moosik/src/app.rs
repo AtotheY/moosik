@@ -1536,6 +1536,7 @@ pub struct App {
     pub(crate) sign_in_busy: bool,
     /// Remembers which browser to open or retry if its login could not be used.
     pub(crate) login_browser: Option<crate::browser_cookies::Browser>,
+    pub(crate) spotify_signing_in: bool,
 
     /// What the Settings page shows about authentication.
     pub(crate) auth: crate::auth::AuthState,

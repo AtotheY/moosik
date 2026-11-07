@@ -74,6 +74,22 @@ pub enum Event {
         tracks: Vec<Track>,
         incomplete: Vec<String>,
     },
+    BrowseScoped {
+        epoch: u64,
+        event: Box<Event>,
+    },
+    ProviderBrowseWarning {
+        message: String,
+        epoch: u64,
+    },
+    SpotifySignInFinished(Result<(), String>),
+    SpotifySignOutFinished(Result<(), String>),
+    SpotifyProfileLoaded {
+        profile: crate::model::AccountProfile,
+    },
+    SpotifyProfileFailed {
+        error: String,
+    },
     SearchDone {
         query: String,
         results: SearchResults,
@@ -1295,8 +1311,8 @@ impl Backend {
         });
     }
 
-    pub fn search_scoped(&self, query: String, scope: crate::model::SearchScope) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+    pub fn sign_in_spotify(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.search_scoped(&query, scope).await {
                 Ok(results) => Event::ScopedSearchDone {
