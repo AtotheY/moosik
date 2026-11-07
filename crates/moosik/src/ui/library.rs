@@ -299,51 +299,18 @@ fn sort_row(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn song_list(app: &mut App, ui: &mut egui::Ui) {
-    let signed_in = app.signed_in();
-    let clicked = {
-        let App {
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            library,
-            ..
-        } = app;
-        track_rows(
-            ui,
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            &library.songs.items,
-            false,
-            None,
-            &library.playlists.items,
-            signed_in,
-            false,
-            false,
-        )
-    };
-    // Ask for the next page once the viewport reaches the end of what we have. Nothing loads that
-    // has not been scrolled to, so a 10,000-song library costs the same as a 25-song one until it
-    // is looked at.
-    if clicked.at_end {
+    let mut rows = std::mem::take(&mut app.library_source_rows);
+    rows.set_tracks(&app.library.songs.items, app.can_group_sources());
+    let at_end = super::source_rows::draw(
+        app,
+        ui,
+        &mut rows,
+        "library-songs",
+        super::source_rows::Playback::List,
+    );
+    app.library_source_rows = rows;
+    if at_end {
         app.load_more_library(LibrarySection::Songs);
-    }
-    match clicked.click {
-        Some(ListClick::Row(i)) => {
-            let songs = app.library.songs.items.clone();
-            app.start_from(songs, i);
-        }
-        Some(ListClick::Link(route)) => app.navigate(route),
-        None => {}
-    }
-    if let Some(action) = clicked.action {
-        app.row_action(action);
     }
 }
 

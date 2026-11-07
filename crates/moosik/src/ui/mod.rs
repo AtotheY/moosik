@@ -27,6 +27,7 @@ pub mod search;
 pub mod settings;
 pub mod sidebar;
 pub(crate) mod song_drag;
+pub mod source_rows;
 pub mod splash;
 pub mod topbar;
 pub mod update;

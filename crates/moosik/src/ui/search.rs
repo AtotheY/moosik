@@ -275,115 +275,29 @@ fn scope_chips(app: &mut App, ui: &mut egui::Ui, live: bool) {
     ui.add_space(4.0);
 }
 
-/// The list. Every kind renders through the same row, so art, hover, truncation and the
-/// active-track highlight are shared, and the list virtualises like every other.
-///
-/// `indices` is `All`'s scope filter: positions in `app.results.items` that match
-/// `app.search_scope`, in the same (already-correct) order YouTube ranked them — `i` below is
-/// always a position in `indices`, not in the underlying list itself. Every other scope has
-/// nothing to filter (the dedicated fetch already returns only that kind), so `indices` is just
-/// `0..app.scoped_results.len()`.
 fn results_list(app: &mut App, ui: &mut egui::Ui) {
-    let signed_in = app.signed_in();
-    let scope = app.search_scope;
-    let all = scope == SearchScope::All;
-    let indices: Vec<usize> = if all {
-        // Cached against `results_generation`: `results.items` doesn't change between one
-        // search landing and the next, so re-filtering it every frame is wasted work.
-        let generation = app.results_generation;
-        match &app.search_all_indices {
-            Some((cached_gen, indices)) if *cached_gen == generation => indices.clone(),
-            _ => {
-                let indices: Vec<usize> = app
-                    .results
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| scope.matches(e))
-                    .map(|(i, _)| i)
-                    .collect();
-                app.search_all_indices = Some((generation, indices.clone()));
-                indices
-            }
-        }
+    let all = app.search_scope == SearchScope::All;
+    let revision = if all {
+        app.results_generation.wrapping_mul(2)
     } else {
-        (0..app.scoped_results.len()).collect()
+        app.scoped_results_generation
+            .wrapping_mul(2)
+            .wrapping_add(1)
     };
-    let clicked = {
-        let App {
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            results,
-            scoped_results,
-            library,
-            ..
-        } = app;
-        let items: &[Entry] = if all { &results.items } else { scoped_results };
-        spec_rows(
-            ui,
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            indices.len(),
-            |i| crate::ui::entry_row_spec(&items[indices[i]], now, library, signed_in),
-        )
-    };
-
-    // Forwarded before the click: a menu choice arrives with no row click, and the `None`
-    // arm below returns early.
-    if let Some(action) = clicked.action {
-        app.row_action(action);
-    }
-    let i = match clicked.click {
-        // Translated back to a real position in the source list — `i` from `spec_rows` is only
-        // ever a position in this frame's `indices`.
-        Some(ListClick::Row(i)) => indices[i],
-        Some(ListClick::Link(route)) => {
-            app.navigate(route);
-            return;
-        }
-        None => return,
-    };
-    let item = if all {
-        &app.results.items[i]
+    let enabled = app.search_provider.is_none() && app.can_group_sources();
+    let mut state = std::mem::take(&mut app.search_source_rows);
+    let entries = if all {
+        &app.results.items
     } else {
-        &app.scoped_results[i]
+        &app.scoped_results
     };
-    match item {
-        Entry::Song(_) | Entry::Video(_) => {
-            let (index, queue) = if all {
-                (app.results.playable_index(i), app.results.playable())
-            } else {
-                (
-                    crate::ui::playable_index(&app.scoped_results, i),
-                    crate::ui::playable_queue(&app.scoped_results),
-                )
-            };
-            if let Some(index) = index {
-                app.play_row(queue, index);
-            }
-        }
-        Entry::Artist(a) => {
-            let id = a.id.clone();
-            app.navigate(Route::Artist(id));
-        }
-        Entry::Album(a) => {
-            let id = a.id.clone();
-            app.navigate(Route::Album(id));
-        }
-        Entry::Playlist(p) => {
-            let id = p.id.clone();
-            app.navigate(Route::Playlist(id));
-        }
-        Entry::Mood(m) => {
-            let params = m.params.clone();
-            app.navigate(Route::Mood(params));
-        }
-    }
+    state.set_entries(entries, revision, enabled);
+    crate::ui::source_rows::draw(
+        app,
+        ui,
+        &mut state,
+        "search-sources",
+        crate::ui::source_rows::Playback::Single,
+    );
+    app.search_source_rows = state;
 }

@@ -35,6 +35,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     if app.playlist.is_none() {
         return;
     }
+    let grouped_tracks = smart_private_projection(app);
 
     let wash = crate::ui::header_wash_colour(
         app,
@@ -44,11 +45,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // The tint travels with the page: painted in scroll coordinates, it scrolls away
         // with the header instead of lingering as a background.
         crate::ui::header_wash(ui, &app.palette, app.content_rect, ui.cursor().min.y, wash);
-        header(app, ui);
+        header(app, ui, grouped_tracks.as_deref());
         crate::ui::info_popup(app, ui);
         // Breathing room between the header and the first row.
         ui.add_space(10.0);
-        track_list(app, ui);
+        track_list(app, ui, grouped_tracks.is_some());
         suggestions(app, ui);
         if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
             let id = pl.id.clone();
@@ -262,7 +263,23 @@ fn sort_control(app: &mut App, ui: &mut egui::Ui, anchor: egui::Pos2) {
     }
 }
 
-fn header(app: &mut App, ui: &mut egui::Ui) {
+fn smart_private_projection(app: &mut App) -> Option<Vec<crate::model::Track>> {
+    let enabled = app.can_group_sources();
+    let playlist = app
+        .playlist
+        .as_ref()
+        .filter(|playlist| playlist.id.starts_with("private:") && !playlist.editable)?;
+    app.playlist_source_rows
+        .set_tracks(&playlist.tracks.items, enabled);
+    Some(
+        app.playlist_source_rows
+            .playback_queue(0, app.settings.preferred_provider, None)
+            .map(|(tracks, _)| tracks)
+            .unwrap_or_default(),
+    )
+}
+
+fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::model::Track]>) {
     let signed_in = app.signed_in();
     let playing = app
         .playlist
@@ -294,7 +311,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             "Playlist"
         }
         .to_owned();
-        let meta = meta_line(pl);
+        let meta = grouped_tracks.map_or_else(|| meta_line(pl), projected_meta);
         // The owner, folded into the meta line below rather than a separate row: linked where
         // the page gave a channel id, so their profile can be opened from the name. Liked Music
         // is an auto list with no maker to show.
@@ -402,7 +419,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         dots,
                         widgets::PageMenu {
                             page_id: &pl.id,
-                            tracks: &pl.tracks.items,
+                            tracks: grouped_tracks.unwrap_or(&pl.tracks.items),
                             artist_id: None,
                             playlists: &library.playlists.items,
                             signed_in,
@@ -448,11 +465,15 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
     };
 
     if out.play {
-        let tracks = app
-            .playlist
-            .as_ref()
-            .map(|pl| pl.tracks.items.clone())
-            .unwrap_or_default();
+        let tracks = grouped_tracks.map_or_else(
+            || {
+                app.playlist
+                    .as_ref()
+                    .map(|pl| pl.tracks.items.clone())
+                    .unwrap_or_default()
+            },
+            <[crate::model::Track]>::to_vec,
+        );
         // Already on this playlist: the button just showed Pause, so clicking it again means
         // resume/pause, not "start over from track 1".
         if app.queue_matches(&tracks) {
@@ -511,6 +532,23 @@ fn meta_line(playlist: &Playlist) -> String {
     )
 }
 
+fn projected_meta(tracks: &[crate::model::Track]) -> String {
+    let count = format!(
+        "{} {}",
+        tracks.len(),
+        if tracks.len() == 1 { "track" } else { "tracks" },
+    );
+    let duration = (!tracks.is_empty())
+        .then(|| {
+            tracks.iter().try_fold(0u64, |total, track| {
+                total.checked_add(track.duration.filter(|duration| *duration > 0)?)
+            })
+        })
+        .flatten()
+        .map(widgets::fmt_duration);
+    meta_text(Some(&count), tracks.len(), duration.as_deref())
+}
+
 /// The count, then the length when YouTube gave an exact one. A length carrying a "+" ("4+
 /// hours") totals only the first batch of a long list, so it is dropped rather than shown wrong.
 fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> String {
@@ -524,7 +562,7 @@ fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> Stri
     parts.join(" • ")
 }
 
-fn track_list(app: &mut App, ui: &mut egui::Ui) {
+fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
     if let Some(pl) = app
         .playlist
         .as_ref()
@@ -553,6 +591,20 @@ fn track_list(app: &mut App, ui: &mut egui::Ui) {
                 .color(app.palette.secondary),
             );
         }
+        return;
+    }
+    if grouped {
+        let mut rows = std::mem::take(&mut app.playlist_source_rows);
+        ui.push_id("smart-playlist-rows", |ui| {
+            super::source_rows::draw(
+                app,
+                ui,
+                &mut rows,
+                "smart-playlist",
+                super::source_rows::Playback::List,
+            );
+        });
+        app.playlist_source_rows = rows;
         return;
     }
     let signed_in = app.signed_in();

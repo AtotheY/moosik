@@ -1456,6 +1456,11 @@ pub struct App {
     pub(crate) searching: bool,
     pub(crate) results: SearchResults,
     pub(crate) results_generation: u64,
+    pub(crate) scoped_results_generation: u64,
+    pub(crate) search_source_rows: ui::source_rows::State,
+    pub(crate) library_source_rows: ui::source_rows::State,
+    pub(crate) playlist_source_rows: ui::source_rows::State,
+    pub(crate) artist_sources: ui::artist_sources::State,
     pub(crate) status: Option<String>,
     /// A request failed for want of a connection, and none has got through since. Drives the
     /// offline banner and the quiet probe that notices the connection coming back.
@@ -6766,6 +6771,26 @@ impl App {
         }
     }
 
+    pub(crate) fn play_source(&mut self, tracks: Vec<Track>, index: usize) {
+        let Some(track) = tracks.get(index) else {
+            return;
+        };
+        if self.playback_started
+            && self
+                .now
+                .track
+                .as_ref()
+                .is_some_and(|current| current.video_id == track.video_id)
+        {
+            if self.now.paused {
+                self.toggle_playback();
+            }
+            return;
+        }
+        let radio = Radio::pending(&tracks);
+        self.start_queue(tracks, index, radio);
+    }
+
     /// Start the queue item at `index`, remembering the track we are leaving for `Previous`.
     pub(crate) fn play_index(&mut self, index: usize) {
         // Already the loaded track: pause/resume it rather than restarting from the top — the
@@ -7223,6 +7248,144 @@ impl App {
     /// needs one, and the controls for them are hidden without it.
     pub(crate) fn signed_in(&self) -> bool {
         matches!(self.auth, crate::auth::AuthState::SignedIn { .. })
+    }
+
+    pub(crate) fn has_library_account(&self) -> bool {
+        self.signed_in() || crate::spotify::is_signed_in()
+    }
+
+    pub(crate) fn can_group_sources(&self) -> bool {
+        self.connected_providers().len() > 1
+    }
+
+    pub(crate) fn has_local_music(&self) -> bool {
+        !self.local_tracks.is_empty()
+            || !self.settings.local_folders.is_empty()
+            || self
+                .local_playlists
+                .iter()
+                .any(|playlist| !playlist.track_paths.is_empty())
+    }
+
+    pub(crate) fn connected_providers(&self) -> Vec<crate::model::Provider> {
+        use crate::model::Provider;
+        Provider::ALL
+            .into_iter()
+            .filter(|provider| match provider {
+                Provider::YouTubeMusic => self.signed_in(),
+                Provider::Spotify => crate::spotify::is_signed_in(),
+                Provider::Local => self.has_local_music(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn available_providers(&self) -> Vec<crate::model::Provider> {
+        let mut providers = self.connected_providers();
+        if providers.is_empty() {
+            providers.push(crate::model::Provider::YouTubeMusic);
+        }
+        providers
+    }
+
+    pub(crate) fn effective_home_source(&self) -> crate::settings::HomeSource {
+        use crate::{model::Provider, settings::HomeSource};
+        let available = self.available_providers();
+        let preferred = match self.settings.home_source {
+            HomeSource::Combined => None,
+            HomeSource::YouTubeMusic => Some(Provider::YouTubeMusic),
+            HomeSource::Spotify => Some(Provider::Spotify),
+            HomeSource::Local => Some(Provider::Local),
+        };
+        if preferred.is_some_and(|provider| available.contains(&provider)) {
+            return self.settings.home_source;
+        }
+        if available.len() > 1 {
+            HomeSource::Combined
+        } else {
+            match available[0] {
+                Provider::YouTubeMusic => HomeSource::YouTubeMusic,
+                Provider::Spotify => HomeSource::Spotify,
+                Provider::Local => HomeSource::Local,
+            }
+        }
+    }
+
+    fn update_search_providers(&mut self) -> bool {
+        let available = self.available_providers();
+        let sources_changed = self.backend.set_search_providers(available.clone());
+        let selected = if available.len() == 1 {
+            available.first().copied()
+        } else if sources_changed {
+            None
+        } else {
+            self.search_provider
+                .filter(|provider| available.contains(provider))
+        };
+        let selection_changed = self.search_provider != selected;
+        self.search_provider = selected;
+        let supported = selected.map_or_else(
+            || {
+                available
+                    .iter()
+                    .any(|provider| provider.search_scopes().contains(&self.search_scope))
+            },
+            |provider| provider.search_scopes().contains(&self.search_scope),
+        );
+        if !supported {
+            self.search_scope = SearchScope::All;
+        }
+        if !available.contains(&crate::model::Provider::YouTubeMusic) && self.home_filter.is_some()
+        {
+            self.home_filter = None;
+            self.clear_home();
+        }
+        sources_changed || selection_changed || !supported
+    }
+
+    fn reset_provider_browsing(&mut self) {
+        self.invalidate_browsing();
+        self.cancel_account_fetches();
+        self.clear_home();
+        self.home_filter = None;
+        self.library = crate::model::Library::default();
+        self.library_paging_errors.clear();
+        self.library_loaded = false;
+        self.library_error = None;
+        self.resync_local_playlists();
+        self.load_sidebar_playlists();
+        self.load_library();
+    }
+
+    fn invalidate_browsing(&mut self) {
+        self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
+        self.backend.set_browsing_epoch(self.browsing_epoch);
+        self.artist_sources.clear();
+        self.profile.clear();
+        self.search_source_rows = ui::source_rows::State::default();
+        self.library_source_rows = ui::source_rows::State::default();
+        self.playlist_source_rows = ui::source_rows::State::default();
+        self.update_search_providers();
+        self.refresh_search_results();
+        self.library_paging_errors.clear();
+        self.artist = None;
+        self.artist_for = None;
+        self.artist_loading = false;
+        self.artist_error = None;
+        self.artist_expand = None;
+        self.artist_expand_loading = false;
+        self.artist_expand_error = None;
+        self.album = None;
+        self.album_for = None;
+        self.album_loading = false;
+        self.album_error = None;
+        self.playlist = None;
+        self.playlist_for = None;
+        self.playlist_loading = false;
+        self.playlist_error = None;
+        self.pending_card_play = None;
+        self.pending_page_action = None;
+        self.rail_cache.clear();
+        self.album_cache.clear();
     }
 
     /// Whether the track currently loaded — playing, paused, or stopped — is one of `tracks`.
@@ -8043,7 +8206,14 @@ impl App {
             let mut playlist = build_local_playlist(&resolved, &self.local_tracks);
             playlist.editable = false;
             let play = self.pending_card_play.as_deref() == Some(id.as_str());
-            let tracks = play.then(|| playlist.tracks.items.clone());
+            self.playlist_source_rows
+                .set_tracks(&playlist.tracks.items, self.can_group_sources());
+            let tracks = play.then(|| {
+                self.playlist_source_rows
+                    .playback_queue(0, self.settings.preferred_provider, None)
+                    .map(|(tracks, _)| tracks)
+                    .unwrap_or_default()
+            });
             self.playlist = Some(playlist);
             self.playlist_original_order = None;
             self.sort_playlist(self.playlist_sort);
