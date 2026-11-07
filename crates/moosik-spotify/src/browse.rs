@@ -1,4 +1,8 @@
-use std::{future::Future, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    future::Future,
+    time::Duration,
+};
 
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -10,6 +14,10 @@ const PAGE_SIZE: u64 = 50;
 const PLAYLIST_HASH: &str = "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf";
 const PLAYLIST_MUTATION_HASH: &str =
     "b907ad6b088d5bf7680fa81198996d58398c2d55dfcdf59fcc959e0be98a418a";
+const EDITABLE_PLAYLISTS_HASH: &str =
+    "d5c4b8096437dcc2ac9528c91dfcd299e35b747cda2f8f75d28f41f49c5092ba";
+const APPLY_CURATIONS_HASH: &str =
+    "05b739a3a73091c213385233b9d3ed8a857c2ca29d2eebadb3d04ed12e288697";
 const ALBUM_HASH: &str = "0b6ce3511e1b02e4a40fa95440f992acbe85080eb308af9194322d708fc1914f";
 const ARTIST_HASH: &str = "eafb1620d783ece118e72fbfede2b0064483e029d3c1aafafa1c2de0e25a89e7";
 const LIBRARY_HASH: &str = "390c78e5b951029bad359785e69b07b536a509c581cbcd0aded5e5067f187455";
@@ -292,6 +300,81 @@ impl Transport {
         .await
     }
 
+    pub async fn add_playlist_item(&self, playlist_id: &str, track_uri: &str) -> Result<()> {
+        let playlist_uri = require_uri(playlist_id, "playlist")?;
+        let track_uri = require_uri(track_uri, "track")?;
+        let response = self
+            .query(
+                "applyCurations",
+                APPLY_CURATIONS_HASH,
+                json!({
+                    "input": {
+                        "curations": [{"contextUri": playlist_uri, "curationType": "CURATE"}],
+                        "itemUris": [track_uri]
+                    }
+                }),
+            )
+            .await?;
+        let result = &response["data"]["applyCurations"][0];
+        if result["__typename"].as_str() == Some("TrackResponseWrapper")
+            && result["data"]["__typename"].as_str() == Some("Track")
+        {
+            Ok(())
+        } else {
+            Err(Error::Invalid("playlist addition"))
+        }
+    }
+
+    pub async fn editable_playlists(
+        &self,
+        track_uri: &str,
+    ) -> Result<(Option<bool>, Vec<(PlaylistSummary, bool)>)> {
+        let track_uri = require_uri(track_uri, "track")?;
+        let mut folders = VecDeque::from([None]);
+        let mut seen = HashSet::new();
+        let mut liked = None;
+        let mut playlists = Vec::new();
+        while let Some(folder) = folders.pop_front() {
+            let mut offset = 0;
+            loop {
+                let response = self
+                    .query(
+                        "editablePlaylists",
+                        EDITABLE_PLAYLISTS_HASH,
+                        json!({
+                            "uris": [track_uri],
+                            "offset": offset,
+                            "limit": PAGE_SIZE,
+                            "textFilter": "",
+                            "folderUri": folder
+                        }),
+                    )
+                    .await?;
+                let data = response
+                    .pointer("/data/me/editablePlaylists")
+                    .ok_or(Error::Invalid("editable playlists"))?;
+                let page = parse_playlist_choices(data, offset)?;
+                liked = liked.or(page.liked);
+                folders.extend(
+                    page.folders
+                        .into_iter()
+                        .filter(|uri| seen.insert(uri.clone()))
+                        .map(Some),
+                );
+                playlists.extend(
+                    page.playlists
+                        .into_iter()
+                        .filter(|(playlist, _)| seen.insert(playlist.uri.clone())),
+                );
+                let Some(next) = page.next else {
+                    break;
+                };
+                offset = next;
+            }
+        }
+        Ok((liked, playlists))
+    }
+
     pub async fn album(&self, input: &str) -> Result<Album> {
         let uri = require_uri(input, "album")?;
         let response = self.album_query(&uri, 0).await?;
@@ -572,6 +655,59 @@ fn playlist_summary(data: &Value, uri: Option<&str>) -> Option<PlaylistSummary> 
             .find_map(|item| image(&item["sources"])),
         total: data["content"]["totalCount"].as_u64(),
     })
+}
+
+#[derive(Default)]
+struct PlaylistChoicesPage {
+    liked: Option<bool>,
+    playlists: Vec<(PlaylistSummary, bool)>,
+    folders: Vec<String>,
+    next: Option<u64>,
+}
+
+fn parse_playlist_choices(data: &Value, offset: u64) -> Result<PlaylistChoicesPage> {
+    let items = data["items"]
+        .as_array()
+        .ok_or(Error::Invalid("editable playlist items"))?;
+    let total = data["totalCount"]
+        .as_u64()
+        .filter(|total| *total <= 1_000_000)
+        .ok_or(Error::Invalid("editable playlist total"))?;
+    let next = offset
+        .checked_add(items.len() as u64)
+        .ok_or(Error::Invalid("editable playlist offset"))?;
+    if items.is_empty() && next < total {
+        return Err(Error::Invalid("empty editable playlist page"));
+    }
+    let mut page = PlaylistChoicesPage {
+        next: (next < total).then_some(next),
+        ..Default::default()
+    };
+    for item in items {
+        let data = &item["item"]["data"];
+        match data["__typename"].as_str() {
+            Some("Playlist") => {
+                if let (Some(playlist), Some(curates)) =
+                    (playlist_summary(data, None), item["curates"].as_bool())
+                {
+                    page.playlists.push((playlist, curates));
+                }
+            }
+            Some("PseudoPlaylist") if data["uri"].as_str() == Some("spotify:collection:tracks") => {
+                page.liked = item["curates"].as_bool();
+            }
+            Some("Folder") => {
+                if let Some(uri) = data["uri"]
+                    .as_str()
+                    .filter(|uri| uri.starts_with("spotify:") && uri.len() <= 512)
+                {
+                    page.folders.push(uri.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(page)
 }
 
 fn next_cursor(data: &Value, mut cursor: Cursor) -> Result<Option<String>> {
@@ -993,6 +1129,29 @@ mod tests {
                 .iter()
                 .all(|track| track.playlist_item_uid.is_none())
         );
+    }
+
+    #[test]
+    fn playlist_picker_keeps_membership_and_folders() {
+        let playlist_uri = format!("spotify:playlist:{ID}");
+        let data = json!({
+            "totalCount": 7,
+            "items": [
+                {"item": {"data": {"__typename": "Playlist", "uri": playlist_uri, "name": "My list"}}, "curates": true},
+                {"item": {"data": {"__typename": "PseudoPlaylist", "uri": "spotify:collection:tracks"}}, "curates": false},
+                {"item": {"data": {"__typename": "PseudoPlaylist", "uri": "spotify:collection:your-episodes"}}, "curates": true},
+                {"item": {"data": {"__typename": "Folder", "uri": "spotify:user:example:folder:123"}}},
+                {"item": {"data": {"__typename": "Playlist", "uri": playlist_uri, "name": "Unknown membership"}}}
+            ]
+        });
+        let page = parse_playlist_choices(&data, 1).unwrap();
+        assert_eq!(page.liked, Some(false));
+        assert_eq!(page.playlists.len(), 1);
+        assert_eq!(page.playlists[0].0.uri, playlist_uri);
+        assert!(page.playlists[0].1);
+        assert_eq!(page.folders, ["spotify:user:example:folder:123"]);
+        assert_eq!(page.next, Some(6));
+        assert!(parse_playlist_choices(&json!({"totalCount": 2, "items": []}), 1).is_err());
     }
 
     #[test]

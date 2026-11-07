@@ -5,7 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use moosik_spotify::{CatalogItem, CatalogTrack, TrackMetadata, Transport, WebSession};
+use moosik_spotify::{
+    CatalogItem, CatalogTrack, PlaylistSummary, TrackMetadata, Transport, WebSession,
+};
 use tokio::sync::Mutex;
 
 use crate::model::{
@@ -282,6 +284,30 @@ pub async fn remove_playlist_item(playlist_id: &str, uid: &str) -> Result<()> {
         .await?)
 }
 
+pub async fn add_playlist_item(playlist_id: &str, track_uri: &str) -> Result<()> {
+    Ok(transport()
+        .await?
+        .add_playlist_item(playlist_id, track_uri)
+        .await?)
+}
+
+#[derive(Debug)]
+pub struct EditablePlaylists {
+    pub liked: Option<bool>,
+    pub playlists: Vec<(PlaylistRef, bool)>,
+}
+
+pub async fn editable_playlists(track_uri: &str) -> Result<EditablePlaylists> {
+    let (liked, playlists) = transport().await?.editable_playlists(track_uri).await?;
+    Ok(EditablePlaylists {
+        liked,
+        playlists: playlists
+            .into_iter()
+            .map(|(playlist, curates)| (playlist_ref(playlist, true), curates))
+            .collect(),
+    })
+}
+
 pub async fn album(id: &str) -> Result<Album> {
     let album = transport().await?.album(id).await?;
     let summary = album.summary;
@@ -554,16 +580,20 @@ fn entry(item: CatalogItem) -> Entry {
             kind: album.kind,
             thumbnail: album.image.map(Into::into),
         }),
-        CatalogItem::Playlist(playlist) => Entry::Playlist(PlaylistRef {
-            id: playlist.uri,
-            title: playlist.title,
-            author: playlist.author,
-            author_id: None,
-            track_count: playlist.total.map(track_count),
-            thumbnail: playlist.image.map(Into::into),
-            editable: false,
-            source: PlaylistSource::Spotify,
-        }),
+        CatalogItem::Playlist(playlist) => Entry::Playlist(playlist_ref(playlist, false)),
+    }
+}
+
+fn playlist_ref(playlist: PlaylistSummary, editable: bool) -> PlaylistRef {
+    PlaylistRef {
+        id: playlist.uri,
+        title: playlist.title,
+        author: playlist.author,
+        author_id: None,
+        track_count: playlist.total.map(track_count),
+        thumbnail: playlist.image.map(Into::into),
+        editable,
+        source: PlaylistSource::Spotify,
     }
 }
 

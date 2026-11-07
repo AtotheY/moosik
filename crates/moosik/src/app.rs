@@ -1651,6 +1651,7 @@ pub struct App {
     playlist_for: Option<String>,
     playlist_revision: u64,
     spotify_playlist_remove_pending: bool,
+    pub(crate) spotify_playlist_picker: ui::player_bar::SpotifyPlaylistPicker,
     /// How the open playlist's track list is currently shown — client-side and session-only,
     /// reset whenever a different playlist opens (see [`PlaylistSort`]'s own doc comment for
     /// why this can't be a server order the way [`LibrarySort`] is).
@@ -2275,6 +2276,7 @@ impl App {
             playlist_for: None,
             playlist_revision: 0,
             spotify_playlist_remove_pending: false,
+            spotify_playlist_picker: ui::player_bar::SpotifyPlaylistPicker::default(),
             playlist_sort: PlaylistSort::default(),
             playlist_sort_pending: false,
             playlist_original_order: None,
@@ -4568,6 +4570,24 @@ impl App {
 
     fn playlist_is_for(&self, id: &str) -> bool {
         self.playlist_for.as_deref() == Some(id)
+    }
+
+    pub(crate) fn playing_spotify_playlist_item(&self) -> Option<(&str, &str)> {
+        let track = self.now.track.as_ref()?;
+        let uid = track.set_video_id.as_deref()?;
+        let playlist = self.playlist.as_ref()?;
+        if !playlist.id.starts_with("spotify:playlist:")
+            || !matches!(self.history.current(), Route::Playlist(id) if id == &playlist.id)
+        {
+            return None;
+        }
+        playlist
+            .tracks
+            .iter()
+            .any(|item| {
+                item.video_id == track.video_id && item.set_video_id.as_deref() == Some(uid)
+            })
+            .then_some((playlist.id.as_str(), uid))
     }
 
     /// Clear whatever latched the current route's failure and fetch it again. This is what the
@@ -6976,6 +6996,9 @@ impl App {
                         &error,
                     ));
                 }
+                Event::SpotifyEditablePlaylists { video_id, result } => {
+                    self.spotify_playlist_picker.loaded(&video_id, result);
+                }
                 Event::PageLibraryToggled { in_library, .. } => {
                     tracing::debug!(in_library, "page library toggle confirmed");
                     // Already painted optimistically; this is the confirmation. The rail was
@@ -7067,7 +7090,16 @@ impl App {
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "saved to playlist");
                     self.toast("Saved to playlist");
-                    self.note_saved_to_playlist(&playlist_id, &video_id);
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.spotify_playlist_picker
+                            .note_saved(&video_id, &playlist_id);
+                        if self.playlist_is_for(&playlist_id) {
+                            self.playlist_for = None;
+                            self.load_playlist(playlist_id);
+                        }
+                    } else {
+                        self.note_saved_to_playlist(&playlist_id, &video_id);
+                    }
                 }
                 Event::PlaylistDuplicate {
                     playlist_id,
@@ -7089,6 +7121,13 @@ impl App {
                     error,
                 } => {
                     tracing::warn!(%playlist_id, %video_id, %error, "save to playlist refused");
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.toast_error(&failure_text(
+                            "Could not save to Spotify playlist",
+                            &error,
+                        ));
+                        continue;
+                    }
                     self.bump_playlist_counts(&playlist_id, -1);
                     // YouTube says why it refused an edit, in the account's language; a request
                     // that failed outright gets the reason the error text gives, if any.
@@ -7107,6 +7146,7 @@ impl App {
                     tracing::debug!(%playlist_id, %video_id, "removed from playlist");
                     if playlist_id.starts_with("spotify:playlist:") {
                         self.spotify_playlist_remove_pending = false;
+                        self.spotify_playlist_picker.invalidate(&video_id);
                         self.bump_playlist_counts(&playlist_id, -1);
                         if self.playlist_is_for(&playlist_id) {
                             self.playlist_for = None;
@@ -7892,6 +7932,7 @@ impl App {
         self.library_source_retry = None;
         self.liked_music = ui::liked_music::State::default();
         self.spotify_playlist_remove_pending = false;
+        self.spotify_playlist_picker = ui::player_bar::SpotifyPlaylistPicker::default();
         self.profile.clear();
         self.search_source_rows = ui::source_rows::State::default();
         self.library_source_rows = ui::source_rows::State::default();
@@ -8056,6 +8097,18 @@ impl App {
                 video_id,
             } => {
                 if crate::model::is_spotify_id(&video_id) {
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        if crate::spotify::is_signed_in()
+                            && self
+                                .spotify_playlist_picker
+                                .can_add(&video_id, &playlist_id)
+                        {
+                            self.backend.add_spotify_to_playlist(playlist_id, video_id);
+                        } else {
+                            self.toast_error("This Spotify playlist can’t be edited");
+                        }
+                        return;
+                    }
                     if playlist_id.starts_with("private:") {
                         let mut found = None;
                         self.for_each_track(|track| {

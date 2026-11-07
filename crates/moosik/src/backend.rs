@@ -469,6 +469,10 @@ pub enum Event {
         error: String,
     },
     SpotifyTrackSaved(Result<Track, String>),
+    SpotifyEditablePlaylists {
+        video_id: String,
+        result: Result<crate::spotify::EditablePlaylists, String>,
+    },
     /// A page's (album or playlist header) library toggle landed. `album` picks the page to
     /// repaint; `in_library` is the new state.
     PageLibraryToggled {
@@ -697,6 +701,9 @@ impl Event {
             | Event::RatingFailed { error, .. }
             | Event::LibraryToggleFailed { error, .. }
             | Event::SpotifyTrackSaved(Err(error))
+            | Event::SpotifyEditablePlaylists {
+                result: Err(error), ..
+            }
             | Event::PageLibraryFailed { error, .. }
             | Event::PlaylistEditFailed { error, .. }
             | Event::PlaylistDeleteFailed { error, .. }
@@ -3003,6 +3010,41 @@ impl Backend {
             }
             let event =
                 Event::SpotifyTrackSaved(result.map(|()| track).map_err(|e| format!("{e:#}")));
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
+    pub fn fetch_spotify_editable_playlists(&self, video_id: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let result = crate::spotify::editable_playlists(&video_id)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Self::emit_browse(
+                &tx,
+                &ctx,
+                epoch,
+                Event::SpotifyEditablePlaylists { video_id, result },
+            );
+        });
+    }
+
+    pub fn add_spotify_to_playlist(&self, playlist_id: String, video_id: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let event = match crate::spotify::add_playlist_item(&playlist_id, &video_id).await {
+                Ok(()) => Event::PlaylistSaved {
+                    playlist_id,
+                    video_id,
+                },
+                Err(e) => Event::PlaylistSaveFailed {
+                    playlist_id,
+                    video_id,
+                    error: format!("{e:#}"),
+                },
+            };
             Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }

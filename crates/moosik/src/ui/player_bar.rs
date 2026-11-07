@@ -9,6 +9,181 @@ use crate::theme;
 use crate::ui::RowAction;
 use crate::widgets;
 
+#[derive(Default)]
+pub(crate) struct SpotifyPlaylistPicker {
+    track_id: Option<String>,
+    choices: Option<Result<crate::spotify::EditablePlaylists, String>>,
+    loading: bool,
+    query: String,
+}
+
+impl SpotifyPlaylistPicker {
+    pub(crate) fn can_add(&self, track_id: &str, playlist_id: &str) -> bool {
+        self.choices_for(track_id).is_some_and(|choices| {
+            choices
+                .playlists
+                .iter()
+                .any(|(playlist, saved)| playlist.id == playlist_id && !saved)
+        })
+    }
+
+    fn choices_for(&self, track_id: &str) -> Option<&crate::spotify::EditablePlaylists> {
+        if self.track_id.as_deref() != Some(track_id) {
+            return None;
+        }
+        self.choices.as_ref()?.as_ref().ok()
+    }
+
+    pub(crate) fn loaded(
+        &mut self,
+        track_id: &str,
+        result: Result<crate::spotify::EditablePlaylists, String>,
+    ) {
+        if self.track_id.as_deref() == Some(track_id) {
+            self.loading = false;
+            self.choices = Some(result);
+        }
+    }
+
+    pub(crate) fn note_saved(&mut self, track_id: &str, playlist_id: &str) {
+        if self.track_id.as_deref() == Some(track_id)
+            && let Some(Ok(choices)) = &mut self.choices
+            && let Some((_, member)) = choices
+                .playlists
+                .iter_mut()
+                .find(|(playlist, _)| playlist.id == playlist_id)
+        {
+            *member = true;
+        }
+    }
+
+    pub(crate) fn invalidate(&mut self, track_id: &str) {
+        if self.track_id.as_deref() == Some(track_id) {
+            *self = Self::default();
+        }
+    }
+
+    fn contains_track(&self, track: &crate::model::Track) -> bool {
+        track.in_library
+            || self.choices_for(&track.video_id).is_some_and(|choices| {
+                choices.liked == Some(true) || choices.playlists.iter().any(|(_, saved)| *saved)
+            })
+    }
+}
+
+fn spotify_playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
+    let Some(track) = app.now.track.as_ref() else {
+        return;
+    };
+    let picker = &mut app.spotify_playlist_picker;
+    if button.clicked() {
+        picker.query.clear();
+        if picker.track_id.as_deref() != Some(track.video_id.as_str()) {
+            picker.track_id = Some(track.video_id.clone());
+            picker.choices = None;
+            picker.loading = false;
+        }
+        if !picker.loading && picker.choices.as_ref().is_none_or(Result::is_err) {
+            picker.loading = true;
+            app.backend
+                .fetch_spotify_editable_playlists(track.video_id.clone());
+        }
+    }
+    let palette = app.palette;
+    let choice = egui::Popup::menu(button)
+        .align(egui::RectAlign::TOP_START)
+        .gap(6.0)
+        .frame(widgets::menu_frame(ui, &palette))
+        .width(260.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.label(egui::RichText::new("Add to playlist").font(theme::semibold(13.0)));
+            ui.add(
+                egui::TextEdit::singleline(&mut picker.query)
+                    .hint_text("Find a playlist")
+                    .background_color(palette.surface_active)
+                    .desired_width(234.0),
+            );
+            let query = picker.query.trim().to_lowercase();
+            let mut action = None;
+            let liked = track.in_library
+                || picker
+                    .choices_for(&track.video_id)
+                    .is_some_and(|choices| choices.liked == Some(true));
+            if "liked songs".contains(&query) {
+                let save = ui
+                    .add_enabled_ui(!liked, |ui| {
+                        widgets::menu_item(
+                            ui,
+                            &palette,
+                            if liked { Icon::Check } else { Icon::Heart },
+                            "Liked Songs",
+                            None,
+                        )
+                    })
+                    .inner;
+                if save.clicked() {
+                    action = Some(RowAction::SaveSpotifyTrack(track.clone()));
+                }
+            }
+            match picker.choices_for(&track.video_id) {
+                Some(choices) if !choices.playlists.is_empty() => {
+                    widgets::menu_divider(ui, &palette);
+                    egui::ScrollArea::vertical()
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for (playlist, saved) in &choices.playlists {
+                                if !query.is_empty()
+                                    && !playlist.title.to_lowercase().contains(&query)
+                                {
+                                    continue;
+                                }
+                                let add = ui
+                                    .add_enabled_ui(!saved, |ui| {
+                                        widgets::menu_item(
+                                            ui,
+                                            &palette,
+                                            if *saved { Icon::Check } else { Icon::ListPlus },
+                                            &playlist.title,
+                                            None,
+                                        )
+                                    })
+                                    .inner;
+                                if add.clicked() {
+                                    action = Some(RowAction::SaveToPlaylist {
+                                        playlist_id: playlist.id.clone(),
+                                        video_id: track.video_id.clone(),
+                                    });
+                                }
+                            }
+                        });
+                }
+                Some(_) => {
+                    ui.label("No editable Spotify playlists");
+                }
+                _ if picker.loading => {
+                    ui.label("Loading playlists…");
+                }
+                _ => {
+                    ui.label("Could not load playlists");
+                    if widgets::menu_item(ui, &palette, Icon::RefreshCw, "Retry", None).clicked() {
+                        picker.loading = true;
+                        app.backend
+                            .fetch_spotify_editable_playlists(track.video_id.clone());
+                    }
+                }
+            }
+            if action.is_some() {
+                ui.close();
+            }
+            action
+        })
+        .and_then(|result| result.inner);
+    if let Some(action) = choice {
+        app.row_action(action);
+    }
+}
+
 /// The player bar's cover is drawn 56pt across and is always on screen.
 const BAR_ART_PT: f32 = 56.0;
 /// How wide the title and credits field is allowed to grow before the rating column stops
@@ -135,7 +310,20 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
             .track
             .as_ref()
             .is_some_and(|track| track.provider() == crate::model::Provider::YouTubeMusic);
-    let thumbs_w = if ratable { 72.0 } else { 0.0 };
+    let spotify_save = app
+        .now
+        .track
+        .as_ref()
+        .is_some_and(|track| track.is_spotify())
+        && crate::spotify::is_signed_in();
+    let spotify_remove = spotify_save && app.playing_spotify_playlist_item().is_some();
+    let thumbs_w = if ratable || spotify_remove {
+        72.0
+    } else if spotify_save {
+        36.0
+    } else {
+        0.0
+    };
     // The seek bar is wider than the transport, and its elapsed-time label hangs left of
     // the bar at subtitle height — the title has to clear the label, not just the buttons,
     // or long titles sit underneath it. The total stands in for the elapsed (at least as
@@ -355,7 +543,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // Borrow the track to read `like`; the whole `Track` was being deep-cloned every frame
     // just for this. `video_id` is only cloned on an actual click.
     let mut rate: Option<RowAction> = None;
-    if ratable && let Some(track) = app.now.track.as_ref() {
+    let mut spotify_button = None;
+    if (ratable || spotify_save)
+        && let Some(track) = app.now.track.as_ref()
+    {
         let thumbs = Rect::from_min_size(
             egui::pos2(thumbs_x, rect.center().y - 16.0),
             vec2(thumbs_w, 32.0),
@@ -365,29 +556,53 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
                 .max_rect(thumbs)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        for (up, pressed) in [(true, LikeStatus::Like), (false, LikeStatus::Dislike)] {
-            let (hit, _) = tui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
-            if widgets::rate_button(
-                &mut tui,
-                &p,
-                hit,
-                egui::Id::new(("ytm-bar-thumb", up)),
-                up,
-                track.like == pressed,
-                true,
-            )
-            .on_hover_text(crate::ui::tips::rate(up, track.like == pressed))
-            .clicked()
+        if spotify_save {
+            tui.spacing_mut().item_spacing.x = 4.0;
+            if spotify_remove
+                && widgets::spotify_remove_button(&mut tui, &p).clicked()
+                && let Some((playlist_id, uid)) = app.playing_spotify_playlist_item()
             {
-                rate = Some(RowAction::Rate {
+                rate = Some(RowAction::RemoveFromPlaylist {
+                    playlist_id: playlist_id.to_owned(),
                     video_id: track.video_id.clone(),
-                    status: track.like.toggled(pressed),
+                    set_video_id: uid.to_owned(),
                 });
+            }
+            spotify_button = Some(
+                tui.push_id(&track.video_id, |ui| {
+                    let saved = app.spotify_playlist_picker.contains_track(track);
+                    widgets::spotify_library_button(ui, &p, saved, true)
+                })
+                .inner,
+            );
+        } else {
+            for (up, pressed) in [(true, LikeStatus::Like), (false, LikeStatus::Dislike)] {
+                let (hit, _) = tui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+                if widgets::rate_button(
+                    &mut tui,
+                    &p,
+                    hit,
+                    egui::Id::new(("ytm-bar-thumb", up)),
+                    up,
+                    track.like == pressed,
+                    true,
+                )
+                .on_hover_text(crate::ui::tips::rate(up, track.like == pressed))
+                .clicked()
+                {
+                    rate = Some(RowAction::Rate {
+                        video_id: track.video_id.clone(),
+                        status: track.like.toggled(pressed),
+                    });
+                }
             }
         }
     }
     if let Some(action) = rate {
         app.row_action(action);
+    }
+    if let Some(button) = spotify_button {
+        spotify_playlist_popup(app, ui, &button);
     }
 
     // Transport, centred on the window so it does not shift with the track title: shuffle and

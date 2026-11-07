@@ -2486,7 +2486,15 @@ pub(crate) fn track_row_with_slot<'a>(
         quiet_like,
         add_to,
     } = row;
-    let show_rating = show_rating && menu.as_ref().is_none_or(|menu| !menu.track.is_spotify());
+    let spotify_row = menu.as_ref().filter(|menu| menu.track.is_spotify());
+    let spotify_actions =
+        spotify_row.filter(|_| show_rating && add_to.is_none() && crate::spotify::is_signed_in());
+    let spotify_removal = spotify_actions.and_then(|menu| {
+        menu.playlist_id
+            .filter(|id| id.starts_with("spotify:playlist:"))
+            .zip(menu.track.set_video_id.as_deref())
+    });
+    let show_rating = show_rating && spotify_row.is_none();
     let mut link = None;
     // `click_and_drag`, not `click`: a row inside the open playlist's own editable track list
     // can be dragged to reorder it (see `spec_rows`, the only place that ever reads a drag
@@ -2566,8 +2574,19 @@ pub(crate) fn track_row_with_slot<'a>(
     // and a readable title in a 300pt rail.
     // Wide enough for the pair: two 30pt buttons at offsets 50/18 span 62pt, and anything
     // narrower paints the Like button over the title's tail.
+    let spotify_action_w = if spotify_actions.is_some() {
+        if spotify_removal.is_some() {
+            72.0
+        } else {
+            36.0
+        }
+    } else {
+        0.0
+    };
     let thumb_w = if add_to.is_some() {
         ADD_W
+    } else if spotify_action_w > 0.0 {
+        spotify_action_w
     } else if show_rating && !corner_thumbs {
         68.0
     } else {
@@ -2616,18 +2635,27 @@ pub(crate) fn track_row_with_slot<'a>(
             )
         });
     let custom_slot = subtitle_slot.or(trailing);
-    let on_subtitle_slot = subtitle_slot.is_some_and(|slot| {
-        ui.input(|input| {
-            [input.pointer.interact_pos(), input.pointer.press_origin()]
-                .into_iter()
-                .flatten()
-                .any(|pos| slot.contains(pos))
-        })
+    let spotify_slot = spotify_actions.map(|_| {
+        Rect::from_min_size(
+            egui::pos2(sub_right, rect.center().y - 15.0),
+            vec2(spotify_action_w, 30.0),
+        )
     });
+    let on_child_slot = [subtitle_slot, spotify_slot]
+        .into_iter()
+        .flatten()
+        .any(|slot| {
+            ui.input(|input| {
+                [input.pointer.interact_pos(), input.pointer.press_origin()]
+                    .into_iter()
+                    .flatten()
+                    .any(|pos| slot.contains(pos))
+            })
+        });
     let response = ui.interact(
         rect,
         row_id,
-        if on_subtitle_slot {
+        if on_child_slot {
             Sense::hover()
         } else {
             Sense::click_and_drag()
@@ -2665,14 +2693,14 @@ pub(crate) fn track_row_with_slot<'a>(
             && response
                 .interact_pointer_pos()
                 .is_some_and(|p| more_rect.contains(p)));
-    let queue_suppress = !on_subtitle_slot
+    let queue_suppress = !on_child_slot
         && menu
             .as_ref()
             .and_then(|m| m.queue_index)
             .is_some_and(|index| {
                 crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
             });
-    let song_suppress = !on_subtitle_slot
+    let song_suppress = !on_child_slot
         && menu
             .as_ref()
             .filter(|m| m.queue_index.is_none())
@@ -2689,7 +2717,7 @@ pub(crate) fn track_row_with_slot<'a>(
     if song_suppress {
         link = None;
     }
-    let activate = if on_more || on_subtitle_slot || queue_suppress || song_suppress {
+    let activate = if on_more || on_child_slot || queue_suppress || song_suppress {
         false
     } else if (!hide_art
         && on_cover(
@@ -3001,8 +3029,33 @@ pub(crate) fn track_row_with_slot<'a>(
     if song_suppress {
         link = None;
     }
-    let mut action =
-        menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m));
+    let mut action = None;
+    if let (Some(menu), Some(slot)) = (spotify_actions, spotify_slot)
+        && ui.is_rect_visible(slot)
+    {
+        let mut actions = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(row_id.with("spotify-actions"))
+                .max_rect(slot)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        actions.spacing_mut().item_spacing.x = 4.0;
+        if spotify_library_button(&mut actions, palette, menu.track.in_library, false).clicked() {
+            action = Some(super::ui::RowAction::SaveSpotifyTrack(menu.track.clone()));
+        }
+        if let Some((playlist_id, uid)) = spotify_removal
+            && spotify_remove_button(&mut actions, palette).clicked()
+        {
+            action = Some(super::ui::RowAction::RemoveFromPlaylist {
+                playlist_id: playlist_id.to_owned(),
+                video_id: menu.track.video_id.clone(),
+                set_video_id: uid.to_owned(),
+            });
+        }
+    }
+    let mut action = action.or_else(|| {
+        menu.and_then(|m| row_menu_with_button(ui, palette, &response, more_response.as_ref(), m))
+    });
     // Rating thumbs are interacted whenever the row is visible — never gated on drawn — for
     // the reason documented on `rate_thumbs`. A click is only reachable where they are
     // visible anyway, since their zone sits inside the row.
@@ -3066,6 +3119,79 @@ pub(crate) fn track_row_with_slot<'a>(
 
 /// The room a row's + button takes, left of the duration.
 const ADD_W: f32 = 40.0;
+
+pub(crate) fn spotify_library_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    saved: bool,
+    opens_picker: bool,
+) -> egui::Response {
+    let label = if opens_picker {
+        "Add to playlist"
+    } else if saved {
+        "In Spotify Liked Songs"
+    } else {
+        "Add to Spotify Liked Songs"
+    };
+    spotify_item_button(
+        ui,
+        palette,
+        if saved { Icon::Check } else { Icon::Plus },
+        label,
+        saved,
+        opens_picker || !saved,
+    )
+}
+
+pub(crate) fn spotify_remove_button(ui: &mut Ui, palette: &Palette) -> egui::Response {
+    spotify_item_button(
+        ui,
+        palette,
+        Icon::Minus,
+        "Remove from playlist",
+        false,
+        true,
+    )
+}
+
+fn spotify_item_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Icon,
+    label: &str,
+    saved: bool,
+    clickable: bool,
+) -> egui::Response {
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 30.0), sense);
+    if ui.is_rect_visible(rect) {
+        let center = rect.center() + press_offset(&response);
+        let color = mix(palette.secondary, palette.text, lit(ui, &response));
+        let fg = if saved {
+            ui.painter().circle_filled(center, 8.5, palette.accent);
+            palette.on_accent
+        } else {
+            ui.painter()
+                .circle_stroke(center, 8.0, egui::Stroke::new(1.4, color));
+            color
+        };
+        icon.image(fg, 12.0)
+            .paint_at(ui, Rect::from_center_size(center, vec2(12.0, 12.0)));
+        if response.has_focus() {
+            ui.painter()
+                .circle_stroke(center, 12.0, egui::Stroke::new(1.0, palette.accent));
+        }
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, clickable, label));
+    if clickable && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response.on_hover_text(label)
+}
 
 /// A row's round + button: always drawn, since adding is the whole point of the row it sits on.
 fn add_button(ui: &mut Ui, palette: &Palette, rect: Rect, id: egui::Id) -> egui::Response {
