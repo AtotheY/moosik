@@ -23,6 +23,8 @@ pub mod player_bar;
 pub mod playlist;
 pub(crate) mod queue_edit;
 pub mod releases;
+#[cfg(target_os = "macos")]
+pub(crate) mod scroll_gesture;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
@@ -758,6 +760,75 @@ fn grid_index(start: usize, col: usize, row: usize, rows: usize) -> usize {
     start + col * rows + row
 }
 
+#[derive(Clone, Copy, Default)]
+struct ShelfSwipe {
+    gesture: Option<u64>,
+    last_motion: f64,
+    distance: f32,
+    paged: bool,
+}
+
+impl ShelfSwipe {
+    /// A continuous stream includes the trackpad's momentum after the fingers lift.
+    fn page_step(&mut self, dx: f32, time: f64, gesture: Option<u64>, started: bool) -> isize {
+        if self.gesture != gesture
+            || (gesture.is_none() && (started || time - self.last_motion > 0.18))
+        {
+            *self = Self {
+                gesture,
+                ..Default::default()
+            };
+        }
+        self.last_motion = time;
+        self.distance += dx;
+        if !self.paged && self.distance.abs() >= 64.0 {
+            self.paged = true;
+            // egui reports the direction the content moves.
+            return if self.distance < 0.0 { 1 } else { -1 };
+        }
+        0
+    }
+}
+
+fn shelf_swipe_step(ui: &egui::Ui, id: egui::Id, shelf: egui::Rect) -> isize {
+    if !ui.is_enabled() || !ui.rect_contains_pointer(shelf) || ui.ctx().dragged_id().is_some() {
+        return 0;
+    }
+    let (delta, time, started) = ui.input(|i| {
+        let started = i.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::MouseWheel {
+                    phase: egui::TouchPhase::Start,
+                    ..
+                }
+            )
+        });
+        (i.smooth_scroll_delta, i.time, started)
+    });
+    let horizontal = delta.x.abs() > 1.5 * delta.y.abs();
+    if !horizontal && !started {
+        return 0;
+    }
+    if horizontal {
+        // Claim the sideways gesture before the enclosing vertical scroll area handles it.
+        ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+    }
+    ui.data_mut(|d| {
+        #[cfg(target_os = "macos")]
+        let gesture = d.get_temp::<u64>(scroll_gesture::id());
+        #[cfg(not(target_os = "macos"))]
+        let gesture = None;
+        d.get_temp_mut_or_default::<ShelfSwipe>(id.with("swipe"))
+            .page_step(
+                if horizontal { delta.x } else { 0.0 },
+                time,
+                gesture,
+                started,
+            )
+    })
+}
+
 /// A short, bounded track list — Top Songs — capped to 5 rows with ‹ › arrows to page through
 /// the rest, rather than one open-ended wrap: at 3 columns the full 15 already
 /// fits in those 5 rows with nothing left to page through; the arrows only earn their keep on a
@@ -792,6 +863,7 @@ fn spec_pages<'d>(
         .min(pages - 1);
 
     ui.add_space(20.0);
+    let shelf_top = ui.cursor().top();
     if let Some(line) = strapline {
         shelf_strapline(ui, palette, line);
     }
@@ -837,7 +909,6 @@ fn spec_pages<'d>(
                 });
             });
         });
-        ui.ctx().data_mut(|d| d.insert_temp(id, page));
     } else {
         ui.label(heading_label());
     }
@@ -881,6 +952,19 @@ fn spec_pages<'d>(
             ui.add_space(theme::ROW_HEIGHT);
         }
     });
+    if pages > 1 {
+        let shelf = egui::Rect::from_x_y_ranges(
+            ui.available_rect_before_wrap().x_range(),
+            shelf_top..=ui.cursor().top(),
+        );
+        let step = shelf_swipe_step(ui, id, shelf);
+        let next = page.saturating_add_signed(step).min(pages - 1);
+        if next != page {
+            page = next;
+            ui.ctx().request_repaint();
+        }
+        ui.data_mut(|d| d.insert_temp(id, page));
+    }
     stats.rows(end - start, count);
     ListOutcome {
         click: clicked,
@@ -3450,6 +3534,67 @@ mod tests {
         assert_eq!(song_shelf_columns(1000.0), 2);
         assert_eq!(song_shelf_columns(1100.0), 3);
         assert_eq!(song_shelf_columns(2400.0), 3);
+    }
+
+    #[test]
+    fn shelf_swipe_pages_once_through_momentum() {
+        let mut swipe = ShelfSwipe::default();
+        assert_eq!(swipe.page_step(-32.0, 0.0, Some(1), true), 0);
+        assert_eq!(swipe.page_step(-32.0, 0.03, Some(1), false), 1);
+        // winit reports another Start when AppKit begins momentum, even after a pause.
+        assert_eq!(swipe.page_step(-90.0, 0.25, Some(1), true), 0);
+        assert_eq!(swipe.page_step(-80.0, 0.27, Some(2), true), 1);
+        assert_eq!(swipe.page_step(80.0, 0.29, Some(3), true), -1);
+
+        // A plain wheel has no phase or gesture ID. Separate bursts still page.
+        assert_eq!(swipe.page_step(80.0, 1.5, None, false), -1);
+        assert_eq!(swipe.page_step(80.0, 1.52, None, false), 0);
+        assert_eq!(swipe.page_step(-30.0, 2.0, None, false), 0);
+        assert_eq!(swipe.page_step(-40.0, 2.5, None, false), 0);
+    }
+
+    #[test]
+    fn horizontal_wheel_pages_only_the_hovered_shelf() {
+        let ctx = egui::Context::default();
+        let shelf = egui::Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(500.0, 220.0));
+        let frame = |time, pos, delta, started| {
+            let wheel = |phase, delta| egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta,
+                phase,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut events = vec![egui::Event::PointerMoved(pos)];
+            if started {
+                events.push(wheel(egui::TouchPhase::Start, egui::Vec2::ZERO));
+            }
+            events.push(wheel(egui::TouchPhase::Move, delta));
+            let input = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut result = (0, egui::Vec2::ZERO);
+            let mut output = ctx.run_ui(input, |ui| {
+                let step = shelf_swipe_step(ui, ui.id(), shelf);
+                result = (step, ui.input(|i| i.smooth_scroll_delta));
+            });
+            output.textures_delta.clear();
+            result
+        };
+        let inside = shelf.center();
+        let outside = shelf.max + egui::vec2(10.0, 10.0);
+        frame(0.0, inside, egui::Vec2::ZERO, false);
+        let left = egui::vec2(-80.0, 3.0);
+        assert_eq!(frame(1.0, outside, left, true).0, 0);
+        assert_eq!(frame(2.0, inside, left, true), (1, egui::Vec2::ZERO));
+        assert_eq!(frame(2.02, inside, left, false).0, 0);
+        assert_eq!(frame(2.04, inside, egui::Vec2::ZERO, true).0, 0);
+        assert_eq!(frame(2.06, inside, left, false).0, 1);
+        assert_eq!(frame(2.08, inside, -left, true).0, -1);
+        let (step, remaining) = frame(4.0, inside, egui::vec2(5.0, -80.0), true);
+        assert_eq!(step, 0);
+        assert!(remaining.y < 0.0);
     }
 
     /// Carousel paging never leaves its rails: a step past either end clamps, and a view

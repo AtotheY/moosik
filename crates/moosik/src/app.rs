@@ -1394,6 +1394,8 @@ fn hide_command_for(wayland: bool, hide: bool) -> egui::ViewportCommand {
 }
 
 pub struct App {
+    #[cfg(target_os = "macos")]
+    _scroll_monitor: Option<crate::ui::scroll_gesture::Monitor>,
     pub(crate) palette: Palette,
     /// The themes folder as last read. Settings lists these; `settings.custom_theme` picks one.
     pub(crate) custom_themes: theme::custom::Themes,
@@ -2085,6 +2087,8 @@ impl App {
         // fetch fires immediately, and a dead cookie fails it into the empty rail — the state
         // that would have shown anyway.
         let mut app = Self {
+            #[cfg(target_os = "macos")]
+            _scroll_monitor: crate::ui::scroll_gesture::Monitor::install(cc.egui_ctx.clone()),
             palette,
             custom_themes,
             theme_watch,
