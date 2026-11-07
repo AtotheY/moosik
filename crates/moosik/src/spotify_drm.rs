@@ -24,6 +24,9 @@ use tokio::{
 
 const HTML: &str = include_str!("spotify-drm-player.html");
 const LIMIT: u64 = 64 * 1024 * 1024;
+const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const RENDERER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAYBACK_READY_GRACE: Duration = Duration::from_secs(45);
 const CACHE_HEADER: &[u8; 8] = b"MOOSIKC1";
 static CACHE_ENABLED: AtomicBool = AtomicBool::new(true);
 static CACHE_LIMIT: AtomicU64 = AtomicU64::new(512 * 1024 * 1024);
@@ -682,8 +685,11 @@ async fn start(
         );
         *resources = Some(created);
     }
-    let deadline = Instant::now() + Duration::from_secs(45);
     let renderer_started = Instant::now();
+    let deadline = renderer_started
+        + MEDIA_DOWNLOAD_TIMEOUT
+        + RENDERER_RESPONSE_TIMEOUT
+        + PLAYBACK_READY_GRACE;
     loop {
         if let Some(error) = handle.last_error() {
             bail!(error);
@@ -791,9 +797,8 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             .await
         }
         ("GET", "media") => {
-            let bytes = broker
-                .media
-                .get_or_try_init(|| async {
+            let bytes = tokio::time::timeout(MEDIA_DOWNLOAD_TIMEOUT, async {
+                let download = broker.media.get_or_try_init(|| async {
                     let started = Instant::now();
                     let file_id = broker.track.file_id.clone();
                     if let Ok(Some(bytes)) =
@@ -857,11 +862,13 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
                         "Spotify media ready"
                     );
                     Result::<Arc<Vec<u8>>>::Ok(bytes)
-                })
-                .await;
+                });
+                download.await
+            })
+            .await;
             match bytes {
-                Ok(bytes) => respond(&mut socket, 200, "audio/mp4", bytes).await,
-                Err(_) => respond(&mut socket, 502, "text/plain", b"").await,
+                Ok(Ok(bytes)) => respond(&mut socket, 200, "audio/mp4", bytes).await,
+                Ok(Err(_)) | Err(_) => respond(&mut socket, 502, "text/plain", b"").await,
             }
         }
         ("POST", "license") => {
@@ -981,7 +988,7 @@ async fn respond(socket: &mut TcpStream, status: u16, mime: &str, body: &[u8]) -
         "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; media-src blob:; base-uri 'none'; frame-ancestors 'none'\r\n\r\n",
         body.len()
     );
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(RENDERER_RESPONSE_TIMEOUT, async {
         socket.write_all(head.as_bytes()).await?;
         socket.write_all(body).await
     })
