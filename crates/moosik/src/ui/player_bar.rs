@@ -213,8 +213,26 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // overflows; a title that fits gets a hit rect the width of its text, so neither the
     // blank field nor the credits answer the pointer.
     let title_font = theme::medium(13.0);
-    let title_pos = egui::pos2(title_x, rect.center().y - 9.0);
-    let title_w = widgets::text_width(ui, &title, &title_font).min(field_w);
+    let source_w = if field_w >= 64.0
+        && let Some(track) = app.now.track.as_ref()
+    {
+        widgets::source_indicator(
+            ui,
+            &p,
+            Rect::from_center_size(
+                egui::pos2(title_x + 9.0, rect.center().y - 9.0),
+                vec2(18.0, 18.0),
+            ),
+            track,
+            ui.id().with("np-source"),
+        );
+        22.0
+    } else {
+        0.0
+    };
+    let title_field_w = field_w - source_w;
+    let title_pos = egui::pos2(title_x + source_w, rect.center().y - 9.0);
+    let title_w = widgets::text_width(ui, &title, &title_font).min(title_field_w);
     let title_rect = Rect::from_min_size(
         egui::pos2(title_pos.x, title_pos.y - widgets::MARQUEE_HIT_H / 2.0),
         vec2(title_w, widgets::MARQUEE_HIT_H),

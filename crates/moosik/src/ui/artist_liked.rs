@@ -173,6 +173,7 @@ fn header(
                 art_size: PAGE_ART_SIZE,
                 circle: false,
                 kind_label: "",
+                source: Some("YouTube Music"),
                 title: "Liked songs",
                 description: None,
                 artists: &[],

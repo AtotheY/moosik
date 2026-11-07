@@ -680,6 +680,7 @@ pub struct RowMenu<'a> {
 /// The fields a [`track_row`] shows, grouped so the function stays under clippy's arity limit
 /// and the call sites read like a row.
 pub struct TrackRow<'a> {
+    pub source: Option<&'a str>,
     pub number: Option<usize>,
     /// A chart rank, shown in place of the position number where the track names one.
     pub rank: Option<&'a str>,
@@ -2999,7 +3000,9 @@ fn row_menu_with_button(
                 &t.library_add
             } else {
                 &t.library_remove
-            };
+            }
+            .as_ref()
+            .filter(|_| youtube);
             // Only the playlists you can actually add to, and only ones of the same source as
             // this track — YouTube's API has no way to accept a local file, and a local
             // playlist has nowhere to send a YouTube video id, so offering the other source
@@ -3021,11 +3024,7 @@ fn row_menu_with_button(
             let removable = menu.playlist_id.zip(t.set_video_id.as_deref());
             // A download item shows for every YouTube song, so the block is there whenever the
             // song is one, or has a library or playlist move to offer.
-            if token.is_some()
-                || t.local_path.is_none()
-                || !targets.is_empty()
-                || removable.is_some()
-            {
+            if token.is_some() || youtube || !targets.is_empty() || removable.is_some() {
                 menu_divider(mui, palette);
             }
             if token.is_some()
@@ -3047,7 +3046,7 @@ fn row_menu_with_button(
             }
             // Offline: a downloaded song offers removal, any other offers saving to disk. A
             // user's own local file is already on disk, so neither applies.
-            if t.local_path.is_none() {
+            if youtube {
                 let downloaded = is_downloaded(mui.ctx(), &t.video_id);
                 // Saving needs Premium, as it does on YouTube; removing a file never does.
                 let allowed = downloaded || premium(mui.ctx());
@@ -3624,6 +3623,7 @@ pub fn art_card(
     texture: Option<&egui::TextureHandle>,
     title: &str,
     subtitle: &str,
+    source: Option<&str>,
     shape: ArtShape,
     menu: Option<CardMenu<'_>>,
     // The caller's own to compute (it has the entry `art_card` itself is never given) — see
@@ -3632,8 +3632,19 @@ pub fn art_card(
     // The card the listener last single-clicked in double-click-to-play mode. Purely visual.
     selected: bool,
 ) -> CardClick {
-    interactive_art_card(
-        ui, palette, width, texture, title, subtitle, shape, menu, playing, selected, false, true,
+    art_card_with_sources(
+        ui,
+        palette,
+        width,
+        texture,
+        title,
+        subtitle,
+        source,
+        &[],
+        shape,
+        menu,
+        playing,
+        selected,
     )
 }
 
@@ -3743,8 +3754,13 @@ pub(crate) fn interactive_art_card(
         );
         crate::emoji::paint_line(
             ui,
-            art.left_bottom() + vec2(0.0, 28.0),
-            &truncate_to(ui, subtitle, theme::regular(12.0), label_w),
+            art.left_bottom() + vec2(source_w, 34.0),
+            &truncate_to(
+                ui,
+                subtitle,
+                theme::regular(12.0),
+                (label_w - source_w).max(0.0),
+            ),
             theme::regular(12.0),
             palette.secondary,
         );
@@ -3831,6 +3847,7 @@ pub fn folder_card(
     }
     let action = menu.and_then(|menu| page_menu(ui, palette, &response, menu));
     CardClick {
+        source: None,
         response,
         play: false,
         action,
@@ -3839,6 +3856,7 @@ pub fn folder_card(
 
 /// What a card reports: the click, and any menu choice.
 pub struct CardClick {
+    pub source: Option<crate::model::Provider>,
     pub response: egui::Response,
     /// The corner play button specifically, when the card has one — wins over `response`, the
     /// same way a row's title link wins over its own click: a caller that sees this set should
@@ -4757,7 +4775,7 @@ pub fn tab_strip(
 }
 
 /// The height of a [`Group`] row that holds one line of control.
-const ROW_H: f32 = 58.0;
+const ROW_H: f32 = theme::ROW_HEIGHT;
 
 /// Settings rows inside one card: each a title and a line under it on the left, its control on
 /// the right, with a hairline between rows. Build one with [`setting_group`].
@@ -5352,6 +5370,75 @@ pub fn volume_slider(ui: &mut Ui, palette: &Palette, volume: f64, unmute_to: f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn album_card_source_buttons_and_cover_have_separate_actions() {
+        use crate::model::Provider;
+        use std::cell::Cell;
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = Palette::dark();
+        let rect = Cell::new(Rect::NOTHING);
+        let choice = Cell::new(None);
+        let opened = Cell::new(false);
+        let played = Cell::new(false);
+        let mut time = 0.0;
+        let mut frame = |events| {
+            time += 1.0 / 60.0;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 300.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let hit = art_card_with_sources(
+                        ui,
+                        &palette,
+                        132.0,
+                        None,
+                        "Album",
+                        "Artist",
+                        None,
+                        &[(Provider::YouTubeMusic, true), (Provider::Spotify, false)],
+                        ArtShape::Square,
+                        None,
+                        false,
+                        false,
+                    );
+                    rect.set(hit.response.rect);
+                    choice.set(hit.source);
+                    opened.set(hit.response.clicked());
+                    played.set(hit.play);
+                },
+            )
+            .drop_without_applying_deltas();
+        };
+        let click = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(Vec::new());
+        for (offset, provider) in [(20.0, Provider::YouTubeMusic), (48.0, Provider::Spotify)] {
+            let point = rect.get().min + vec2(offset, 158.0);
+            frame(vec![egui::Event::PointerMoved(point)]);
+            frame(vec![click(point, true)]);
+            frame(vec![click(point, false)]);
+            assert_eq!(choice.get(), Some(provider));
+            assert!(!played.get());
+            assert!(!opened.get());
+        }
+        let point = rect.get().min + vec2(66.0, 50.0);
+        frame(vec![egui::Event::PointerMoved(point)]);
+        frame(vec![click(point, true)]);
+        frame(vec![click(point, false)]);
+        assert_eq!(choice.get(), None);
+        assert!(opened.get());
+        assert!(!played.get());
+    }
 
     /// The fade runs from fully transparent at an edge to untouched a band in, scaled by how
     /// strongly that end fades, and an end that does not fade is left alone.
@@ -6061,6 +6148,7 @@ mod tests {
                     ui,
                     &palette,
                     TrackRow {
+                        source: Some(track.source_name()),
                         number: None,
                         rank: None,
                         trend: crate::model::ChartTrend::Unknown,
@@ -6322,6 +6410,7 @@ mod tests {
                     ui,
                     &palette,
                     TrackRow {
+                        source: Some(track.source_name()),
                         number: Some(1),
                         rank: None,
                         trend: crate::model::ChartTrend::Unknown,
@@ -6455,6 +6544,7 @@ mod tests {
                     ui,
                     &palette,
                     TrackRow {
+                        source: Some(track.source_name()),
                         number: Some(7),
                         rank: None,
                         trend: crate::model::ChartTrend::Unknown,

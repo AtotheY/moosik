@@ -774,6 +774,14 @@ pub(crate) fn grid(app: &mut App, ui: &mut egui::Ui) {
                 art,
                 &pl.title,
                 subtitle,
+                Some(match pl.source {
+                    crate::model::PlaylistSource::YouTube => "YouTube Music",
+                    crate::model::PlaylistSource::Spotify => "Spotify",
+                    crate::model::PlaylistSource::Local if pl.id.starts_with("private:") => {
+                        "Private playlist"
+                    }
+                    crate::model::PlaylistSource::Local => "Local file",
+                }),
                 widgets::ArtShape::Square,
                 None,
                 false,

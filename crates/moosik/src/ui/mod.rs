@@ -90,6 +90,8 @@ fn fill_width(available: f32, gap: f32) -> f32 {
 pub(crate) struct ReleaseCtx<'a> {
     pub playlists: &'a [crate::model::PlaylistRef],
     pub signed_in: bool,
+    pub preferred_provider: crate::model::Provider,
+    pub group_sources: bool,
     pub rail: &'a std::collections::HashMap<String, crate::model::Playlist>,
     pub albums: &'a std::collections::HashMap<String, crate::model::Album>,
 }
@@ -265,6 +267,7 @@ pub(crate) fn virtual_rows(
 /// inside the row loop, where the mutable borrow of the cache lives and dies within one iteration.
 /// A caller that handed back a `&TextureHandle` could not borrow the cache again for the next row.
 pub(crate) struct RowSpec<'a> {
+    pub source: Option<&'a str>,
     pub number: Option<usize>,
     /// A chart rank, shown in place of the position number where the track names one.
     pub rank: Option<&'a str>,
@@ -708,6 +711,7 @@ fn paint_grid_cell<'d>(
         &mut cell,
         palette,
         crate::widgets::TrackRow {
+            source: s.source,
             number: s.number,
             rank: s.rank,
             trend: s.trend,
@@ -965,6 +969,7 @@ pub(crate) fn track_rows_quiet(
         |i| {
             let t = &tracks[i];
             RowSpec {
+                source: Some(t.source_name()),
                 number: numbered.then_some(i + 1),
                 rank: t.rank.as_deref(),
                 trend: t.trend,
@@ -1067,6 +1072,7 @@ pub(crate) fn shelf_track_spec<'a>(
     signed_in: bool,
 ) -> RowSpec<'a> {
     RowSpec {
+        source: Some(t.source_name()),
         number,
         rank: t.rank.as_deref(),
         trend: t.trend,
@@ -1337,6 +1343,7 @@ fn grid_card(
 
 /// What one card reports.
 struct CardOutcome {
+    source: Option<crate::model::Provider>,
     clicked: bool,
     /// See `widgets::CardClick::play` — wins over `clicked`.
     play: bool,
@@ -1963,6 +1970,7 @@ pub(crate) fn header_wash_colour(
 /// fills art and texts and draws its own buttons, since Shuffle/Mix/Subscribe are not
 /// Play/Save/•••.
 pub(crate) struct PageHeader<'a> {
+    pub source: Option<&'a str>,
     pub art_url: Option<&'a std::sync::Arc<str>>,
     pub art_size: f32,
     pub circle: bool,
@@ -2141,10 +2149,30 @@ pub(crate) fn page_header(
     let text_top = art_rect.top() + (art_size - block_h).max(0.0);
     let mut y = text_top + title_rel;
     if !h.kind_label.is_empty() {
+        let source_w = if let Some(source) = h.source {
+            widgets::source_name_indicator(
+                ui,
+                palette,
+                egui::Rect::from_center_size(
+                    egui::pos2(tx + 9.0, text_top + KIND_CENTRE),
+                    egui::vec2(18.0, 18.0),
+                ),
+                source,
+                ui.id().with((h.salt, "source")),
+            );
+            22.0
+        } else {
+            0.0
+        };
         ui.painter().text(
-            egui::pos2(tx, text_top + KIND_CENTRE),
+            egui::pos2(tx + source_w, text_top + KIND_CENTRE),
             egui::Align2::LEFT_CENTER,
-            widgets::truncate_to(ui, h.kind_label, theme::semibold(12.0), text_w),
+            widgets::truncate_to(
+                ui,
+                h.kind_label,
+                theme::semibold(12.0),
+                (text_w - source_w).max(0.0),
+            ),
             theme::semibold(12.0),
             palette.dim,
         );
@@ -2216,10 +2244,29 @@ pub(crate) fn page_header(
             y += LINE_GAP;
         }
         (true, Some(plain)) => {
+            let source_w = if h.kind_label.is_empty()
+                && let Some(source) = h.source
+            {
+                widgets::source_name_indicator(
+                    ui,
+                    palette,
+                    egui::Rect::from_center_size(egui::pos2(tx + 9.0, y), egui::vec2(18.0, 18.0)),
+                    source,
+                    ui.id().with((h.salt, "source")),
+                );
+                22.0
+            } else {
+                0.0
+            };
             ui.painter().text(
-                egui::pos2(tx, y),
+                egui::pos2(tx + source_w, y),
                 egui::Align2::LEFT_CENTER,
-                widgets::truncate_to(ui, plain, theme::regular(13.0), text_w),
+                widgets::truncate_to(
+                    ui,
+                    plain,
+                    theme::regular(13.0),
+                    (text_w - source_w).max(0.0),
+                ),
                 theme::regular(13.0),
                 palette.secondary,
             );
@@ -2772,6 +2819,7 @@ pub(crate) fn entry_row_spec<'a>(
         Entry::Mood(_) => (widgets::plain_subtitle(""), None, None, false, false),
     };
     RowSpec {
+        source: Some(item.source_name()),
         number: None,
         rank: match item {
             Entry::Song(t) | Entry::Video(t) => t.rank.as_deref(),

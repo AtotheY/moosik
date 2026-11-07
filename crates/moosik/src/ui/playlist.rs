@@ -58,7 +58,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                         || if pl.source == crate::model::PlaylistSource::Local {
                             d.tracks.iter().all(|t| t.local_path.is_some())
                         } else {
-                            app.signed_in() && d.tracks.iter().all(|t| t.local_path.is_none())
+                            pl.source == crate::model::PlaylistSource::YouTube
+                                && app.signed_in()
+                                && d.tracks
+                                    .iter()
+                                    .all(|t| t.local_path.is_none() && !t.is_spotify())
                         })
             });
             if accepts {
@@ -85,10 +89,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 /// YouTube Music draws there, with its Refresh. Only once the whole list is in: below a
 /// partial one it would sit between pages of the playlist itself.
 fn suggestions(app: &mut App, ui: &mut egui::Ui) {
-    let complete = app
-        .playlist
-        .as_ref()
-        .is_some_and(|p| p.editable && p.tracks.next.is_none());
+    let complete = app.playlist.as_ref().is_some_and(|p| {
+        p.editable && p.source != crate::model::PlaylistSource::Spotify && p.tracks.next.is_none()
+    });
     if !complete {
         return;
     }
@@ -169,6 +172,7 @@ fn suggestions(app: &mut App, ui: &mut egui::Ui) {
             |i| {
                 let t = &tracks[i];
                 crate::ui::RowSpec {
+                    source: Some(t.source_name()),
                     number: None,
                     rank: None,
                     trend: crate::model::ChartTrend::Unknown,
@@ -312,10 +316,14 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         } else {
             pl.library_add.as_deref()
         })
+        .filter(|_| pl.source != crate::model::PlaylistSource::Spotify)
         .map(str::to_owned);
-        let like =
-            (signed_in && pl.saveable && !pl.editable && !crate::model::is_liked_auto(&pl.id))
-                .then(|| crate::model::bare_playlist_id(&pl.id).to_owned());
+        let like = (signed_in
+            && pl.source != crate::model::PlaylistSource::Spotify
+            && pl.saveable
+            && !pl.editable
+            && !crate::model::is_liked_auto(&pl.id))
+        .then(|| crate::model::bare_playlist_id(&pl.id).to_owned());
         let (write, rail_ref) = match (token, like) {
             (Some(token), _) => (Some(crate::backend::PageWrite::Feedback(token)), None),
             (None, Some(id)) => (
@@ -341,6 +349,15 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             images,
             backend,
             crate::ui::PageHeader {
+                source: match pl.source {
+                    crate::model::PlaylistSource::Spotify => Some("Spotify"),
+                    crate::model::PlaylistSource::YouTube => Some("YouTube Music"),
+                    crate::model::PlaylistSource::Local => Some(if pl.id.starts_with("private:") {
+                        "Private playlist"
+                    } else {
+                        "Local file"
+                    }),
+                },
                 art_url: pl.thumbnail.as_ref(),
                 art_size: PAGE_ART_SIZE,
                 circle: false,
@@ -394,7 +411,8 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             signed_in,
                             share_url: menu_share,
                             has_info: menu_has_info,
-                            manage: pl.editable || pl.id.starts_with("private:"),
+                            manage: pl.source != crate::model::PlaylistSource::Spotify
+                                && (pl.editable || pl.id.starts_with("private:")),
                             remove_from_library: false,
                             context_only: false,
                             // A local playlist has no YouTube radio to start.

@@ -91,6 +91,11 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             images,
             backend,
             crate::ui::PageHeader {
+                source: Some(if a.id.starts_with("spotify:") {
+                    "Spotify"
+                } else {
+                    "YouTube Music"
+                }),
                 art_url: a.thumbnail.as_ref(),
                 art_size: PAGE_ART_SIZE,
                 circle: false,

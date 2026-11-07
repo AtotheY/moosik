@@ -98,6 +98,44 @@ impl Icon {
     }
 }
 
+pub fn paint_source(ui: &egui::Ui, rect: egui::Rect, source: &str, color: Color32) {
+    let point = |x: f32, y: f32| rect.min + egui::vec2(x, y) * (rect.width() / 24.0);
+    let stroke = egui::Stroke::new(rect.width() / 14.0, color);
+    match source {
+        "Spotify" => {
+            ui.painter()
+                .circle_stroke(rect.center(), rect.width() * 0.45, stroke);
+            for (left, right, y, bend) in [
+                (5.5, 18.5, 9.0, 3.8),
+                (6.5, 17.5, 12.5, 3.0),
+                (7.5, 16.5, 16.0, 2.2),
+            ] {
+                let points = (0..=12)
+                    .map(|i| {
+                        let t = i as f32 / 12.0;
+                        point(left + (right - left) * t, y - bend * 4.0 * t * (1.0 - t))
+                    })
+                    .collect();
+                ui.painter().add(egui::Shape::line(points, stroke));
+            }
+        }
+        "YouTube Music" => {
+            ui.painter().rect_stroke(
+                egui::Rect::from_min_max(point(1.5, 4.5), point(22.5, 19.5)),
+                egui::CornerRadius::same(3),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![point(9.5, 8.0), point(16.0, 12.0), point(9.5, 16.0)],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        _ => Icon::Music.image(color, rect.width()).paint_at(ui, rect),
+    }
+}
+
 /// Register every icon as an in-memory byte source. Call once at startup.
 pub fn register(ctx: &egui::Context) {
     for (_, uri, bytes) in ALL {
