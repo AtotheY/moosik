@@ -3266,7 +3266,9 @@ fn row_menu_with_button(
             let removable = menu
                 .playlist_id
                 .zip(t.set_video_id.as_deref())
-                .filter(|_| !t.is_spotify());
+                .filter(|(id, _)| {
+                    id.starts_with("private:") || (!id.starts_with("spotify:") && !t.is_spotify())
+                });
             // A download item shows for every YouTube song, so the block is there whenever the
             // song is one, or has a library or playlist move to offer.
             if token.is_some() || youtube || !targets.is_empty() || removable.is_some() {
