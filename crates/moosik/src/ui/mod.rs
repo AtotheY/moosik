@@ -4,6 +4,7 @@
 pub mod album;
 pub mod artist;
 pub mod artist_liked;
+pub mod artist_sources;
 pub mod charts;
 pub mod crash;
 pub mod explore;

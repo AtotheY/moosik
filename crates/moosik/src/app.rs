@@ -3855,6 +3855,27 @@ impl App {
         self.backend.fetch_artist(id);
     }
 
+    fn load_artist_group(&mut self, youtube: String, spotify: String) {
+        if !self.signed_in() || !crate::spotify::is_signed_in() {
+            let route = if crate::spotify::is_signed_in() {
+                Route::Artist(spotify)
+            } else if self
+                .available_providers()
+                .contains(&crate::model::Provider::YouTubeMusic)
+            {
+                Route::Artist(youtube)
+            } else {
+                Route::Home
+            };
+            self.replace_route(route);
+            return;
+        }
+        if self.artist_sources.begin(&youtube, &spotify) {
+            self.backend.fetch_artist(youtube);
+            self.backend.fetch_artist(spotify);
+        }
+    }
+
     fn load_album(&mut self, id: String) {
         if self.album_for.as_deref() == Some(id.as_str()) {
             return;
