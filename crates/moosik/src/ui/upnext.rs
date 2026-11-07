@@ -18,13 +18,8 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let card = widgets::card_rect(ui.available_rect_before_wrap(), theme::CARD_INSET);
     external_drop(app, ui, card);
     let _edge = (!app.fs.open).then(|| widgets::CardEdge::new(ui, card, &app.palette));
-    // What plays after the track playing, in the order it will: the rest of the list, or the
-    // shuffle's order, which is drawn when shuffle goes on and then holds.
-    let upcoming = app
-        .q
-        .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-    if upcoming.is_empty() && app.q.current_track().is_none() && app.room_snapshot().is_none() {
-        edit_controls(app, ui, &upcoming, true);
+    if app.q.is_empty() && app.room_snapshot().is_none() && !app.following() {
+        edit_controls(app, ui, &[], true);
         centered(app, ui, "Empty queue");
         return;
     }
@@ -53,6 +48,9 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             "Next up"
         };
         section(app, ui, 8.0, label);
+        let upcoming = app
+            .q
+            .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
         next_up(app, ui, &upcoming);
     });
     // Where the list is scrolled to, for the fullscreen view's edge fades: they only belong where
@@ -302,8 +300,8 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
         if app.q.current_track().is_none() && app.q.tracks().is_empty() {
-            if app.room_snapshot().is_some() {
-                playing_header(app, ui, "Listening session", true);
+            if app.following() || app.room_snapshot().is_some() {
+                now_playing(app, ui, true);
                 session_queue(app, ui, true);
                 return;
             }
@@ -360,15 +358,42 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
+    if app.room_snapshot().is_none() && !app.following() {
+        return;
+    }
+    let p = app.palette;
+    let title = if app.room_snapshot().is_some() {
+        "Session queue"
+    } else {
+        "Listening along"
+    };
+    ui.add_space(if page { 20.0 } else { 8.0 });
+    ui.horizontal(|ui| {
+        ui.label(if page {
+            egui::RichText::new(title)
+                .font(theme::bold(theme::SECTION_PT))
+                .color(p.text)
+        } else {
+            egui::RichText::new(title)
+                .font(theme::semibold(12.0))
+                .color(p.secondary)
+        });
+        if app.following() {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::outline_button(ui, &p, "Leave")
+                    .on_hover_text("Leave listening session and return to your queue")
+                    .clicked()
+                {
+                    app.leave_room();
+                    app.toast("Left listening session");
+                }
+            });
+        }
+    });
+    ui.add_space(if page { 8.0 } else { 4.0 });
     let Some(room) = app.together.snapshot() else {
         return;
     };
-    let p = app.palette;
-    if page {
-        crate::ui::section(ui, &p, "Session queue");
-    } else {
-        section(app, ui, 8.0, "Session queue");
-    }
     if room.queue.is_empty() {
         ui.label(
             egui::RichText::new("Use a song’s menu to add it to the session queue.")

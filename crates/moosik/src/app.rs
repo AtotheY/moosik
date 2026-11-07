@@ -3820,14 +3820,14 @@ impl App {
     /// see `Event::CardTracksReady`'s own doc comment for why this is a separate fetch from
     /// `load_album`'s.
     pub(crate) fn play_album(&mut self, id: String) {
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.pending_card_play = Some(id.clone());
         self.backend.play_album(id);
     }
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
-        self.note_playback_choice();
+        self.choose_personal_playback();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
                 self.navigate(Route::Playlist(id.clone()));
@@ -5916,6 +5916,7 @@ impl App {
                     }
                 }
                 Event::Playing(..) => {}
+                Event::MixLoaded { .. } if self.following() => {}
                 Event::MixLoaded { seed, mut queue } => {
                     // The player overlay is the now-playing song's own rating and the only like
                     // state a mix carries; write it onto the first row so the bar's thumbs show
@@ -6310,7 +6311,7 @@ impl App {
         if index >= tracks.len() {
             return;
         }
-        self.note_playback_choice();
+        self.choose_personal_playback();
         // The clicked row is already the loaded track *and* this is the queue it is in:
         // pause/resume it, the same convention an album/playlist header's own Play button
         // follows, rather than restarting it from the top. The whole-list comparison matters:
@@ -6382,7 +6383,15 @@ impl App {
     /// up next first (`PlayQueue::bring_up_next`), so the songs between it and the playing one
     /// still play, after it; off, it is a plain jump to that place in the queue.
     pub(crate) fn play_from_queue(&mut self, index: usize) {
-        self.note_playback_choice();
+        if self.following() && self.together.backup.is_some() {
+            // A legacy room can still show local additions. This index belongs to the
+            // displayed queue, which leaving the room replaces with the personal queue.
+            if let Some(track) = self.q.get(index).cloned() {
+                self.start_from(vec![track], 0);
+            }
+            return;
+        }
+        self.choose_personal_playback();
         if self.settings.queue_click_keeps_order && self.q.current() != Some(index) {
             // Clicked to play, so it is the listener's choice now: a radio song moved in among
             // their own must not end Repeat All's loop early (see `PlayQueue::tail_start`).
@@ -6835,10 +6844,12 @@ impl App {
     /// is self-correcting every frame instead, at the cost of not noticing once playback has
     /// moved on to radio tracks past the end of a shorter list.
     pub(crate) fn queue_matches(&self, tracks: &[Track]) -> bool {
-        self.now
-            .track
-            .as_ref()
-            .is_some_and(|t| tracks.iter().any(|x| x.video_id == t.video_id))
+        !self.following()
+            && self
+                .now
+                .track
+                .as_ref()
+                .is_some_and(|t| tracks.iter().any(|x| x.video_id == t.video_id))
     }
 
     /// [`Self::queue_matches`], and actually playing right now rather than paused or stopped —
@@ -6869,14 +6880,14 @@ impl App {
                 self.toast(&format!("Won't recommend {name}"));
             }
             RowAction::StartMix(id) => {
-                self.note_playback_choice();
+                self.choose_personal_playback();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
                 self.upnext_open = true;
                 self.backend.start_mix(id);
             }
             RowAction::StartMixPlaylist(id) => {
-                self.note_playback_choice();
+                self.choose_personal_playback();
                 self.upnext_open = true;
                 self.backend.start_playlist_mix(id);
             }
@@ -7006,7 +7017,7 @@ impl App {
                 then,
             } => {
                 if matches!(then, ui::PageThen::StartMix | ui::PageThen::Shuffle) {
-                    self.note_playback_choice();
+                    self.choose_personal_playback();
                 }
                 if self.page_tracks(&page_id).is_some() {
                     // The fetch landed while the menu was open.
@@ -7213,6 +7224,15 @@ impl App {
         self.playback_choice = self.playback_choice.wrapping_add(1);
     }
 
+    /// A guest choosing music locally hands playback back to their personal queue.
+    fn choose_personal_playback(&mut self) {
+        self.note_playback_choice();
+        if self.following() {
+            self.leave_room();
+            self.toast("Left listening session");
+        }
+    }
+
     pub(crate) fn shuffle_folder(&mut self, name: &str) {
         let layout = &self.settings.playlist_layout;
         let ids: std::collections::BTreeSet<_> = layout
@@ -7241,7 +7261,7 @@ impl App {
                 remote.push((id.clone(), title));
             }
         }
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.pending_card_play = None;
         self.backend.folder_tracks(
             remote,
@@ -7364,7 +7384,7 @@ impl App {
 
     /// Start whatever YouTube handed over as something to play — an artist's shuffle or mix.
     pub(crate) fn play_target(&mut self, seed: String, target: crate::model::WatchTarget) {
-        self.note_playback_choice();
+        self.choose_personal_playback();
         self.upnext_open = true;
         self.backend.play_target(seed, target);
     }

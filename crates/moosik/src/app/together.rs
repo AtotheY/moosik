@@ -473,13 +473,9 @@ impl App {
     }
 
     pub(super) fn open_shared_link(&mut self, link: crate::links::Link) {
-        self.note_playback_choice();
-        self.together.song_request = None;
         match link {
             crate::links::Link::Play(id) => {
-                if self.following() {
-                    self.leave_room();
-                }
+                self.choose_personal_playback();
                 self.together.song_request = Some(self.backend.shared_song(id));
             }
             crate::links::Link::Join(id) => {
@@ -491,6 +487,19 @@ impl App {
                 {
                     return;
                 }
+                self.note_playback_choice();
+                self.together.song_request = None;
+                self.pending_card_play = None;
+                if matches!(
+                    self.pending_page_action,
+                    Some((
+                        _,
+                        crate::ui::PageThen::StartMix | crate::ui::PageThen::Shuffle
+                    ))
+                ) {
+                    self.pending_page_action = None;
+                }
+                self.autoplay = false;
                 self.leave_room();
                 let (tx, updates) = channel();
                 let ctx = self.ctx.clone();
