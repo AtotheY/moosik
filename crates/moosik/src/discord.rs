@@ -305,6 +305,28 @@ enum Cmd {
     Shutdown,
 }
 
+#[derive(Default)]
+struct WantedPresence {
+    track: Option<Presence>,
+    // Keep the deadline even after withdrawal: a seek or a room update is still the same pause.
+    pause_deadline: Option<Instant>,
+}
+
+impl WantedPresence {
+    fn set(&mut self, track: Presence, now: Instant) {
+        if track.playing {
+            self.pause_deadline = None;
+        } else {
+            self.pause_deadline.get_or_insert(now + PAUSE_GRACE);
+        }
+        self.track = Some(track);
+    }
+
+    fn expire_pause(&mut self, now: Instant) -> bool {
+        self.pause_deadline.is_some_and(|deadline| now >= deadline) && self.track.take().is_some()
+    }
+}
+
 /// The worker's whole life: own the socket, keep it in sync with the last `Presence`, and get it
 /// back if Discord goes away.
 fn run(
@@ -315,10 +337,8 @@ fn run(
 ) {
     let mut client: Option<DiscordIpcClient> = None;
     // What the app last asked for, and whether Discord has been told about it.
-    let mut wanted: Option<Presence> = None;
+    let mut wanted = WantedPresence::default();
     let mut dirty = false;
-    // When the current pause began, so it can be withdrawn after `PAUSE_GRACE`.
-    let mut paused_since: Option<Instant> = None;
     let mut next_try = Instant::now();
 
     loop {
@@ -331,19 +351,11 @@ fn run(
                 return;
             }
             Ok(Cmd::Clear) => {
-                wanted = None;
-                paused_since = None;
+                wanted = WantedPresence::default();
                 dirty = true;
             }
             Ok(Cmd::Set(presence)) => {
-                if presence.playing || presence.room.is_some() {
-                    paused_since = None;
-                } else {
-                    // Armed once per pause, not once per update: a seek while paused must not
-                    // restart the grace period.
-                    paused_since.get_or_insert_with(Instant::now);
-                }
-                wanted = Some(*presence);
+                wanted.set(*presence, Instant::now());
                 dirty = true;
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -352,16 +364,12 @@ fn run(
 
         // A pause that has outlasted the grace period is withdrawn — but the worker keeps
         // running, so resuming shows up again immediately.
-        if let Some(since) = paused_since
-            && since.elapsed() >= PAUSE_GRACE
-        {
-            paused_since = None;
-            wanted = None;
+        if wanted.expire_pause(Instant::now()) {
             dirty = true;
         }
 
         // Connect (or reconnect) whenever there is something to show and it is time to try.
-        if wanted.is_some() && client.is_none() && Instant::now() >= next_try {
+        if wanted.track.is_some() && client.is_none() && Instant::now() >= next_try {
             client = connect(&profile);
             next_try = Instant::now() + RETRY_EVERY;
             if client.is_some() {
@@ -373,7 +381,7 @@ fn run(
         if dirty {
             // The end timestamp is absolute, so replaying a presence after a reconnect is still
             // correct: it does not drift with the wall clock the way a stored "remaining" would.
-            let sent = client.as_mut().map(|client| match wanted.as_ref() {
+            let sent = client.as_mut().map(|client| match wanted.track.as_ref() {
                 Some(presence) => client.set_activity(presence.activity()),
                 None => client.clear_activity(),
             });
@@ -525,6 +533,35 @@ mod tests {
                 "label": "Listen along", "url": format!("https://moosik.dev/#join/{room}")
             })
         );
+    }
+
+    #[test]
+    fn a_paused_hosts_card_expires_until_playback_resumes() {
+        let now = Instant::now();
+        let host = Presence {
+            room: Some("room".into()),
+            ..presence()
+        };
+        let paused = Presence {
+            playing: false,
+            timeline: None,
+            ..host.clone()
+        };
+        let mut wanted = WantedPresence::default();
+        wanted.set(paused.clone(), now);
+        wanted.set(paused.clone(), now + PAUSE_GRACE / 2);
+        assert!(!wanted.expire_pause(now + PAUSE_GRACE - TICK));
+        assert_eq!(wanted.track.as_ref(), Some(&paused));
+        assert!(wanted.expire_pause(now + PAUSE_GRACE));
+        assert!(wanted.track.is_none());
+
+        let later = now + Duration::from_secs(3600);
+        wanted.set(paused, later);
+        assert!(wanted.expire_pause(later));
+        assert!(wanted.track.is_none());
+        wanted.set(host.clone(), later);
+        assert!(!wanted.expire_pause(later));
+        assert_eq!(wanted.track, Some(host));
     }
 
     /// Paused means no timestamps at all — the bar must not keep counting while the track is
