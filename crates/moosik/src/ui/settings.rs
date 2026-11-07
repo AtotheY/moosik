@@ -1101,6 +1101,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_cache_limit_saves_valid_edits_without_normalizing_the_input() {
+        let mut limit = 2048;
+        let mut draft = CacheLimitDraft::new(limit);
+        draft.text = "004096".to_owned();
+        draft.update(&mut limit, &(1..=1_048_576));
+        assert_eq!(limit, 4096);
+        assert_eq!(draft.applied, limit);
+        assert_eq!(draft.text, "004096");
+        assert!(draft.error.is_none());
+    }
+
+    #[test]
+    fn custom_cache_limit_keeps_the_saved_value_while_an_edit_is_invalid() {
+        let mut limit = 64;
+        let mut draft = CacheLimitDraft::new(limit);
+        for text in ["", "1", "12", "129", "18446744073709551616", "abc"] {
+            draft.text = text.to_owned();
+            draft.update(&mut limit, &(16..=128));
+            assert_eq!(limit, 64);
+            assert_eq!(draft.applied, 64);
+            assert_eq!(draft.text, text);
+            assert!(draft.error.is_some());
+        }
+        draft.text = "128".to_owned();
+        draft.update(&mut limit, &(16..=128));
+        assert_eq!(limit, 128);
+        assert_eq!(draft.applied, 128);
+        assert!(draft.error.is_none());
+    }
+
+    #[test]
     fn every_tab_has_its_own_label_and_the_first_is_the_default() {
         let labels: Vec<&str> = SettingsTab::ALL.iter().map(|t| t.label()).collect();
         let mut unique = labels.clone();

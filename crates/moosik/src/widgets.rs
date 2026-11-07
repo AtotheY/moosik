@@ -5111,18 +5111,21 @@ impl Group<'_> {
     }
 
     fn text(&self, ui: &mut Ui, title: &str, detail: &str) {
-        ui.label(
-            egui::RichText::new(title)
-                .font(theme::medium(13.0))
-                .color(self.palette.text),
-        );
-        if !detail.is_empty() {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(
-                egui::RichText::new(detail)
-                    .font(theme::regular(11.0))
-                    .color(self.palette.dim),
+                egui::RichText::new(title)
+                    .font(theme::medium(13.0))
+                    .color(self.palette.text),
             );
-        }
+            if !detail.is_empty() {
+                ui.label(
+                    egui::RichText::new(detail)
+                        .font(theme::regular(11.0))
+                        .color(self.palette.secondary),
+                );
+            }
+        });
     }
 
     /// A title and its line on the left, one control on the right. A chip group is added
@@ -5130,18 +5133,52 @@ impl Group<'_> {
     pub fn row(&mut self, ui: &mut Ui, title: &str, detail: &str, control: impl FnOnce(&mut Ui)) {
         self.divide(ui);
         let width = ui.available_width();
+        if width < 600.0 {
+            ui.add_space(12.0);
+            self.text(ui, title, detail);
+            ui.add_space(12.0);
+            ui.allocate_ui_with_layout(
+                vec2(width, 32.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                control,
+            );
+            ui.add_space(12.0);
+            return;
+        }
         ui.allocate_ui_with_layout(
             vec2(width, ROW_H),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 ui.set_min_height(ROW_H);
                 control(ui);
-                ui.add_space(8.0);
+                ui.add_space(16.0);
                 ui.vertical(|ui| {
-                    // Centred by measure: a `vertical` starts at the top of the row's rect.
-                    let lines = if detail.is_empty() { 1.0 } else { 2.0 };
-                    ui.add_space(((ROW_H - lines * 15.5) / 2.0 - 1.0).max(8.0));
+                    let width = ui.available_width();
+                    let height = ui.fonts_mut(|fonts| {
+                        let title = fonts.layout(
+                            title.to_owned(),
+                            theme::medium(13.0),
+                            self.palette.text,
+                            width,
+                        );
+                        let detail_height = if detail.is_empty() {
+                            0.0
+                        } else {
+                            4.0 + fonts
+                                .layout(
+                                    detail.to_owned(),
+                                    theme::regular(11.0),
+                                    self.palette.secondary,
+                                    width,
+                                )
+                                .size()
+                                .y
+                        };
+                        title.size().y + detail_height
+                    });
+                    ui.add_space(((ROW_H - height) / 2.0).max(0.0));
                     self.text(ui, title, detail);
+                    ui.add_space(((ROW_H - height) / 2.0).max(0.0));
                 });
             },
         );
@@ -5159,8 +5196,11 @@ impl Group<'_> {
         self.divide(ui);
         ui.add_space(12.0);
         self.text(ui, title, detail);
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(control);
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            control(ui);
+        });
         ui.add_space(12.0);
     }
 
@@ -5168,7 +5208,10 @@ impl Group<'_> {
     pub fn free(&mut self, ui: &mut Ui, contents: impl FnOnce(&mut Ui)) {
         self.divide(ui);
         ui.add_space(12.0);
-        contents(ui);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            contents(ui);
+        });
         ui.add_space(12.0);
     }
 }
@@ -5181,13 +5224,12 @@ pub fn setting_group(
     contents: impl FnOnce(&mut Ui, &mut Group),
 ) {
     if let Some(caption) = caption {
-        ui.add_space(4.0);
         ui.label(
             egui::RichText::new(caption)
                 .font(theme::semibold(12.0))
                 .color(palette.secondary),
         );
-        ui.add_space(8.0);
+        ui.add_space(4.0);
     }
     let inner = ui.available_width() - 32.0;
     egui::Frame::NONE
@@ -5197,13 +5239,14 @@ pub fn setting_group(
         .inner_margin(egui::Margin::symmetric(16, 0))
         .show(ui, |ui| {
             ui.set_width(inner);
+            ui.spacing_mut().item_spacing.y = 0.0;
             let mut group = Group {
                 palette,
                 first: true,
             };
             contents(ui, &mut group);
         });
-    ui.add_space(24.0);
+    ui.add_space(16.0);
 }
 
 enum PillStyle {
