@@ -63,6 +63,13 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         (Route::History, Icon::History, "Listening history"),
         (Route::Listening, Icon::TrendingUp, "Listening stats"),
     ] {
+        if route == Route::Explore
+            && !app
+                .available_providers()
+                .contains(&crate::model::Provider::YouTubeMusic)
+        {
+            continue;
+        }
         let selected = app.current_route() == route;
         let response = widgets::nav_item(ui, &app.palette, icon, label, selected, rail);
         if route == Route::Library

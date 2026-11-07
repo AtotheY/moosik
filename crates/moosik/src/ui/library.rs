@@ -60,11 +60,18 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
 
-        if app.rail_filter == RailFilter::Playlists && !app.signed_in() {
+        if app.rail_filter == RailFilter::Playlists && !app.has_library_account() {
+            if app.library.playlists.is_empty() {
+                prompt(app, ui);
+            }
             super::organizer::grid(app, ui);
             if widgets::pill_button(ui, &app.palette, "New private playlist").clicked() {
                 app.new_private_playlist(vec![], app.organizer.current_folder().map(str::to_owned));
             }
+            return;
+        }
+        if app.has_library_account() && !matches!(app.auth, AuthState::Checking) {
+            content(app, ui);
             return;
         }
         match &app.auth {
@@ -99,13 +106,19 @@ fn skeletons(app: &App, ui: &mut egui::Ui) {
 
 fn prompt(app: &mut App, ui: &mut egui::Ui) {
     ui.label(
-        egui::RichText::new("Sign in to see your library.")
+        egui::RichText::new("Manage your music providers in Settings.")
             .font(theme::regular(13.0))
             .color(app.palette.secondary),
     );
     ui.add_space(12.0);
-    if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
-        app.sign_in();
+    if widgets::pill_button(ui, &app.palette, "Manage providers").clicked() {
+        app.settings_tab = crate::ui::settings::SettingsTab::Providers;
+        app.settings_provider = app
+            .connected_providers()
+            .first()
+            .copied()
+            .unwrap_or(crate::model::Provider::YouTubeMusic);
+        app.navigate(Route::Settings);
     }
 }
 

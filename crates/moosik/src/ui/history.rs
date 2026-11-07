@@ -101,12 +101,18 @@ pub(crate) fn all_time_query() -> crate::listening::Query {
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
+    if !app.signed_in() && app.history_view.tab == 2 {
+        app.history_view.tab = 0;
+    }
     crate::ui::page_title(ui, &p, "Listening history");
     ui.horizontal_wrapped(|ui| {
         for (i, label) in ["Recently played", "Rediscover", "YouTube history"]
             .iter()
             .enumerate()
         {
+            if i == 2 && !app.signed_in() {
+                continue;
+            }
             if widgets::chip(ui, &p, label, app.history_view.tab == i).clicked() {
                 app.history_view.tab = i;
             }
