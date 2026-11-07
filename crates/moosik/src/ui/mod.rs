@@ -4,6 +4,7 @@
 pub mod album;
 pub mod artist;
 pub mod artist_liked;
+pub mod artist_sources;
 pub mod charts;
 pub mod crash;
 pub mod explore;
@@ -13,6 +14,7 @@ pub mod history;
 pub mod home;
 pub mod home_order;
 pub mod library;
+pub(crate) mod liked_music;
 pub mod listening;
 pub mod lyrics;
 pub mod mood;
@@ -21,12 +23,14 @@ pub(crate) mod organizer;
 pub mod paste_cookies;
 pub mod player_bar;
 pub mod playlist;
+pub mod profile;
 pub(crate) mod queue_edit;
 pub mod releases;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
 pub(crate) mod song_drag;
+pub mod source_rows;
 pub mod splash;
 pub mod topbar;
 pub mod update;
@@ -90,6 +94,8 @@ fn fill_width(available: f32, gap: f32) -> f32 {
 pub(crate) struct ReleaseCtx<'a> {
     pub playlists: &'a [crate::model::PlaylistRef],
     pub signed_in: bool,
+    pub preferred_provider: crate::model::Provider,
+    pub group_sources: bool,
     pub rail: &'a std::collections::HashMap<String, crate::model::Playlist>,
     pub albums: &'a std::collections::HashMap<String, crate::model::Album>,
 }
@@ -265,6 +271,7 @@ pub(crate) fn virtual_rows(
 /// inside the row loop, where the mutable borrow of the cache lives and dies within one iteration.
 /// A caller that handed back a `&TextureHandle` could not borrow the cache again for the next row.
 pub(crate) struct RowSpec<'a> {
+    pub source: Option<&'a str>,
     pub number: Option<usize>,
     /// A chart rank, shown in place of the position number where the track names one.
     pub rank: Option<&'a str>,
@@ -537,6 +544,33 @@ pub(crate) fn spec_rows<'d>(
     count: usize,
     spec: impl Fn(usize) -> RowSpec<'d>,
 ) -> ListOutcome {
+    spec_rows_with_slot(
+        ui,
+        palette,
+        images,
+        backend,
+        stats,
+        liked,
+        count,
+        spec,
+        |_| widgets::RowSlot::Trailing(0.0),
+        |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spec_rows_with_slot<'d>(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    images: &mut Images,
+    backend: &Backend,
+    stats: &mut crate::stats::Stats,
+    liked: &crate::liked::Index,
+    count: usize,
+    spec: impl Fn(usize) -> RowSpec<'d>,
+    slot: impl Fn(usize) -> widgets::RowSlot,
+    mut paint_slot: impl FnMut(&mut egui::Ui, usize),
+) -> ListOutcome {
     let mut clicked = None;
     let mut action = None;
     let mut reorder = None;
@@ -561,10 +595,12 @@ pub(crate) fn spec_rows<'d>(
         } else {
             art_texture(images, backend, ui.ctx(), s.thumbnail, ROW_ART_PT)
         };
-        let hit = crate::widgets::track_row(
+        let placement = slot(i);
+        let (hit, slot_rect) = crate::widgets::track_row_with_slot(
             ui,
             palette,
             crate::widgets::TrackRow {
+                source: s.source,
                 number: s.number,
                 rank: s.rank,
                 trend: s.trend,
@@ -587,7 +623,25 @@ pub(crate) fn spec_rows<'d>(
                 quiet_like: s.quiet_like,
                 add_to: s.add_to,
             },
+            placement,
         );
+        if let Some(rect) = slot_rect {
+            let mut slot_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id(ui.id().with(("row-slot", i)))
+                    .max_rect(rect)
+                    .layout(match placement {
+                        widgets::RowSlot::Trailing(_) => {
+                            egui::Layout::right_to_left(egui::Align::Center)
+                        }
+                        widgets::RowSlot::Subtitle(_) => {
+                            egui::Layout::left_to_right(egui::Align::Center)
+                        }
+                    }),
+            );
+            slot_ui.set_clip_rect(ui.clip_rect().intersect(rect));
+            paint_slot(&mut slot_ui, i);
+        }
         if hit.response.drag_started()
             && let Some(menu) = spec(i).menu
         {
@@ -708,6 +762,7 @@ fn paint_grid_cell<'d>(
         &mut cell,
         palette,
         crate::widgets::TrackRow {
+            source: s.source,
             number: s.number,
             rank: s.rank,
             trend: s.trend,
@@ -965,6 +1020,7 @@ pub(crate) fn track_rows_quiet(
         |i| {
             let t = &tracks[i];
             RowSpec {
+                source: Some(t.source_name()),
                 number: numbered.then_some(i + 1),
                 rank: t.rank.as_deref(),
                 trend: t.trend,
@@ -1067,6 +1123,7 @@ pub(crate) fn shelf_track_spec<'a>(
     signed_in: bool,
 ) -> RowSpec<'a> {
     RowSpec {
+        source: Some(t.source_name()),
         number,
         rank: t.rank.as_deref(),
         trend: t.trend,
@@ -1108,6 +1165,39 @@ pub(crate) fn shelf_track_spec<'a>(
 /// One renderer for search results, artist shelves and home shelves — they are all lists of
 /// [`Entry`], and three near-identical grid loops is how the artist page ended up losing five of
 /// its shelves in the first place.
+#[derive(Clone)]
+struct CardGroups {
+    items: Arc<[Entry]>,
+    groups: Arc<[crate::source_groups::Group]>,
+    enabled: bool,
+}
+
+fn card_groups(
+    ui: &egui::Ui,
+    id: egui::Id,
+    items: &[Entry],
+    enabled: bool,
+) -> Arc<[crate::source_groups::Group]> {
+    if let Some(cached) = ui.ctx().data(|data| data.get_temp::<CardGroups>(id))
+        && cached.enabled == enabled
+        && cached.items.as_ref() == items
+    {
+        return cached.groups;
+    }
+    let groups: Arc<[_]> = crate::source_groups::group_entries(items, enabled).into();
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            id,
+            CardGroups {
+                items: items.into(),
+                groups: Arc::clone(&groups),
+                enabled,
+            },
+        )
+    });
+    groups
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn entry_grid(
     ui: &mut egui::Ui,
@@ -1122,10 +1212,37 @@ pub(crate) fn entry_grid(
     let mut played = None;
     let mut link = None;
     let mut action = None;
+    let mut explicit_source = false;
+    let mut last_visible = false;
+    let groups = card_groups(
+        ui,
+        ui.id().with("entry-grid-groups"),
+        items,
+        ctx.group_sources,
+    );
     ui.horizontal_wrapped(|ui| {
         let card_w = grid_card_w(ui);
-        for (i, item) in items.iter().enumerate() {
-            let card = grid_card(ui, palette, images, backend, now, item, ctx, card_w);
+        for (position, group) in groups.iter().enumerate() {
+            let item = group
+                .preferred_entry(ctx.preferred_provider, None)
+                .expect("card group entry");
+            let shape = match item {
+                Entry::Video(track) if track.wide => widgets::ArtShape::Wide,
+                Entry::Artist(_) => widgets::ArtShape::Circle,
+                _ => widgets::ArtShape::Square,
+            };
+            if position + 1 == groups.len() && card_is_visible(ui, card_w, shape) {
+                last_visible = true;
+            }
+            let card = ui
+                .push_id(&group.key, |ui| {
+                    grid_card(ui, palette, images, backend, now, group, ctx, card_w)
+                })
+                .inner;
+            let index = group
+                .preferred_index(ctx.preferred_provider, card.source)
+                .unwrap_or(0);
+            let i = group.indices[index];
             if action.is_none() {
                 action = card.action;
             }
@@ -1134,6 +1251,7 @@ pub(crate) fn entry_grid(
             }
             if card.play {
                 played = Some(i);
+                explicit_source = card.source.is_some();
             } else if card.clicked {
                 clicked = Some(i);
             }
@@ -1145,6 +1263,8 @@ pub(crate) fn entry_grid(
         link,
         action,
         more: false,
+        explicit_source,
+        last_visible,
     }
 }
 
@@ -1157,10 +1277,13 @@ fn grid_card(
     images: &mut Images,
     backend: &Backend,
     now: &crate::player::NowPlaying,
-    item: &Entry,
+    group: &crate::source_groups::Group,
     ctx: &ReleaseCtx<'_>,
     width: f32,
 ) -> CardOutcome {
+    let item = group
+        .preferred_entry(ctx.preferred_provider, None)
+        .expect("card group entry");
     // A video still is 16:9: it gets the wide card and a server-side 16:9 crop, so it
     // looks like a video instead of a squashed square.
     let shape = match item {
@@ -1172,7 +1295,7 @@ fn grid_card(
     // `now.track` — but every track already carries the album it belongs to, which is exactly
     // the signal needed here. A playlist has no such per-track field (the same song can sit in
     // many), so its own branch below reads `now.playlist_playing` instead.
-    let playing = match item {
+    let playing = group.variants.iter().any(|item| match item {
         Entry::Song(t) | Entry::Video(t) => {
             now.track
                 .as_ref()
@@ -1197,7 +1320,7 @@ fn grid_card(
             }) && !now.paused
         }
         _ => false,
-    };
+    });
     // Grids are not virtualised — every card in the shelf runs this loop, on- or off-screen —
     // so skip the texture request *and* the `subtitle()` string build for the ones scrolled
     // out of view. The card's size is fixed regardless of its subtitle, so layout is unmoved.
@@ -1231,7 +1354,9 @@ fn grid_card(
             Some(widgets::CardMenu::Release(widgets::ReleaseMenu {
                 page_id: &a.id,
                 tracks: cached.map(|al| al.tracks.as_slice()).unwrap_or_default(),
-                radio_id: cached.and_then(|al| al.like_id.as_deref()),
+                radio_id: cached
+                    .and_then(|al| al.like_id.as_deref())
+                    .filter(|_| !a.id.starts_with("spotify:")),
                 artist_id: None,
                 playlists: ctx.playlists,
                 signed_in: ctx.signed_in,
@@ -1254,10 +1379,14 @@ fn grid_card(
                 playlists: ctx.playlists,
                 signed_in: ctx.signed_in,
                 share_url: crate::model::playlist_url(&p.id),
-                manage: p.editable,
+                manage: p.editable && p.source != crate::model::PlaylistSource::Spotify,
                 remove_from_library: false,
                 tracks_pending: (cached.is_none()
-                    && matches!(p.source, crate::model::PlaylistSource::YouTube))
+                    && matches!(
+                        p.source,
+                        crate::model::PlaylistSource::YouTube
+                            | crate::model::PlaylistSource::Spotify
+                    ))
                 .then_some(PageKind::Playlist),
             }))
         }
@@ -1282,13 +1411,29 @@ fn grid_card(
         Entry::Song(t) | Entry::Video(t) => t.album_id.as_deref(),
         _ => None,
     };
-    let hit = widgets::art_card(
+    let sources: Vec<_> = if group.is_combined() {
+        group
+            .providers()
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider,
+                    provider == crate::source_groups::entry_provider(item),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let hit = widgets::art_card_with_sources(
         ui,
         palette,
         width,
         art,
         item.title(),
         &subtitle,
+        Some(item.source_name()),
+        &sources,
         shape,
         menu,
         playing,
@@ -1299,13 +1444,33 @@ fn grid_card(
     // plays it in place. Only a song with no album id — rare now that the menu fills them in —
     // keeps the old play/select click, because it has no page to open. Videos carry no album id,
     // so their behaviour is unchanged.
-    let navigated = album_id.is_some() && hit.response.clicked();
-    let link = if navigated {
+    let source_entry = hit.source.and_then(|provider| group.entry_for(provider));
+    let source_route = source_entry.and_then(entry_route);
+    let artist_route = if group.is_combined() && item.is_artist() && hit.response.clicked() {
+        match (
+            group.entry_for(crate::model::Provider::YouTubeMusic),
+            group.entry_for(crate::model::Provider::Spotify),
+        ) {
+            (Some(Entry::Artist(youtube)), Some(Entry::Artist(spotify))) => {
+                Some(Route::ArtistGroup {
+                    youtube: youtube.id.clone(),
+                    spotify: spotify.id.clone(),
+                })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let navigated = hit.source.is_none() && album_id.is_some() && hit.response.clicked();
+    let link = if source_route.is_some() || artist_route.is_some() {
+        source_route.or(artist_route)
+    } else if navigated {
         album_id.map(|id| Route::Album(id.to_owned()))
     } else {
         None
     };
-    let clicked = if navigated {
+    let clicked = if navigated || hit.source.is_some() {
         false
     } else {
         match track_id {
@@ -1319,8 +1484,10 @@ fn grid_card(
         match item {
             Entry::Album(a) if !ctx.albums.contains_key(&a.id) => backend.fetch_album(a.id.clone()),
             Entry::Playlist(p)
-                if matches!(p.source, crate::model::PlaylistSource::YouTube)
-                    && !ctx.rail.contains_key(&p.id) =>
+                if matches!(
+                    p.source,
+                    crate::model::PlaylistSource::YouTube | crate::model::PlaylistSource::Spotify
+                ) && !ctx.rail.contains_key(&p.id) =>
             {
                 backend.fetch_playlist(p.id.clone());
             }
@@ -1328,8 +1495,9 @@ fn grid_card(
         }
     }
     CardOutcome {
+        source: hit.source,
         clicked,
-        play: hit.play,
+        play: hit.play || source_entry.is_some_and(|entry| entry.track().is_some()),
         link,
         action: hit.action,
     }
@@ -1337,6 +1505,7 @@ fn grid_card(
 
 /// What one card reports.
 struct CardOutcome {
+    source: Option<crate::model::Provider>,
     clicked: bool,
     /// See `widgets::CardClick::play` — wins over `clicked`.
     play: bool,
@@ -1347,6 +1516,8 @@ struct CardOutcome {
 
 /// What a card grid reports: the card that was clicked, and any menu choice.
 pub(crate) struct GridOutcome {
+    pub last_visible: bool,
+    pub explicit_source: bool,
     pub clicked: Option<usize>,
     /// The card whose corner play button specifically was clicked — wins over `clicked`, the
     /// same way a row's title link wins over its own click.
@@ -1418,6 +1589,13 @@ pub(crate) fn carousel(
     let mut played = None;
     let mut link = None;
     let mut action = None;
+    let mut explicit_source = false;
+    let groups = card_groups(
+        ui,
+        ui.id().with(("carousel-groups", salt)),
+        items,
+        ctx.group_sources,
+    );
     let mut more_pressed = false;
 
     let id = ui.id().with(("ytm-carousel-off", salt));
@@ -1428,7 +1606,7 @@ pub(crate) fn carousel(
     // that many, so no page ever shows half a card at its edge.
     let (per_page, card_w) = carousel_fit(view, gap, CARD_W);
     let page = per_page as f32 * (card_w + gap);
-    let total = items.len() as f32 * card_w + items.len().saturating_sub(1) as f32 * gap;
+    let total = groups.len() as f32 * card_w + groups.len().saturating_sub(1) as f32 * gap;
     let max = (total - view).max(0.0);
 
     // The row's width changed — the window resized, the queue or lyrics opened or closed — so
@@ -1520,8 +1698,16 @@ pub(crate) fn carousel(
     let out = area.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for (i, item) in items.iter().enumerate() {
-                let card = grid_card(ui, palette, images, backend, now, item, ctx, card_w);
+            for group in groups.iter() {
+                let card = ui
+                    .push_id(&group.key, |ui| {
+                        grid_card(ui, palette, images, backend, now, group, ctx, card_w)
+                    })
+                    .inner;
+                let index = group
+                    .preferred_index(ctx.preferred_provider, card.source)
+                    .unwrap_or(0);
+                let i = group.indices[index];
                 if action.is_none() {
                     action = card.action;
                 }
@@ -1530,6 +1716,7 @@ pub(crate) fn carousel(
                 }
                 if card.play {
                     played = Some(i);
+                    explicit_source = card.source.is_some();
                 } else if card.clicked {
                     clicked = Some(i);
                 }
@@ -1544,6 +1731,8 @@ pub(crate) fn carousel(
         link,
         action,
         more: more_pressed,
+        explicit_source,
+        last_visible: false,
     }
 }
 
@@ -1667,6 +1856,8 @@ pub(crate) fn shelf_carousel(
     }
 
     let signed_in = app.signed_in();
+    let preferred_provider = app.settings.preferred_provider;
+    let group_sources = app.can_group_sources();
     let grid = {
         let crate::app::App {
             palette,
@@ -1681,6 +1872,8 @@ pub(crate) fn shelf_carousel(
         let ctx = ReleaseCtx {
             playlists: &library.playlists.items,
             signed_in,
+            preferred_provider,
+            group_sources,
             rail: rail_cache,
             albums: album_cache,
         };
@@ -1803,6 +1996,8 @@ fn shelf_show_all(ui: &mut egui::Ui, palette: &theme::Palette) -> egui::Response
 
 fn draw_shelf_grid(app: &mut crate::app::App, ui: &mut egui::Ui, shelf: &Shelf) {
     let signed_in = app.signed_in();
+    let preferred_provider = app.settings.preferred_provider;
+    let group_sources = app.can_group_sources();
     let grid = {
         let crate::app::App {
             palette,
@@ -1817,6 +2012,8 @@ fn draw_shelf_grid(app: &mut crate::app::App, ui: &mut egui::Ui, shelf: &Shelf) 
         let ctx = ReleaseCtx {
             playlists: &library.playlists.items,
             signed_in,
+            preferred_provider,
+            group_sources,
             rail: rail_cache,
             albums: album_cache,
         };
@@ -1963,12 +2160,14 @@ pub(crate) fn header_wash_colour(
 /// fills art and texts and draws its own buttons, since Shuffle/Mix/Subscribe are not
 /// Play/Save/•••.
 pub(crate) struct PageHeader<'a> {
+    pub source: Option<&'a str>,
     pub art_url: Option<&'a std::sync::Arc<str>>,
     pub art_size: f32,
     pub circle: bool,
     /// The type line (`ALBUM · 1995`). Empty hides it.
     pub kind_label: &'a str,
     pub title: &'a str,
+    pub verification: Option<artist::VerificationMark>,
     /// A lowkey one-line description, between the title and the credits (Spotify-style). Only
     /// playlists fill it.
     pub description: Option<&'a str>,
@@ -2089,10 +2288,12 @@ pub(crate) fn page_header(
     // The title takes the largest size that still fits its column, down to a floor: a long
     // album or playlist name steps the type down rather than ellipsizing, so a one-word name
     // stays loud and a sentence-long one stays whole.
+    let title_w =
+        (text_w - artist::verification_width(usize::from(h.verification.is_some()))).max(0.0);
     let title_size = widgets::fit_size(
         ui,
         h.title,
-        text_w,
+        title_w,
         DETAIL_TITLE_MAX,
         DETAIL_TITLE_MIN,
         theme::bold,
@@ -2112,7 +2313,7 @@ pub(crate) fn page_header(
     } else {
         widgets::title_centre_under_label(KIND_BASELINE, KIND_TO_TITLE_AIR, title_size)
     };
-    let shown_title = widgets::truncate_to(ui, h.title, title_font.clone(), text_w);
+    let shown_title = widgets::truncate_to(ui, h.title, title_font.clone(), title_w);
     // Where the painted title's ink actually ends, measured before anything is drawn so the
     // whole block can be placed first.
     let title_ink = widgets::ink_drop(ui, &shown_title, &title_font);
@@ -2141,20 +2342,46 @@ pub(crate) fn page_header(
     let text_top = art_rect.top() + (art_size - block_h).max(0.0);
     let mut y = text_top + title_rel;
     if !h.kind_label.is_empty() {
+        let source_w = if let Some(source) = h.source {
+            widgets::source_name_indicator(
+                ui,
+                palette,
+                egui::Rect::from_center_size(
+                    egui::pos2(tx + 9.0, text_top + KIND_CENTRE),
+                    egui::vec2(18.0, 18.0),
+                ),
+                source,
+                ui.id().with((h.salt, "source")),
+            );
+            22.0
+        } else {
+            0.0
+        };
         ui.painter().text(
-            egui::pos2(tx, text_top + KIND_CENTRE),
+            egui::pos2(tx + source_w, text_top + KIND_CENTRE),
             egui::Align2::LEFT_CENTER,
-            widgets::truncate_to(ui, h.kind_label, theme::semibold(12.0), text_w),
+            widgets::truncate_to(
+                ui,
+                h.kind_label,
+                theme::semibold(12.0),
+                (text_w - source_w).max(0.0),
+            ),
             theme::semibold(12.0),
             palette.dim,
         );
     }
-    crate::emoji::paint_line(
+    let title_advance = crate::emoji::paint_line(
         ui,
         egui::pos2(tx, y),
         &shown_title,
         title_font.clone(),
         palette.text,
+    );
+    artist::paint_verification_marks(
+        ui,
+        palette.panel,
+        egui::pos2(tx + title_advance, y),
+        h.verification,
     );
     // The last text line painted, so the controls' baseline stays under it whether or not
     // the header has an artist line and a meta line.
@@ -2216,10 +2443,29 @@ pub(crate) fn page_header(
             y += LINE_GAP;
         }
         (true, Some(plain)) => {
+            let source_w = if h.kind_label.is_empty()
+                && let Some(source) = h.source
+            {
+                widgets::source_name_indicator(
+                    ui,
+                    palette,
+                    egui::Rect::from_center_size(egui::pos2(tx + 9.0, y), egui::vec2(18.0, 18.0)),
+                    source,
+                    ui.id().with((h.salt, "source")),
+                );
+                22.0
+            } else {
+                0.0
+            };
             ui.painter().text(
-                egui::pos2(tx, y),
+                egui::pos2(tx + source_w, y),
                 egui::Align2::LEFT_CENTER,
-                widgets::truncate_to(ui, plain, theme::regular(13.0), text_w),
+                widgets::truncate_to(
+                    ui,
+                    plain,
+                    theme::regular(13.0),
+                    (text_w - source_w).max(0.0),
+                ),
                 theme::regular(13.0),
                 palette.secondary,
             );
@@ -2772,6 +3018,7 @@ pub(crate) fn entry_row_spec<'a>(
         Entry::Mood(_) => (widgets::plain_subtitle(""), None, None, false, false),
     };
     RowSpec {
+        source: Some(item.source_name()),
         number: None,
         rank: match item {
             Entry::Song(t) | Entry::Video(t) => t.rank.as_deref(),
@@ -2870,6 +3117,30 @@ pub(crate) fn entry_rows(app: &mut crate::app::App, ui: &mut egui::Ui, items: &[
     }
 }
 
+fn grid_queue(
+    items: &[Entry],
+    clicked: usize,
+    preferred: crate::model::Provider,
+    enabled: bool,
+) -> Option<(Vec<Track>, usize)> {
+    let groups = crate::source_groups::group_entries(items, enabled);
+    let mut tracks = Vec::new();
+    let mut selected = None;
+    for group in groups {
+        let clicked_variant = group.indices.iter().position(|index| *index == clicked);
+        let entry = clicked_variant
+            .map(|index| &group.variants[index])
+            .or_else(|| group.preferred_entry(preferred, None));
+        if let Some(track) = entry.and_then(Entry::track) {
+            if clicked_variant.is_some() {
+                selected = Some(tracks.len());
+            }
+            tracks.push(track.clone());
+        }
+    }
+    selected.map(|index| (tracks, index))
+}
+
 /// What a card grid — wrapped or carousel — does with a click or a menu choice.
 pub(crate) fn finish_grid(app: &mut crate::app::App, shelf: &Shelf, grid: GridOutcome) {
     if let Some(action) = grid.action {
@@ -2899,9 +3170,17 @@ pub(crate) fn finish_grid(app: &mut crate::app::App, shelf: &Shelf, grid: GridOu
                 return;
             }
             Entry::Song(_) | Entry::Video(_) => {
-                let tracks = shelf.tracks();
-                if let Some(index) = shelf.track_index(i) {
-                    app.play_row(tracks, index);
+                if let Some((tracks, index)) = grid_queue(
+                    &shelf.items,
+                    i,
+                    app.settings.preferred_provider,
+                    app.can_group_sources(),
+                ) {
+                    if grid.explicit_source {
+                        app.play_source(tracks, index);
+                    } else {
+                        app.play_row(tracks, index);
+                    }
                 }
                 return;
             }
@@ -2915,9 +3194,17 @@ pub(crate) fn finish_grid(app: &mut crate::app::App, shelf: &Shelf, grid: GridOu
             Some(route) => app.navigate(route),
             // A video card in a card shelf still plays; it starts the song and its radio.
             None => {
-                let tracks = shelf.tracks();
-                if let Some(index) = shelf.track_index(i) {
-                    app.play_row(tracks, index);
+                if let Some((tracks, index)) = grid_queue(
+                    &shelf.items,
+                    i,
+                    app.settings.preferred_provider,
+                    app.can_group_sources(),
+                ) {
+                    if grid.explicit_source {
+                        app.play_source(tracks, index);
+                    } else {
+                        app.play_row(tracks, index);
+                    }
                 }
             }
         }
@@ -3316,6 +3603,40 @@ pub(crate) mod tips {
 mod tests {
     use super::*;
 
+    #[test]
+    fn grouped_card_queue_keeps_raw_selection_and_uses_preference_for_other_songs() {
+        use crate::model::{ArtistLink, Provider};
+        let mut items = Vec::new();
+        for index in 0..2 {
+            for provider in [Provider::YouTubeMusic, Provider::Spotify] {
+                let mut track = crate::listening::Metadata {
+                    id: if provider == Provider::Spotify {
+                        format!("spotify:track:{:022}", index + 1)
+                    } else {
+                        format!("youtube{index}")
+                    },
+                    title: format!("Song {index}"),
+                    ..Default::default()
+                }
+                .to_track();
+                track.artists = vec![ArtistLink::plain("Artist")];
+                track.duration = Some(180);
+                items.push(Entry::Song(track));
+            }
+        }
+        let (tracks, index) = grid_queue(&items, 2, Provider::Spotify, true).unwrap();
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(index, 1);
+        assert!(tracks[0].is_spotify());
+        assert!(!tracks[1].is_spotify());
+        assert_eq!(tracks[1].video_id, "youtube1");
+        let (tracks, index) = grid_queue(&items, 3, Provider::Spotify, true).unwrap();
+        assert_eq!(index, 1);
+        assert!(tracks.iter().all(Track::is_spotify));
+        let (tracks, index) = grid_queue(&items, 2, Provider::Spotify, false).unwrap();
+        assert_eq!(tracks.len(), 4);
+        assert_eq!(index, 2);
+    }
     const ROW: f32 = 56.0;
 
     /// The wash's ramp: full strength where the header starts, gone where it ends, and never

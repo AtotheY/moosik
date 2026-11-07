@@ -241,6 +241,71 @@ mod tests {
     }
 
     #[test]
+    fn restored_mixed_queue_keeps_source_identity_and_shuffle_order() {
+        let mut youtube = sample();
+        youtube.local_path = None;
+        let mut spotify = youtube.clone();
+        spotify.video_id = "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into();
+        spotify.album_id = Some("spotify:album:0000000000000000000001".into());
+        spotify.artists[0].id = Some("spotify:artist:0000000000000000000002".into());
+        spotify.wide = false;
+        let mut local = sample();
+        local.video_id = "music/Local song 漢.flac".into();
+        local.local_path = Some(Arc::from(std::path::Path::new(&local.video_id)));
+        let original = [youtube, spotify, local];
+        let store = Store {
+            version: 1,
+            queue: original.iter().map(PersistedTrack::from_track).collect(),
+            current: Some(1),
+            position: 43.25,
+            repeat: Some(RepeatKind::All),
+            shuffle: true,
+            shuffle_order: Some(vec![1, 2, 0]),
+            volume: 35.0,
+            muted: false,
+            video_open: false,
+        };
+        let back: Store = serde_json::from_slice(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let restored: Vec<_> = back
+            .queue
+            .into_iter()
+            .map(PersistedTrack::into_track)
+            .collect();
+        assert_eq!(
+            restored.iter().map(Track::provider).collect::<Vec<_>>(),
+            [
+                crate::model::Provider::YouTubeMusic,
+                crate::model::Provider::Spotify,
+                crate::model::Provider::Local
+            ]
+        );
+        for (track, expected) in restored.iter().zip(&original) {
+            assert_eq!(track.video_id, expected.video_id);
+            assert_eq!(track.local_path, expected.local_path);
+            assert_eq!(track.album_id, expected.album_id);
+            assert_eq!(track.artists, expected.artists);
+        }
+        let mut queue = crate::queue::PlayQueue::new(999);
+        queue.restore_session(
+            restored,
+            back.current,
+            Some(back.position),
+            back.shuffle,
+            None,
+        );
+        queue.restore_shuffle_order(back.shuffle_order);
+        assert_eq!(
+            queue.current_track().unwrap().provider(),
+            crate::model::Provider::Spotify
+        );
+        assert_eq!(queue.resume_here(), Some(43.25));
+        assert_eq!(queue.upcoming(RepeatMode::All, None), [2, 0]);
+        assert_eq!(queue.next(RepeatMode::All, None), Some(2));
+        assert_eq!(back.repeat, Some(RepeatKind::All));
+        assert_eq!(back.volume, 35.0);
+    }
+
+    #[test]
     fn repeat_modes_map_both_ways() {
         for mode in [RepeatMode::Off, RepeatMode::All, RepeatMode::One] {
             assert_eq!(RepeatMode::from(RepeatKind::from(mode)), mode);

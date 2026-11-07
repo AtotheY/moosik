@@ -1,0 +1,24 @@
+[package]
+name = "moosik-spotify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+data-encoding = "2"
+flate2 = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+hmac = "0.12"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
+thiserror = "2"
+tokio.workspace = true
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+url.workspace = true
+uuid = { version = "1", features = ["v4"] }

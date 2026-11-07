@@ -129,7 +129,13 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // and the credits share the field width from this column, so a short title leaves
     // the credits the whole room instead of almost none. No thumb width when signed
     // out: the thumbs do not draw, so the title keeps the room.
-    let thumbs_w = if app.signed_in() { 72.0 } else { 0.0 };
+    let ratable = app.signed_in()
+        && app
+            .now
+            .track
+            .as_ref()
+            .is_some_and(|track| track.provider() == crate::model::Provider::YouTubeMusic);
+    let thumbs_w = if ratable { 72.0 } else { 0.0 };
     // The seek bar is wider than the transport, and its elapsed-time label hangs left of
     // the bar at subtitle height — the title has to clear the label, not just the buttons,
     // or long titles sit underneath it. The total stands in for the elapsed (at least as
@@ -197,7 +203,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|t| widgets::subtitle_width(ui, &crate::ui::track_subtitle(t), None))
         .unwrap_or(0.0)
-        .max(widgets::text_width(ui, &title, &theme::medium(13.0)));
+        .max(
+            widgets::text_width(ui, &title, &theme::medium(13.0))
+                + if app.now.track.is_some() { 22.0 } else { 0.0 },
+        );
     let text_w = (content_w + 8.0)
         .clamp(24.0, FIELD_MAX_W)
         .min((transport_start - thumbs_w - 8.0 - title_x).max(0.0))
@@ -213,8 +222,26 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // overflows; a title that fits gets a hit rect the width of its text, so neither the
     // blank field nor the credits answer the pointer.
     let title_font = theme::medium(13.0);
-    let title_pos = egui::pos2(title_x, rect.center().y - 9.0);
-    let title_w = widgets::text_width(ui, &title, &title_font).min(field_w);
+    let source_w = if field_w >= 64.0
+        && let Some(track) = app.now.track.as_ref()
+    {
+        widgets::source_indicator(
+            ui,
+            &p,
+            Rect::from_center_size(
+                egui::pos2(title_x + 9.0, rect.center().y - 9.0),
+                vec2(18.0, 18.0),
+            ),
+            track,
+            ui.id().with("np-source"),
+        );
+        22.0
+    } else {
+        0.0
+    };
+    let title_field_w = field_w - source_w;
+    let title_pos = egui::pos2(title_x + source_w, rect.center().y - 9.0);
+    let title_w = widgets::text_width(ui, &title, &title_font).min(title_field_w);
     let title_rect = Rect::from_min_size(
         egui::pos2(title_pos.x, title_pos.y - widgets::MARQUEE_HIT_H / 2.0),
         vec2(title_w, widgets::MARQUEE_HIT_H),
@@ -223,7 +250,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     let title_hit = widgets::marquee_line(
         ui,
         title_pos,
-        field_w,
+        title_field_w,
         &title,
         title_font,
         p.text,
@@ -312,6 +339,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(route) = navigate {
+        let route = match route {
+            Route::Artist(id) => app.combined_artist_route(&id).unwrap_or(Route::Artist(id)),
+            route => route,
+        };
         app.navigate(route);
     }
     // A primary click on the title opens its album or single; the menu is the right-click.
@@ -324,9 +355,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // Borrow the track to read `like`; the whole `Track` was being deep-cloned every frame
     // just for this. `video_id` is only cloned on an actual click.
     let mut rate: Option<RowAction> = None;
-    if app.signed_in()
-        && let Some(track) = app.now.track.as_ref()
-    {
+    if ratable && let Some(track) = app.now.track.as_ref() {
         let thumbs = Rect::from_min_size(
             egui::pos2(thumbs_x, rect.center().y - 16.0),
             vec2(thumbs_w, 32.0),

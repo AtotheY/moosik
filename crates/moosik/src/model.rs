@@ -5,6 +5,43 @@
 
 use std::sync::Arc;
 
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    #[default]
+    YouTubeMusic,
+    Spotify,
+    Local,
+}
+
+impl Provider {
+    pub const ALL: [Self; 3] = [Self::YouTubeMusic, Self::Spotify, Self::Local];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::YouTubeMusic => "YouTube Music",
+            Self::Spotify => "Spotify",
+            Self::Local => "Local",
+        }
+    }
+
+    pub fn search_scopes(self) -> &'static [SearchScope] {
+        match self {
+            Self::YouTubeMusic => &SearchScope::ALL,
+            Self::Spotify => &[
+                SearchScope::All,
+                SearchScope::Songs,
+                SearchScope::Artists,
+                SearchScope::Albums,
+                SearchScope::Playlists,
+            ],
+            Self::Local => &[SearchScope::All, SearchScope::Songs],
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Track {
     pub video_id: String,
@@ -52,6 +89,34 @@ pub struct Track {
     /// source, and the thing that makes `video_id` a plain path string rather than a real
     /// YouTube id for this track. `None` for everything else in the app.
     pub local_path: Option<Arc<std::path::Path>>,
+}
+
+impl Track {
+    pub fn provider(&self) -> Provider {
+        if self.local_path.is_some() {
+            Provider::Local
+        } else if self.is_spotify() {
+            Provider::Spotify
+        } else {
+            Provider::YouTubeMusic
+        }
+    }
+
+    pub fn source_name(&self) -> &'static str {
+        match self.provider() {
+            Provider::Local => "Local file",
+            provider => provider.name(),
+        }
+    }
+
+    pub fn is_spotify(&self) -> bool {
+        self.local_path.is_none() && is_spotify_id(&self.video_id)
+    }
+}
+
+pub fn is_spotify_id(id: &str) -> bool {
+    id.strip_prefix("spotify:track:")
+        .is_some_and(|id| id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
 /// Your rating of a song, as the row's like button reports it.
@@ -154,6 +219,8 @@ pub struct AlbumRef {
     pub id: String,
     pub title: String,
     pub artist: String,
+    pub artists: Vec<ArtistLink>,
+    pub explicit: Option<bool>,
     pub year: Option<String>,
     /// `"Album"`, `"Single"` or `"EP"` when the source labels it. Used to split a full
     /// discography; search hits leave it empty.
@@ -169,6 +236,7 @@ pub struct AlbumRef {
 pub enum PlaylistSource {
     #[default]
     YouTube,
+    Spotify,
     Local,
 }
 
@@ -250,6 +318,21 @@ pub enum Entry {
 }
 
 impl Entry {
+    pub fn source_name(&self) -> &'static str {
+        match self {
+            Self::Song(track) | Self::Video(track) => track.source_name(),
+            Self::Artist(artist) if artist.id.starts_with("spotify:") => "Spotify",
+            Self::Album(album) if album.id.starts_with("spotify:") => "Spotify",
+            Self::Playlist(playlist) => match playlist.source {
+                PlaylistSource::Spotify => "Spotify",
+                PlaylistSource::Local if playlist.id.starts_with("private:") => "Private playlist",
+                PlaylistSource::Local => "Local file",
+                PlaylistSource::YouTube => "YouTube Music",
+            },
+            _ => "YouTube Music",
+        }
+    }
+
     /// The track to play, for the kinds that are playable.
     pub fn track(&self) -> Option<&Track> {
         match self {
@@ -331,7 +414,7 @@ impl Entry {
 /// response mentions one or two in passing. Living here rather than in `app.rs` (where
 /// `LibrarySort`/`PlaylistSort`, its nearest siblings, do) is what lets `api.rs` depend on it
 /// without depending on the app layer above it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SearchScope {
     #[default]
     All,
@@ -794,16 +877,15 @@ impl SearchResults {
 pub struct Artist {
     pub id: String,
     pub name: String,
+    pub verified: bool,
+    pub official_artist_channel: bool,
     /// The short count from `subscriberCountText` ("20.8M") — what fits on the Subscribe
     /// button. It carries no unit on purpose; the long form is [`Self::subscribers_long`].
     pub subscribers: Option<String>,
-    /// `"20.8M subscribers"`, complete and localised by YouTube. The header shows this under
-    /// the name when the artist has no monthly-audience line (a small artist), so the page
-    /// never prints the unitless button count as a sentence.
+    /// `"20.8M subscribers"`, complete and localised by YouTube.
     pub subscribers_long: Option<String>,
-    /// `"213M monthly audience"`, complete from YouTube. This is what the page shows under the
-    /// name; the subscriber count belongs on the Subscribe button and the view total on the
-    /// About section, which is where they were double-billed before.
+    pub followers: Option<String>,
+    /// Provider-formatted monthly audience or listener count with its label.
     pub monthly_listeners: Option<String>,
     pub views: Option<String>,
     pub actions: ArtistActions,
@@ -830,6 +912,20 @@ pub struct Artist {
     /// `Arc`-wrapped like every sibling feed (`home`/`explore`/`releases`/`moods`/
     /// `history_shelves`) so a per-frame snapshot is a refcount bump, not a deep clone.
     pub shelves: Arc<Vec<Shelf>>,
+}
+
+impl Artist {
+    pub(crate) fn audience_stats(&self) -> impl Iterator<Item = &str> {
+        [
+            self.monthly_listeners.as_deref(),
+            self.subscribers_long
+                .as_deref()
+                .or(self.followers.as_deref()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|stat| !stat.trim().is_empty())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -942,16 +1038,28 @@ pub fn bare_playlist_id(id: &str) -> &str {
 /// The public YouTube Music URL for a track. One source of truth for the Share menu, the
 /// player bar and the page menus.
 pub fn track_url(video_id: &str) -> String {
+    if is_spotify_id(video_id) {
+        return format!("https://open.spotify.com/track/{}", &video_id[14..]);
+    }
     format!("https://music.youtube.com/watch?v={video_id}")
 }
 
 /// The public YouTube Music URL for an album.
 pub fn album_url(album_id: &str) -> String {
+    if let Some(id) = album_id.strip_prefix("spotify:album:") {
+        return format!("https://open.spotify.com/album/{id}");
+    }
     format!("https://music.youtube.com/browse/{album_id}")
 }
 
 /// The public YouTube Music URL for a playlist. Accepts the prefixed (`VL…`) or bare id.
 pub fn playlist_url(playlist_id: &str) -> String {
+    if let Some(id) = playlist_id.strip_prefix("spotify:playlist:") {
+        return format!("https://open.spotify.com/playlist/{id}");
+    }
+    if playlist_id == "spotify:collection:tracks" {
+        return "https://open.spotify.com/collection/tracks".to_owned();
+    }
     format!(
         "https://music.youtube.com/playlist?list={}",
         bare_playlist_id(playlist_id)
@@ -960,6 +1068,9 @@ pub fn playlist_url(playlist_id: &str) -> String {
 
 /// The public YouTube Music URL for an artist's channel.
 pub fn artist_url(artist_id: &str) -> String {
+    if let Some(id) = artist_id.strip_prefix("spotify:artist:") {
+        return format!("https://open.spotify.com/artist/{id}");
+    }
     format!("https://music.youtube.com/channel/{artist_id}")
 }
 
@@ -1038,6 +1149,16 @@ pub struct Library {
     pub artists: Paged<ArtistRef>,
     pub albums: Paged<AlbumRef>,
     pub playlists: Paged<PlaylistRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountProfile {
+    pub provider: Provider,
+    pub id: String,
+    pub name: String,
+    pub thumbnail: Option<Arc<str>>,
+    pub followers: Option<u64>,
+    pub url: Option<String>,
 }
 
 /// A channel the signed-in Google account can browse as.
@@ -1444,6 +1565,18 @@ mod tests {
         assert_eq!(mood.kind(), "Mood");
     }
 
+    #[test]
+    fn track_source_uses_native_identity_and_local_path() {
+        let yt = song("yt-track");
+        assert_eq!(yt.track().unwrap().provider(), Provider::YouTubeMusic);
+        let spotify = song("spotify:track:3TO7bbrUKrOSPGRTB5MeCz");
+        assert_eq!(spotify.track().unwrap().provider(), Provider::Spotify);
+        let mut local = spotify.track().unwrap().clone();
+        local.local_path = Some(std::path::PathBuf::from("track.mp3").into());
+        assert_eq!(local.provider(), Provider::Local);
+        assert_eq!(local.source_name(), "Local file");
+    }
+
     fn song(id: &str) -> Entry {
         Entry::Song(Track {
             video_id: id.to_owned(),
@@ -1482,6 +1615,8 @@ mod tests {
             id: id.to_owned(),
             title: id.to_owned(),
             artist: String::new(),
+            artists: Vec::new(),
+            explicit: None,
             year: None,
             kind: None,
             thumbnail: None,

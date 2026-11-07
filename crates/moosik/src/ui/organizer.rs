@@ -746,8 +746,9 @@ pub(crate) fn grid(app: &mut App, ui: &mut egui::Ui) {
             }
             let pl = visible[index.expect("playlist card index")];
             let on_screen = super::card_is_visible(ui, w, widgets::ArtShape::Square);
+            let is_liked = crate::model::is_liked_auto(&pl.id);
 
-            let art = on_screen
+            let art = (on_screen && !is_liked)
                 .then(|| {
                     super::art_texture(
                         &mut app.images,
@@ -772,15 +773,34 @@ pub(crate) fn grid(app: &mut App, ui: &mut egui::Ui) {
                 &p,
                 w,
                 art,
-                &pl.title,
+                if is_liked {
+                    super::liked_music::TITLE
+                } else {
+                    &pl.title
+                },
                 subtitle,
+                (!is_liked).then_some(match pl.source {
+                    crate::model::PlaylistSource::YouTube => "YouTube Music",
+                    crate::model::PlaylistSource::Spotify => "Spotify",
+                    crate::model::PlaylistSource::Local if pl.id.starts_with("private:") => {
+                        "Private playlist"
+                    }
+                    crate::model::PlaylistSource::Local => "Local file",
+                }),
                 widgets::ArtShape::Square,
                 None,
                 false,
                 selected,
                 true,
-                !view.selecting,
+                !view.selecting && !is_liked,
             );
+            if on_screen && is_liked {
+                let art_rect = egui::Rect::from_min_size(
+                    card.response.rect.min + egui::vec2(8.0, 8.0),
+                    egui::Vec2::splat(w - 16.0),
+                );
+                super::liked_music::paint_cover(ui, &p, art_rect);
+            }
             if selected || layout.pins.contains(&pl.id) {
                 let center = card.response.rect.min + egui::vec2(22.0, 22.0);
                 ui.painter().circle_filled(center, 10.0, p.accent);

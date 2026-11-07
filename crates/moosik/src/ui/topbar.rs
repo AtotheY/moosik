@@ -11,6 +11,8 @@
 //! when the queue opens, and letting this bar run to the window's right edge is what keeps them
 //! there.
 
+use std::sync::Arc;
+
 use egui::{CornerRadius, Rect, Sense, Ui, vec2};
 
 use crate::app::{App, Route};
@@ -55,10 +57,8 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         }
         right.add_space(10.0);
     }
-    let signed_in = app.signed_in();
     let chip = account_chip(app, &mut right);
-    // Anchor to the button so keyboard activation has a position too.
-    account_menu(app, &mut right, &chip, signed_in);
+    account_menu(app, &mut right, &chip);
     right.add_space(2.0);
     // This group lays out right to left: put an available update directly beside the avatar.
     if app.update.notice
@@ -579,32 +579,77 @@ pub(crate) fn search_id() -> egui::Id {
     egui::Id::new("ytm-search-field")
 }
 
-/// The account chip: the signed-in account's avatar, opening the account menu. A generic glyph
-/// signed out.
 fn account_chip(app: &mut App, ui: &mut Ui) -> egui::Response {
-    let name = match &app.auth {
-        crate::auth::AuthState::SignedIn { account } => Some(account.clone()),
-        _ => None,
+    let connected = app.connected_providers();
+    let youtube = connected
+        .contains(&crate::model::Provider::YouTubeMusic)
+        .then(|| youtube_identity(app))
+        .flatten();
+    let spotify_connected = connected.contains(&crate::model::Provider::Spotify);
+    let spotify = app
+        .profile
+        .spotify
+        .as_ref()
+        .filter(|_| spotify_connected)
+        .map(|profile| (profile.name.clone(), profile.thumbnail.clone()));
+    let identity = if app.settings.preferred_provider == crate::model::Provider::Spotify {
+        spotify.as_ref().or(youtube.as_ref())
+    } else {
+        youtube.as_ref().or(spotify.as_ref())
     };
-    avatar_circle(app, ui, name.as_deref())
+    let mut accounts = Vec::new();
+    if let Some((name, _)) = &youtube {
+        accounts.push(format!("YouTube Music: {name}"));
+    }
+    if spotify_connected {
+        accounts.push(spotify.as_ref().map_or_else(
+            || "Spotify: Connected".to_owned(),
+            |(name, _)| format!("Spotify: {name}"),
+        ));
+    }
+    let tooltip = if accounts.is_empty() {
+        "Accounts".to_owned()
+    } else {
+        accounts.join("\n")
+    };
+    avatar_circle(
+        app,
+        ui,
+        identity.map(|(name, _)| name.as_str()),
+        identity.and_then(|(_, photo)| photo.as_ref()),
+        &tooltip,
+    )
 }
 
-/// The circular avatar on its own: the photo, the initial while it loads, a glyph signed out.
-fn avatar_circle(app: &mut App, ui: &mut Ui, name: Option<&str>) -> egui::Response {
+fn youtube_identity(app: &App) -> Option<(String, Option<Arc<str>>)> {
+    let crate::auth::AuthState::SignedIn { account } = &app.auth else {
+        return None;
+    };
+    let current = app
+        .accounts
+        .iter()
+        .find(|profile| profile.page_id == app.settings.account_page_id)
+        .or_else(|| app.accounts.iter().find(|profile| profile.selected))
+        .or(app.accounts.first());
+    Some((
+        current.map_or_else(|| account.clone(), |profile| profile.name.clone()),
+        current.and_then(|profile| profile.thumbnail.clone()),
+    ))
+}
+
+fn avatar_circle(
+    app: &mut App,
+    ui: &mut Ui,
+    name: Option<&str>,
+    thumbnail: Option<&Arc<str>>,
+    tooltip: &str,
+) -> egui::Response {
     let p = app.palette;
-    // The photo YouTube already sent with the channel list.
-    let photo = name.and_then(|_| {
-        let current = app
-            .accounts
-            .iter()
-            .find(|a| a.page_id == app.settings.account_page_id)
-            .or_else(|| app.accounts.iter().find(|a| a.selected))
-            .or(app.accounts.first());
-        let url = current?.thumbnail.clone()?;
+    let photo = thumbnail.and_then(|url| {
         let crate::app::App {
             images, backend, ..
         } = app;
-        crate::ui::art_texture(images, backend, ui.ctx(), Some(&url), 28.0)
+        crate::ui::art_texture(images, backend, ui.ctx(), Some(url), 28.0)
     });
     let d = 28.0;
     let (rect, response) = ui.allocate_exact_size(vec2(d, d), Sense::click());
@@ -648,14 +693,93 @@ fn avatar_circle(app: &mut App, ui: &mut Ui, name: Option<&str>) -> egui::Respon
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
-    response.on_hover_text(name.unwrap_or("Not signed in"))
+    response.on_hover_text(tooltip)
 }
 
-/// What the chip opens: signed in, the channels this Google account can browse as — each with
-/// its photo and a tick on the current one — then Settings and Sign out; signed out, Log in and
-/// Settings. Log in opens the sign-in window on Windows and navigates to Settings' browser
-/// import everywhere else.
-fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response, signed_in: bool) {
+fn account_menu_identity(
+    app: &mut App,
+    ui: &mut Ui,
+    name: &str,
+    thumbnail: Option<&Arc<str>>,
+    selected: bool,
+) -> egui::Response {
+    let p = app.palette;
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    let mut truncated = false;
+    if ui.is_rect_visible(rect) {
+        let t = widgets::lit(ui, &response);
+        let base = if selected {
+            widgets::mix(p.surface, p.surface_active, 0.45)
+        } else {
+            p.surface
+        };
+        let fill = if response.is_pointer_button_down_on() {
+            p.surface_active
+        } else {
+            widgets::mix(base, p.surface_hover, t)
+        };
+        if selected || t > 0.001 || response.is_pointer_button_down_on() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(theme::RADIUS_SMALL + 2), fill);
+        }
+        let nudge = widgets::press_offset(&response);
+        let photo_rect = Rect::from_center_size(
+            rect.left_center() + vec2(18.0, 0.0) + nudge,
+            vec2(24.0, 24.0),
+        );
+        let (images, backend) = (&mut app.images, &app.backend);
+        match thumbnail
+            .and_then(|url| crate::ui::art_texture(images, backend, ui.ctx(), Some(url), 24.0))
+        {
+            Some(tex) => {
+                widgets::paint_art(ui, &p, photo_rect, Some(tex), widgets::ArtShape::Circle)
+            }
+            None => crate::icons::paint_source(ui, photo_rect, "YouTube Music", p.secondary),
+        }
+        let text_pos = rect.left_center() + vec2(38.0, 0.0) + nudge;
+        let reserve = if selected { 32.0 } else { 14.0 };
+        let label = widgets::truncate_to(
+            ui,
+            name,
+            theme::medium(13.0),
+            (rect.right() - reserve - text_pos.x).max(0.0),
+        );
+        truncated = label.as_ref() != name;
+        crate::emoji::paint_line(
+            ui,
+            text_pos,
+            &label,
+            theme::medium(13.0),
+            if selected {
+                p.text
+            } else {
+                widgets::mix(p.secondary, p.text, t)
+            },
+        );
+        if selected {
+            Icon::Check.image(p.text, 15.0).paint_at(
+                ui,
+                Rect::from_center_size(rect.right_center() - vec2(16.0, 0.0), vec2(15.0, 15.0)),
+            );
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    if truncated {
+        response.on_hover_text(name)
+    } else {
+        response
+    }
+}
+
+fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response) {
+    let frame = widgets::menu_frame(ui, &app.palette);
+    let frame_margin = frame.total_margin().sum();
+    let screen = ui.ctx().content_rect();
+    let width = widgets::MENU_WIDTH.min((screen.width() - 16.0).max(frame_margin.x));
+    let content_width = (width - frame_margin.x).max(0.0);
+    let max_height = (screen.bottom() - chip.rect.bottom() - 8.0 - frame_margin.y - 8.0).max(0.0);
     let popup = egui::Popup::new(
         ui.id().with("ytm-account-menu"),
         ui.ctx().clone(),
@@ -663,147 +787,100 @@ fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response, signed_in: bo
         ui.layer_id(),
     )
     .kind(egui::PopupKind::Menu)
-    .frame(widgets::menu_frame(ui, &app.palette))
+    .frame(frame)
     .layout(egui::Layout::top_down_justified(egui::Align::Min))
-    .width(widgets::MENU_WIDTH)
-    .gap(0.0)
+    .align(egui::RectAlign::BOTTOM_END)
+    .width(width)
+    .gap(8.0)
     .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
     .open_memory(chip.clicked().then_some(egui::SetOpenCommand::Toggle));
 
     enum Choice {
-        LogIn,
-        Profile(String),
+        Profile,
         Switch(Option<String>),
         Settings,
         Help,
-        SignOut,
     }
-    // A failed attempt is reported where it was started — right here — not only in Settings,
-    // which nobody thinks to open after clicking Log in in this menu.
-    let sign_in_error = match &app.auth {
-        crate::auth::AuthState::Failed(msg) if !signed_in => Some(msg.clone()),
-        _ => None,
-    };
+    let connected = app.connected_providers();
+    let youtube_connected = connected.contains(&crate::model::Provider::YouTubeMusic);
+    let has_profile = !connected.is_empty();
     let mut choice = None;
     popup.show(|mui| {
-        let p = app.palette;
-        // Cloned, not borrowed: the picks below take `&mut App` after the popup closes.
-        let accounts = app.accounts.clone();
-        let current_id = app.settings.account_page_id.clone();
-        // The current channel's profile id, for the View profile item below the list.
-        let current_channel_id = accounts
-            .iter()
-            .find(|a| a.page_id == current_id)
-            .or_else(|| accounts.iter().find(|a| a.selected))
-            .or(accounts.first())
-            .and_then(|a| a.channel_id.clone());
-        if !signed_in && widgets::menu_item(mui, &p, Icon::CircleUser, "Log in", None).clicked() {
-            choice = Some(Choice::LogIn);
-            mui.close();
-        }
-        if let Some(error) = &sign_in_error {
-            mui.add_space(2.0);
-            mui.add(
-                egui::Label::new(
-                    egui::RichText::new(error)
-                        .font(theme::regular(11.0))
-                        .color(p.danger),
-                )
-                .wrap(),
-            );
-            mui.add_space(2.0);
-        }
-        // The channels, inline and directly on top: photo, name, a tick on the current one. No
-        // byline — the subscriber count is noise here. Never signed out: this menu opens then
-        // too on Windows, and the account list is session data.
-        for account in accounts.into_iter().filter(|_| signed_in) {
-            let current = current_id == account.page_id;
-            let (rect, resp) =
-                mui.allocate_exact_size(vec2(mui.available_width(), 40.0), Sense::click());
-            if mui.is_rect_visible(rect) {
-                let t = widgets::lit(mui, &resp);
-                if resp.is_pointer_button_down_on() {
-                    mui.painter().rect_filled(
-                        rect,
-                        CornerRadius::same(theme::RADIUS_SMALL + 2),
-                        p.surface_active,
-                    );
-                } else if t > 0.001 {
-                    mui.painter().rect_filled(
-                        rect,
-                        CornerRadius::same(theme::RADIUS_SMALL + 2),
-                        widgets::mix(p.surface, p.surface_hover, t),
-                    );
+        mui.set_width(content_width);
+        mui.set_max_height(max_height);
+        mui.spacing_mut().item_spacing.y = 2.0;
+        egui::ScrollArea::vertical()
+            .id_salt("account-menu-scroll")
+            .max_height(max_height)
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, true])
+            .animated(false)
+            .show(mui, |mui| {
+                let p = app.palette;
+                if has_profile
+                    && widgets::menu_item(mui, &p, Icon::CircleUser, "View profile", None).clicked()
+                {
+                    choice = Some(Choice::Profile);
+                    mui.close();
                 }
-                let nudge = widgets::press_offset(&resp);
-                let photo_rect = Rect::from_min_size(
-                    rect.left_center() + vec2(6.0, -12.0) + nudge,
-                    vec2(24.0, 24.0),
-                );
-                let (images, backend) = (&mut app.images, &app.backend);
-                match account.thumbnail.as_ref().and_then(|url| {
-                    crate::ui::art_texture(images, backend, mui.ctx(), Some(url), 24.0)
-                }) {
-                    Some(tex) => widgets::paint_art(
+                if youtube_connected && app.accounts.len() > 1 {
+                    let accounts = app.accounts.clone();
+                    let current_id = app.settings.account_page_id.clone();
+                    let submenu_id = mui.id().with("switch-account");
+                    if let Some(page_id) = widgets::sub_menu(
                         mui,
                         &p,
-                        photo_rect,
-                        Some(tex),
-                        widgets::ArtShape::Circle,
-                    ),
-                    None => {
-                        mui.painter()
-                            .circle_filled(photo_rect.center(), 12.0, p.surface_active);
+                        Icon::CircleUser,
+                        "Switch account",
+                        submenu_id,
+                        |sui| {
+                            sui.spacing_mut().item_spacing.y = 2.0;
+                            sui.set_max_height(max_height);
+                            egui::ScrollArea::vertical()
+                                .id_salt("switch-account-scroll")
+                                .max_height(max_height)
+                                .min_scrolled_height(0.0)
+                                .auto_shrink([false, true])
+                                .animated(false)
+                                .show(sui, |sui| {
+                                    let mut selected = None;
+                                    for account in accounts {
+                                        let current = current_id == account.page_id;
+                                        if account_menu_identity(
+                                            app,
+                                            sui,
+                                            &account.name,
+                                            account.thumbnail.as_ref(),
+                                            current,
+                                        )
+                                        .clicked()
+                                            && !current
+                                        {
+                                            selected = Some(account.page_id);
+                                            sui.close();
+                                        }
+                                    }
+                                    selected
+                                })
+                                .inner
+                        },
+                    ) {
+                        choice = Some(Choice::Switch(page_id));
+                        mui.close();
                     }
                 }
-                let fg = widgets::mix(p.secondary, p.text, t);
-                mui.painter().text(
-                    photo_rect.right_center() + vec2(8.0, 0.0) + nudge,
-                    egui::Align2::LEFT_CENTER,
-                    &account.name,
-                    theme::medium(13.0),
-                    fg,
-                );
-                if current {
-                    Icon::Check.image(p.accent, 15.0).paint_at(
-                        mui,
-                        Rect::from_center_size(
-                            rect.right_center() - vec2(16.0, 0.0),
-                            vec2(15.0, 15.0),
-                        ),
-                    );
+                if widgets::menu_item(mui, &p, Icon::Settings, "Settings", None).clicked() {
+                    choice = Some(Choice::Settings);
+                    mui.close();
                 }
-                if resp.hovered() {
-                    mui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if widgets::menu_item(mui, &p, Icon::Info, "Keyboard shortcuts", None).clicked() {
+                    choice = Some(Choice::Help);
+                    mui.close();
                 }
-            }
-            if resp.clicked() && !current {
-                choice = Some(Choice::Switch(account.page_id.clone()));
-                mui.close();
-            }
-        }
-        if let Some(id) = current_channel_id
-            && widgets::menu_item(mui, &p, Icon::CircleUser, "View profile", None).clicked()
-        {
-            choice = Some(Choice::Profile(id));
-            mui.close();
-        }
-        if widgets::menu_item(mui, &p, Icon::Settings, "Settings", None).clicked() {
-            choice = Some(Choice::Settings);
-            mui.close();
-        }
-        if widgets::menu_item(mui, &p, Icon::Info, "Keyboard shortcuts", None).clicked() {
-            choice = Some(Choice::Help);
-            mui.close();
-        }
-        if signed_in && widgets::menu_item(mui, &p, Icon::LogOut, "Sign out", None).clicked() {
-            choice = Some(Choice::SignOut);
-            mui.close();
-        }
+            });
     });
     match choice {
-        Some(Choice::LogIn) => app.sign_in(),
-        Some(Choice::Profile(id)) => app.navigate(Route::Artist(id)),
+        Some(Choice::Profile) => app.navigate(Route::Profile),
         Some(Choice::Switch(page_id)) => {
             let ctx = ui.ctx().clone();
             app.update_settings(&ctx, |s| s.account_page_id = page_id);
@@ -811,7 +888,6 @@ fn account_menu(app: &mut App, ui: &mut Ui, chip: &egui::Response, signed_in: bo
         }
         Some(Choice::Settings) => app.navigate(Route::Settings),
         Some(Choice::Help) => app.help_open = true,
-        Some(Choice::SignOut) => app.backend.sign_out(),
         None => {}
     }
 }

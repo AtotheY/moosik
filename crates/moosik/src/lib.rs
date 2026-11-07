@@ -41,6 +41,7 @@ pub mod discord;
 pub mod downloads;
 pub mod emoji;
 pub mod flatpak;
+pub mod home_feed;
 pub mod icons;
 pub mod images;
 pub mod innertube;
@@ -68,9 +69,16 @@ pub mod pacing;
 pub mod persist;
 pub mod playback;
 pub mod player;
+pub mod providers;
 pub mod queue;
+pub mod search_cache;
 pub mod search_history;
 pub mod settings;
+pub mod source_groups;
+pub mod spotify;
+pub mod spotify_drm;
+pub mod spotify_drm_child;
+pub mod spotify_web_login;
 pub mod stats;
 pub mod theme;
 pub mod tray;
@@ -143,14 +151,21 @@ pub fn init_tracing(default: &str) {
     use tracing_subscriber::{filter::Targets, fmt, prelude::*};
 
     let filter = || {
-        std::env::var("RUST_LOG")
+        let targets = std::env::var("RUST_LOG")
             .ok()
             .and_then(|s| s.parse::<Targets>().ok())
             .unwrap_or_else(|| {
                 default
                     .parse::<Targets>()
                     .expect("valid default log filter")
-            })
+            });
+        tracing_subscriber::filter::filter_fn(move |metadata| {
+            let target = metadata.target();
+            let transport =
+                target.starts_with("tungstenite") || target.starts_with("tokio_tungstenite");
+            (!transport || *metadata.level() <= tracing::Level::WARN)
+                && targets.would_enable(target, metadata.level())
+        })
     };
 
     let console = fmt::layer().with_filter(filter());

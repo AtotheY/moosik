@@ -359,6 +359,20 @@ impl Palette {
     }
 }
 
+pub(crate) fn verification_accent(provider: crate::model::Provider, backdrop: Color32) -> Color32 {
+    use crate::model::Provider;
+    let dark = ramp::luminance(backdrop) <= 0.18;
+    let toward = if dark { Color32::WHITE } else { Color32::BLACK };
+    let color = match (provider, dark) {
+        (Provider::YouTubeMusic, true) => Color32::from_rgb(255, 113, 113),
+        (Provider::YouTubeMusic, false) => Color32::from_rgb(183, 32, 52),
+        (Provider::Spotify, true) => Color32::from_rgb(69, 217, 129),
+        (Provider::Spotify, false) => Color32::from_rgb(17, 107, 56),
+        (Provider::Local, _) => toward,
+    };
+    ramp::lift_to(color, toward, backdrop, ramp::ACCENT_TEXT_MIN_CONTRAST)
+}
+
 // ---------------------------------------------------------------------------------------------
 // Typography
 // ---------------------------------------------------------------------------------------------

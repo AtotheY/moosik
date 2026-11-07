@@ -16,6 +16,7 @@ use std::sync::Arc;
 use egui::{pos2, vec2};
 
 use crate::app::App;
+use crate::model::{Artist, Provider};
 use crate::ui::{HEADER_ART_PT, ListClick, track_shelf_pages};
 use crate::widgets;
 
@@ -329,6 +330,44 @@ fn hero_text_lines(rect: egui::Rect, width: f32) -> (f32, f32, f32) {
     (meta_y - name_size * 0.85, meta_y, name_size)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct VerificationMark {
+    provider: Provider,
+    label: &'static str,
+}
+
+impl VerificationMark {
+    pub(super) fn for_artist(artist: &Artist) -> Option<Self> {
+        let spotify = artist.id.starts_with("spotify:");
+        let (provider, label) = match (spotify, artist.verified, artist.official_artist_channel) {
+            (true, true, _) => (Provider::Spotify, "Verified by Spotify"),
+            (false, true, _) => (Provider::YouTubeMusic, "Verified by YouTube"),
+            (false, false, true) => (Provider::YouTubeMusic, "YouTube Official Artist Channel"),
+            _ => return None,
+        };
+        Some(Self { provider, label })
+    }
+}
+
+const VERIFICATION_GAP: f32 = 8.0;
+
+pub(super) fn verification_width(count: usize) -> f32 {
+    count as f32 * (widgets::VERIFIED_MARK_WIDTH + VERIFICATION_GAP)
+}
+
+pub(super) fn paint_verification_marks(
+    ui: &egui::Ui,
+    backdrop: egui::Color32,
+    mut title_end: egui::Pos2,
+    marks: impl IntoIterator<Item = VerificationMark>,
+) {
+    for mark in marks {
+        title_end.x += VERIFICATION_GAP;
+        widgets::verification_mark(ui, backdrop, title_end, mark.provider, mark.label);
+        title_end.x += widgets::VERIFIED_MARK_WIDTH;
+    }
+}
+
 /// The reference's hero: the banner painted across the card's own width, from its rounded top
 /// edge down, with the name and audience over a bottom scrim. A painter clipped to the card is
 /// what lets the image reach into the card's top margin — inside the scroll area the ui's own
@@ -346,28 +385,18 @@ fn hero_header(app: &mut App, ui: &mut egui::Ui) {
         vec2(width, height),
     );
 
-    let (name, audience, hero) = {
-        let Some(a) = app.artist.as_ref() else {
-            return;
-        };
-        (
-            a.name.clone(),
-            // The monthly audience alone, as the site shows it. A small artist has none — then
-            // the subscriber line takes its place, complete with its word ("965 subscribers"),
-            // never the bare button count.
-            a.monthly_listeners
-                .clone()
-                .or_else(|| a.subscribers_long.clone())
-                .unwrap_or_else(|| "Artist".to_owned()),
-            a.hero.clone(),
-        )
-    };
-    let Some(hero) = hero else {
+    let Some(artist) = app.artist.as_ref() else {
         return;
     };
+    let Some(hero) = artist.hero.as_ref() else {
+        return;
+    };
+    let mark = VerificationMark::for_artist(artist);
+    let line_count = artist.audience_stats().count();
+    let extra_height = 20.0 * line_count.saturating_sub(1) as f32;
 
     let tex =
-        crate::ui::art_texture_hero(&mut app.images, &app.backend, ui.ctx(), Some(&hero), width);
+        crate::ui::art_texture_hero(&mut app.images, &app.backend, ui.ctx(), Some(hero), width);
     // The card the hero belongs to, and the slice of the hero still inside it: the hero's own
     // rect travels up with the scrolled content, so halfway out it would reach above the card and
     // paint over the top bar — same layer, and the central panel draws last. Everything is drawn
@@ -423,7 +452,7 @@ fn hero_header(app: &mut App, ui: &mut egui::Ui) {
         // The scrim: transparent over the top of the banner, near-black at the bottom, so the
         // name is legible over any art — light channel art included — without per-image colour
         // work. Its rows follow the same edges, starting wherever its gradient does.
-        let scrim_top = hero_scrim_top(rect);
+        let scrim_top = (hero_scrim_top(rect) - 2.0 * extra_height).max(rect.top());
         let alpha_at = |y: f32| hero_scrim_alpha(rect, scrim_top, y);
         let mut scrim = egui::Mesh::default();
         add_rows(&mut scrim, &hero_rows(rect, slice, scrim_top), &mut |p| {
@@ -435,26 +464,47 @@ fn hero_header(app: &mut App, ui: &mut egui::Ui) {
         painter.add(scrim);
     }
 
-    // The name and the audience, bottom-left, on the content's own left edge so they line up
-    // with every other page's header. White, because the scrim is dark whatever the theme is.
     let (name_y, meta_y, name_size) = hero_text_lines(rect, width);
-    let name_font = crate::theme::bold(name_size);
     let meta_font = crate::theme::medium(14.0);
     let text_w = (width - inset_x - 24.0).max(0.0);
-    crate::emoji::paint_line(
+    let name_width = (text_w - verification_width(usize::from(mark.is_some()))).max(0.0);
+    let name_size = widgets::fit_size(
         ui,
-        pos2(content_left, name_y),
-        &widgets::truncate_to(ui, &name, name_font.clone(), text_w),
+        &artist.name,
+        name_width,
+        name_size,
+        crate::ui::DETAIL_TITLE_MIN,
+        crate::theme::bold,
+    );
+    let name_font = crate::theme::bold(name_size);
+    let title_pos = pos2(content_left, name_y - extra_height);
+    let title_width = crate::emoji::paint_line(
+        ui,
+        title_pos,
+        &widgets::truncate_to(ui, &artist.name, name_font.clone(), name_width),
         name_font,
         egui::Color32::WHITE,
     );
-    ui.painter().text(
-        pos2(content_left + 2.0, meta_y),
-        egui::Align2::LEFT_CENTER,
-        widgets::truncate_to(ui, &audience, meta_font.clone(), text_w),
-        meta_font,
-        egui::Color32::from_white_alpha(210),
+    paint_verification_marks(
+        ui,
+        egui::Color32::BLACK,
+        title_pos + vec2(title_width, 0.0),
+        mark,
     );
+    let mut meta_y = meta_y - extra_height;
+    for line in artist
+        .audience_stats()
+        .chain((line_count == 0).then_some("Artist"))
+    {
+        ui.painter().text(
+            pos2(content_left, meta_y),
+            egui::Align2::LEFT_CENTER,
+            widgets::truncate_to(ui, line, meta_font.clone(), text_w),
+            meta_font.clone(),
+            egui::Color32::from_white_alpha(230),
+        );
+        meta_y += 20.0;
+    }
 
     // Reserve the hero on the content; the name row lives inside it.
     ui.add_space(height);
@@ -543,11 +593,9 @@ fn circle_header(app: &mut App, ui: &mut egui::Ui) {
         let Some(a) = artist.as_ref() else {
             return;
         };
-        let audience = a
-            .monthly_listeners
-            .clone()
-            .or_else(|| a.subscribers_long.clone())
-            .unwrap_or_else(|| "Artist".to_owned());
+        let mark = VerificationMark::for_artist(a);
+        let mut stats = a.audience_stats();
+        let audience = stats.next().or(mark.is_none().then_some("Artist"));
         let art_top = ui.cursor().top();
         let out = crate::ui::page_header(
             ui,
@@ -555,16 +603,21 @@ fn circle_header(app: &mut App, ui: &mut egui::Ui) {
             images,
             backend,
             crate::ui::PageHeader {
+                source: mark.is_none().then_some(if a.id.starts_with("spotify:") {
+                    "Spotify"
+                } else {
+                    "YouTube Music"
+                }),
                 art_url: a.thumbnail.as_ref(),
                 art_size: HEADER_ART_PT,
                 circle: true,
-                // No type line on an artist: the name is the page.
                 kind_label: "",
                 title: &a.name,
+                verification: mark,
                 description: None,
                 artists: &[],
-                second_plain: Some(&audience),
-                meta: None,
+                second_plain: audience,
+                meta: stats.next(),
                 owner: None,
                 credit_air: 4.0,
                 // Play, Mix, Shuffle, Subscribe and ••• are this page's own row below, not
@@ -598,6 +651,8 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|a| a.id.clone())
         .unwrap_or_default();
+    let combined = app.artist_id().and_then(|id| app.combined_artist_route(id));
+    let mut open_combined = false;
     let mut play_clicked = false;
     let mut play_target = None;
     let mut subscribe_to = None;
@@ -615,7 +670,7 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         };
         ui.add_space(14.0);
         let mut dots = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // No songs, no Play: a channel page can carry a banner and a shelf of videos but no
             // top-songs shelf at all, and a leading button with nothing behind it is a dead end.
             if !a.top_songs.is_empty() {
@@ -624,16 +679,21 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.add_space(6.0);
             }
+            if combined.is_some() && widgets::outline_button(ui, &p, "Both sources").clicked() {
+                open_combined = true;
+            }
             // Mix leads the pair: when both are on offer, starting a mix is the one worth
             // reaching for first.
-            if let Some(target) = &a.actions.mix
+            if !a.id.starts_with("spotify:")
+                && let Some(target) = &a.actions.mix
                 && widgets::icon_button(ui, &p, crate::icons::Icon::Radio, 20.0, false)
                     .on_hover_text("Mix")
                     .clicked()
             {
                 play_target = Some(target.clone());
             }
-            if let Some(target) = &a.actions.shuffle
+            if !a.id.starts_with("spotify:")
+                && let Some(target) = &a.actions.shuffle
                 && widgets::icon_button(ui, &p, crate::icons::Icon::Shuffle, 20.0, false)
                     .on_hover_text("Shuffle")
                     .clicked()
@@ -651,14 +711,11 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
             if let Some(subscribed) = a
                 .actions
                 .subscribed
-                .filter(|_| own_channel != Some(a.id.as_str()))
+                .filter(|_| !a.id.starts_with("spotify:") && own_channel != Some(a.id.as_str()))
             {
-                // The count rides the button only while the audience line above shows something
-                // else (a monthly listener total). When the line *is* the subscriber count,
-                // repeating it here read as a bug: "965 subscribers" over "Subscribe · 965".
                 let label = match (
                     subscribed,
-                    a.monthly_listeners.is_some(),
+                    a.subscribers_long.is_none(),
                     a.subscribers.as_deref(),
                 ) {
                     (true, _, _) => "Subscribed".to_owned(),
@@ -724,6 +781,10 @@ fn action_row(app: &mut App, ui: &mut egui::Ui) {
         (action, description.flatten())
     };
 
+    if open_combined && let Some(route) = combined {
+        app.navigate(route);
+        return;
+    }
     if play_clicked {
         // Already on this list: the button showed Pause, so this is resume/pause, not a restart.
         let tracks = app

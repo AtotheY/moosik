@@ -25,13 +25,23 @@ pub struct PlayerState {
     pub idle: bool,
 }
 
+#[derive(Clone)]
+pub enum PlaybackHandle {
+    Mpv(Arc<Mpv>),
+    Spotify(crate::spotify_drm::Handle),
+}
+
 pub struct Player {
     /// Built on the first `handle()`, not at startup. An idle mpv context still maps libav*
     /// and runs its own playloop/demuxer/ao threads (~10–15 MB); a session that only browses
     /// never needs any of it. `None` also means "nothing has ever been loaded", which is why
     /// `state()` reports idle in that case — the same as a fresh eager context did.
     mpv: Option<Arc<Mpv>>,
+    active: Option<PlaybackHandle>,
+    reported_error: Option<String>,
     volume: f64,
+    youtube_cache_enabled: bool,
+    youtube_cache_limit_mb: u64,
     seek_serial: std::sync::atomic::AtomicU64,
     /// Set if the last libmpv init attempt failed. Surfaced exactly where an eager failure was —
     /// `App::player_error` and the sidebar's "audio unavailable" note — just at first play
@@ -51,6 +61,7 @@ impl Drop for Player {
     /// stuck on the network is the one thing that can make that wait long. If a quit drags and
     /// the log stops here, this is the drop to bound.
     fn drop(&mut self) {
+        self.stop();
         tracing::info!("player: dropping");
     }
 }
@@ -59,7 +70,11 @@ impl Player {
     pub fn new() -> Self {
         Self {
             mpv: None,
+            active: None,
+            reported_error: None,
             volume: 70.0,
+            youtube_cache_enabled: true,
+            youtube_cache_limit_mb: 32,
             seek_serial: std::sync::atomic::AtomicU64::new(0),
             init_error: None,
         }
@@ -156,6 +171,7 @@ impl Player {
                 Ok(mpv) => {
                     self.mpv = Some(Arc::new(mpv));
                     self.init_error = None;
+                    self.apply_youtube_cache();
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -167,12 +183,82 @@ impl Player {
         self.mpv.clone()
     }
 
+    pub fn set_youtube_cache(&mut self, enabled: bool, limit_mb: u64) {
+        self.youtube_cache_enabled = enabled;
+        self.youtube_cache_limit_mb = limit_mb.clamp(
+            crate::settings::YOUTUBE_CACHE_MIN_MIB,
+            crate::settings::YOUTUBE_CACHE_MAX_MIB,
+        );
+        self.apply_youtube_cache();
+    }
+
+    fn apply_youtube_cache(&self) {
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.set_property(
+                "cache",
+                if self.youtube_cache_enabled {
+                    "yes"
+                } else {
+                    "no"
+                },
+            );
+            let _ = mpv.set_property(
+                "demuxer-max-bytes",
+                format!("{}MiB", self.youtube_cache_limit_mb),
+            );
+            let _ = mpv.set_property(
+                "demuxer-max-back-bytes",
+                if self.youtube_cache_enabled {
+                    "4MiB"
+                } else {
+                    "0"
+                },
+            );
+        }
+    }
+
+    pub fn playback_handle(&mut self, spotify: bool, ctx: egui::Context) -> Option<PlaybackHandle> {
+        self.stop();
+        self.active = None;
+        self.reported_error = None;
+        let handle = if spotify {
+            self.init_error = None;
+            PlaybackHandle::Spotify(crate::spotify_drm::Handle::new(ctx))
+        } else {
+            crate::spotify_drm::retire_idle_renderer();
+            PlaybackHandle::Mpv(self.handle()?)
+        };
+        self.active = Some(handle.clone());
+        Some(handle)
+    }
+
+    pub fn take_error(&mut self) -> Option<String> {
+        let Some(PlaybackHandle::Spotify(handle)) = &self.active else {
+            return None;
+        };
+        let error = handle.last_error()?;
+        if self.reported_error.is_some() {
+            return None;
+        }
+        self.reported_error = Some(error.clone());
+        Some(error)
+    }
+
     /// The message from a failed one-time init, if any.
     pub fn init_error(&self) -> Option<&str> {
         self.init_error.as_deref()
     }
 
     pub fn state(&self) -> PlayerState {
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            let state = handle.state();
+            return PlayerState {
+                position: state.position,
+                duration: state.duration,
+                paused: state.paused,
+                idle: state.idle && handle.last_error().is_none(),
+            };
+        }
         if let Some(mpv) = &self.mpv {
             drain_events(mpv);
         }
@@ -195,6 +281,9 @@ impl Player {
     /// The loaded video's display size, in pixels. `None` for audio, or before the first frame
     /// has reported one. The software renderer draws at this size so mpv does no scaling.
     pub fn video_size(&self) -> Option<(usize, usize)> {
+        if matches!(self.active, Some(PlaybackHandle::Spotify(_))) {
+            return None;
+        }
         let mpv = self.mpv.as_ref()?;
         let w: i64 = mpv.get_property("dwidth").ok()?;
         let h: i64 = mpv.get_property("dheight").ok()?;
@@ -203,6 +292,21 @@ impl Player {
 
     /// Detailed playback state sampled once per second for the private listening ledger.
     pub fn listening_sample(&self) -> crate::listening::Sample {
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            let state = handle.state();
+            return crate::listening::Sample {
+                position: state.position,
+                duration: state.duration,
+                paused: state.paused,
+                idle: state.idle && handle.last_error().is_none(),
+                buffering: state.buffering,
+                seeking: state.seeking,
+                speed: state.rate,
+                volume: state.volume,
+                muted: state.muted,
+                seek_serial: self.seek_serial.load(std::sync::atomic::Ordering::Relaxed),
+            };
+        }
         let state = self.state();
         let mpv = self.mpv.as_ref();
         crate::listening::Sample {
@@ -230,6 +334,10 @@ impl Player {
     }
 
     pub fn set_paused(&self, paused: bool) {
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            handle.set_paused(paused);
+            return;
+        }
         if let Some(mpv) = &self.mpv {
             let _ = mpv.set_property("pause", paused);
         }
@@ -242,6 +350,9 @@ impl Player {
     /// Unload whatever is playing. mpv keeps the outgoing file until the next one loads, so a
     /// track that never loads would otherwise leave the previous song playing under it.
     pub fn stop(&self) {
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            handle.stop();
+        }
         if let Some(mpv) = &self.mpv {
             let _ = mpv.command("stop", &[]);
         }
@@ -250,6 +361,10 @@ impl Player {
     pub fn seek(&self, seconds: f64) {
         self.seek_serial
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            handle.seek(seconds);
+            return;
+        }
         if let Some(mpv) = &self.mpv {
             let _ = mpv.command("seek", &[&format!("{seconds:.3}"), "absolute"]);
         }
@@ -261,6 +376,10 @@ impl Player {
 
     pub fn set_volume(&mut self, volume: f64) {
         self.volume = volume.clamp(0.0, 100.0);
+        if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
+            handle.set_volume(self.volume);
+            return;
+        }
         if let Some(mpv) = &self.mpv {
             let _ = mpv.set_property("volume", self.volume);
         }
@@ -366,8 +485,6 @@ pub fn load(
     // Audio-only again, in case the video view just handed playback back. `vo` stays `libmpv`
     // from the video path, but with `vid=no` there is no video for it to initialise.
     let _ = mpv.set_property("vid", "no");
-    // The video path raises this; a song does not need the memory.
-    let _ = mpv.set_property("demuxer-max-bytes", "32MiB");
     set_start(mpv, start_at);
     mpv.command("loadfile", &[url, "replace"])
         .context("mpv refused the stream URL")
@@ -415,8 +532,6 @@ pub fn load_video(
     // resolver uses, or it picks whatever is best — a 4K AV1 stream the software path cannot
     // afford. The direct path never consults this.
     let _ = mpv.set_property("ytdl-format", moosik_resolve::VIDEO_FORMAT);
-    // A video reads further ahead than a song: a stall in the middle is far more visible.
-    let _ = mpv.set_property("demuxer-max-bytes", "64MiB");
     // Insurance for the frames that do get scaled — the native-size path normally avoids the
     // scaler entirely, and bilinear is a fraction of Lanczos' cost when it cannot.
     let _ = mpv.set_property("sws-scaler", "bilinear");

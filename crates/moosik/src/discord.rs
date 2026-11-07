@@ -18,6 +18,8 @@ use discord_rich_presence::activity::{
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
 
+use crate::model::Provider;
+
 /// The worker's tick: fast enough that a toggle or a quit is noticed promptly, slow enough to
 /// cost nothing while idle.
 const TICK: Duration = Duration::from_millis(250);
@@ -45,6 +47,8 @@ const APPLICATION_ID: &str = "1568322186417274880";
 /// material changed, and there is nothing Discord-specific in it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Presence {
+    pub provider: Provider,
+    pub spotify_id: Option<String>,
     /// The video id, for the watch button. `None` for a local file, which has no page to open.
     pub youtube_id: Option<String>,
     pub room: Option<String>,
@@ -64,9 +68,11 @@ pub struct Presence {
 impl Presence {
     /// The activity Discord is sent. Public only through [`Discord::set`].
     fn activity(&self) -> Activity<'_> {
+        let source = self.provider.name();
+        let activity_name = format!("{source} via Moosik.dev");
         let mut activity = Activity::new()
             .activity_type(ActivityType::Listening)
-            .name("YouTube Music via Moosik.dev")
+            .name(activity_name)
             .status_display_type(StatusDisplayType::Details);
         // Discord also uses details for the compact member-list status.
         if let Some(title) = field(&self.title) {
@@ -77,28 +83,37 @@ impl Presence {
         } else if let Some(artist) = field(&self.artist) {
             activity = activity.details(artist);
         }
-        if let Some((start, end)) = self.timeline {
+        if self.playing
+            && let Some((start, end)) = self.timeline
+        {
             activity = activity.timestamps(
                 Timestamps::new()
                     .start(start.saturating_mul(1000))
                     .end(end.saturating_mul(1000)),
             );
         }
-        if let Some(image) = cover_url(
-            self.youtube_id.as_deref(),
-            self.thumbnail.as_deref(),
-            self.wide,
-        ) {
+        let youtube_id = (self.provider == Provider::YouTubeMusic)
+            .then_some(self.youtube_id.as_deref())
+            .flatten();
+        if let Some(image) = cover_url(youtube_id, self.thumbnail.as_deref(), self.wide) {
             activity = activity.assets(Assets::new().large_image(image));
         }
         let mut buttons = Vec::new();
-        if let Some(id) = self.youtube_id.as_deref()
+        if let Some(id) = youtube_id
             && moosik_resolve::VideoId::new(id).is_ok()
         {
             buttons.push(Button::new(
                 "Play on Moosik",
                 format!("https://moosik.dev/#play/{id}"),
             ));
+        }
+        if self.provider == Provider::Spotify
+            && let Some(id) = self
+                .spotify_id
+                .as_deref()
+                .filter(|id| crate::model::is_spotify_id(id))
+        {
+            buttons.push(Button::new("Play on Spotify", crate::model::track_url(id)));
         }
         if let Some(room) = &self.room {
             buttons.push(Button::new(
@@ -139,6 +154,8 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
     // other host is real album art.
     if let Some(thumbnail) = thumbnail
         && !thumbnail.contains("i.ytimg.com")
+        && url::Url::parse(thumbnail)
+            .is_ok_and(|url| matches!(url.scheme(), "https" | "http") && url.host_str().is_some())
     {
         // Rewritten square, both so Discord crops nothing and so the request is for exactly the
         // pixels it draws — the model's cover can arrive as any size suffix.
@@ -147,7 +164,7 @@ fn cover_url(youtube_id: Option<&str>, thumbnail: Option<&str>, wide: bool) -> O
             return Some(sized);
         }
     }
-    let id = youtube_id?;
+    let id = youtube_id.filter(|id| moosik_resolve::VideoId::new(*id).is_ok())?;
     let still = if wide { "hq720" } else { "hqdefault" };
     Some(format!("https://i.ytimg.com/vi/{id}/{still}.jpg"))
 }
@@ -298,6 +315,8 @@ mod tests {
 
     fn presence() -> Presence {
         Presence {
+            provider: Provider::YouTubeMusic,
+            spotify_id: None,
             youtube_id: Some("dQw4w9WgXcQ".into()),
             room: None,
             title: "Never Gonna Give You Up".into(),
@@ -336,6 +355,64 @@ mod tests {
     }
 
     #[test]
+    fn spotify_presence_uses_its_provider_and_public_song_link() {
+        let spotify = Presence {
+            provider: Provider::Spotify,
+            spotify_id: Some("spotify:track:4uLU6hMCjMI75M1A2tKUQC".into()),
+            thumbnail: Some("https://i.scdn.co/image/cover".into()),
+            ..presence()
+        };
+        let json = serde_json::to_value(spotify.activity()).unwrap();
+        assert_eq!(json["name"], "Spotify via Moosik.dev");
+        assert_eq!(json["state"], "Rick Astley");
+        assert_eq!(json["timestamps"]["start"], 1_699_999_800_000i64);
+        assert_eq!(
+            json["buttons"][0],
+            serde_json::json!({
+                "label": "Play on Spotify",
+                "url": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+            })
+        );
+        assert!(
+            !serde_json::to_string(&json)
+                .unwrap()
+                .contains("dQw4w9WgXcQ")
+        );
+    }
+
+    #[test]
+    fn every_provider_keeps_title_and_artist_in_separate_fields() {
+        for provider in Provider::ALL {
+            let single = Presence {
+                provider,
+                ..presence()
+            };
+            let json = serde_json::to_value(single.activity()).unwrap();
+            assert_eq!(json["details"], "Never Gonna Give You Up");
+            assert_eq!(json["state"], "Rick Astley");
+        }
+    }
+
+    #[test]
+    fn local_presence_excludes_file_paths_and_remote_song_buttons() {
+        let local = Presence {
+            provider: Provider::Local,
+            spotify_id: Some("spotify:track:4uLU6hMCjMI75M1A2tKUQC".into()),
+            thumbnail: Some("file:///C:/Music/private/cover.jpg".into()),
+            ..presence()
+        };
+        let json = serde_json::to_value(local.activity()).unwrap();
+        assert_eq!(json["name"], "Local via Moosik.dev");
+        assert_eq!(json["state"], "Rick Astley");
+        assert!(json["assets"].get("large_image").is_none());
+        assert!(json.get("buttons").is_none());
+        let serialized = serde_json::to_string(&json).unwrap();
+        assert!(!serialized.contains("C:/Music"));
+        assert!(!serialized.contains("dQw4w9WgXcQ"));
+        assert!(!serialized.contains("open.spotify.com"));
+    }
+
+    #[test]
     fn a_host_exposes_only_the_read_only_invite_and_the_song_button() {
         let room = "a".repeat(32);
         let host = Presence {
@@ -359,7 +436,6 @@ mod tests {
     fn a_paused_track_carries_no_progress_bar() {
         let paused = Presence {
             playing: false,
-            timeline: None,
             ..presence()
         };
         let json = serde_json::to_value(paused.activity()).unwrap();
@@ -435,6 +511,7 @@ mod tests {
     #[test]
     fn a_local_track_has_no_watch_button_and_falls_back_to_its_own_cover() {
         let local = Presence {
+            provider: Provider::Local,
             youtube_id: None,
             thumbnail: Some("https://example.test/cover.jpg".into()),
             ..presence()
@@ -448,6 +525,7 @@ mod tests {
 
         // A cover URL that is too long for Discord is dropped rather than sent to be rejected.
         let long = Presence {
+            provider: Provider::Local,
             youtube_id: None,
             thumbnail: Some("x".repeat(URL_LIMIT + 1)),
             ..presence()

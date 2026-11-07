@@ -451,6 +451,15 @@ fn year_segment(segs: &[Segment]) -> Option<String> {
         .map(|s| s.text.clone())
 }
 
+fn album_kind_segment(segs: &[Segment]) -> Option<String> {
+    segs.first()
+        .filter(|s| {
+            s.target.is_none()
+                && matches!(s.text.as_str(), "Album" | "Single" | "EP" | "Compilation")
+        })
+        .map(|s| s.text.clone())
+}
+
 /// The descriptive text of a row whose fields do not link — an artist's audience, a playlist's
 /// author. Drops a leading type word when there is something after it.
 fn plain_tail(segs: &[Segment]) -> String {
@@ -478,6 +487,16 @@ fn plain_album_artist(segs: &[Segment]) -> String {
         .map(|s| s.text.as_str())
         .collect::<Vec<_>>()
         .join(" • ")
+}
+
+fn album_artist_links(segs: &[Segment]) -> Vec<crate::model::ArtistLink> {
+    let linked = linked_artists(segs);
+    if !linked.is_empty() {
+        return linked;
+    }
+    non_empty(plain_album_artist(segs))
+        .map(|name| vec![crate::model::ArtistLink::plain(name)])
+        .unwrap_or_default()
 }
 
 /// Whether a playlist card's own menu offers to edit it — which is what makes it a playlist
@@ -997,8 +1016,10 @@ fn parse_search_row(row: &Value) -> Option<Entry> {
             title,
             // The album's artist is a linked field; the year is the bare four digits.
             artist: artist_line(&segs).unwrap_or_else(|| plain_album_artist(&segs)),
+            artists: album_artist_links(&segs),
+            explicit: is_explicit(row).then_some(true),
             year: year_segment(&segs),
-            kind: None,
+            kind: album_kind_segment(&segs),
             thumbnail: thumb,
         })),
         Target::Browse { id, page } if page == PAGE_PLAYLIST && !is_episodes_for_later(&id) => {
@@ -2177,6 +2198,7 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
         .pointer("/header/musicImmersiveHeaderRenderer")
         .or_else(|| root.pointer("/header/musicVisualHeaderRenderer"))?;
     let name = non_empty(text(header.get("title")?))?;
+    let badges = channel_badge_styles(header.get("badges"));
 
     let subscribe = header.pointer("/subscriptionButton/subscribeButtonRenderer");
     let id = subscribe
@@ -2274,6 +2296,9 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
     Some(Artist {
         id,
         name,
+        verified: badges.verified,
+        official_artist_channel: badges.official_artist_channel,
+        followers: None,
         subscribers,
         subscribers_long,
         monthly_listeners,
@@ -2287,6 +2312,75 @@ pub fn parse_artist(root: &Value) -> Option<Artist> {
         top_songs_playlist,
         shelves: std::sync::Arc::new(shelves),
     })
+}
+
+#[derive(Default)]
+pub(crate) struct ArtistChannelBadges {
+    pub verified: bool,
+    pub official_artist_channel: bool,
+}
+
+fn channel_badge_styles(badges: Option<&Value>) -> ArtistChannelBadges {
+    let mut result = ArtistChannelBadges::default();
+    for badge in badges.and_then(Value::as_array).into_iter().flatten() {
+        match badge
+            .pointer("/metadataBadgeRenderer/style")
+            .and_then(Value::as_str)
+        {
+            Some("BADGE_STYLE_TYPE_VERIFIED") => result.verified = true,
+            Some("BADGE_STYLE_TYPE_VERIFIED_ARTIST") => result.official_artist_channel = true,
+            _ => {}
+        }
+    }
+    result
+}
+
+pub(crate) fn artist_channel_badges(html: &str, channel_id: &str) -> ArtistChannelBadges {
+    let Some(root) = ["var ytInitialData =", "window[\"ytInitialData\"] ="]
+        .into_iter()
+        .find_map(|marker| {
+            let (_, data) = html.split_once(marker)?;
+            serde_json::Deserializer::from_str(data)
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        })
+    else {
+        return ArtistChannelBadges::default();
+    };
+    if root
+        .pointer("/metadata/channelMetadataRenderer/externalId")
+        .and_then(Value::as_str)
+        != Some(channel_id)
+    {
+        return ArtistChannelBadges::default();
+    }
+    let mut badges = channel_badge_styles(root.pointer("/header/c4TabbedHeaderRenderer/badges"));
+    let title = root.pointer(concat!(
+        "/header/pageHeaderRenderer/content/pageHeaderViewModel",
+        "/title/dynamicTextViewModel/text/attachmentRuns"
+    ));
+    for image in title
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|attachment| {
+            attachment
+                .pointer("/element/type/imageType/image/sources")
+                .and_then(Value::as_array)
+        })
+        .flatten()
+    {
+        match image
+            .pointer("/clientResource/imageName")
+            .and_then(Value::as_str)
+        {
+            Some("CHECK_CIRCLE_FILLED") => badges.verified = true,
+            Some("AUDIO_BADGE") => badges.official_artist_channel = true,
+            _ => {}
+        }
+    }
+    badges
 }
 
 /// Whether a shelf is "From your library" — the signed-in artist page's own list of the items
@@ -2521,14 +2615,11 @@ fn parse_card(item: &Value) -> Option<Entry> {
         Target::Browse { id, page } if page == PAGE_ALBUM => Some(Entry::Album(AlbumRef {
             id,
             title,
-            artist: String::new(),
+            artist: artist_line(&segs).unwrap_or_else(|| plain_album_artist(&segs)),
+            artists: album_artist_links(&segs),
+            explicit: is_explicit(card).then_some(true),
             year,
-            // "Album", "Single" or "EP" as YouTube labels it, which is what lets a caller split
-            // a full discography by type.
-            kind: fields
-                .first()
-                .filter(|k| matches!(**k, "Album" | "Single" | "EP"))
-                .map(|k| (*k).to_owned()),
+            kind: album_kind_segment(&segs),
             thumbnail: thumb,
         })),
         Target::Browse { id, page } if page == PAGE_ARTIST => Some(Entry::Artist(ArtistRef {
@@ -2794,6 +2885,134 @@ mod tests {
         }})
     }
 
+    #[test]
+    fn album_rows_and_cards_keep_each_linked_credit_and_explicit_badge() {
+        let byline = serde_json::json!([
+            {"text": "Album"}, {"text": " • "},
+            {"text": "Ann", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCann",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}
+            }}},
+            {"text": " & "},
+            {"text": "Bo", "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCbo",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {"pageType": "MUSIC_PAGE_TYPE_ARTIST"}}
+            }}},
+            {"text": " • "}, {"text": "2024"}
+        ]);
+        let mut row = album_row("An album", byline.clone());
+        let badge = serde_json::json!([{
+            "musicInlineBadgeRenderer": {"icon": {"iconType": "MUSIC_EXPLICIT_BADGE"}}
+        }]);
+        row["musicResponsiveListItemRenderer"]["badges"] = badge.clone();
+        let card = serde_json::json!({"musicTwoRowItemRenderer": {
+            "title": {"runs": [{"text": "An album"}]},
+            "subtitle": {"runs": byline},
+            "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"],
+            "badges": badge
+        }});
+        for entry in [
+            parse_search_row(&row["musicResponsiveListItemRenderer"]),
+            parse_card(&card),
+        ] {
+            let Some(Entry::Album(album)) = entry else {
+                panic!("expected an album");
+            };
+            assert_eq!(
+                album.artists,
+                vec![
+                    crate::model::ArtistLink {
+                        name: "Ann".to_owned(),
+                        id: Some("UCann".to_owned()),
+                    },
+                    crate::model::ArtistLink {
+                        name: "Bo".to_owned(),
+                        id: Some("UCbo".to_owned()),
+                    },
+                ]
+            );
+            assert_eq!(album.explicit, Some(true));
+            assert_eq!(album.year.as_deref(), Some("2024"));
+            assert_eq!(album.kind.as_deref(), Some("Album"));
+            assert_eq!(album.artist, "Ann, Bo");
+        }
+    }
+
+    #[test]
+    fn album_rows_and_cards_only_keep_proven_release_kinds() {
+        for (label, expected) in [
+            ("Album", Some("Album")),
+            ("Single", Some("Single")),
+            ("EP", Some("EP")),
+            ("Compilation", Some("Compilation")),
+            ("2024", None),
+            ("Unknown", None),
+            ("", None),
+        ] {
+            let byline = serde_json::json!([{"text": label}]);
+            let row = album_row("An album", byline.clone());
+            let card = serde_json::json!({"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "An album"}]},
+                "subtitle": {"runs": byline},
+                "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"]
+            }});
+            for entry in [
+                parse_search_row(&row["musicResponsiveListItemRenderer"]),
+                parse_card(&card),
+            ] {
+                let Some(Entry::Album(album)) = entry else {
+                    panic!("expected an album");
+                };
+                assert_eq!(album.kind.as_deref(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn album_rows_and_cards_never_credit_kind_or_year() {
+        for (byline, expected) in [
+            (
+                serde_json::json!([
+                    {"text": "Album"}, {"text": " • "}, {"text": "Various Artists"},
+                    {"text": " • "}, {"text": "2024"}
+                ]),
+                vec![crate::model::ArtistLink::plain("Various Artists")],
+            ),
+            (
+                serde_json::json!([
+                    {"text": "Single"}, {"text": " • "}, {"text": "2024"}
+                ]),
+                Vec::new(),
+            ),
+        ] {
+            let row = album_row("An album", byline.clone());
+            let card = serde_json::json!({"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "An album"}]},
+                "subtitle": {"runs": byline},
+                "navigationEndpoint": row["musicResponsiveListItemRenderer"]["navigationEndpoint"]
+            }});
+            for entry in [
+                parse_search_row(&row["musicResponsiveListItemRenderer"]),
+                parse_card(&card),
+            ] {
+                let Some(Entry::Album(album)) = entry else {
+                    panic!("expected an album");
+                };
+                assert_eq!(album.artists, expected);
+                assert_eq!(
+                    album.artist,
+                    expected
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                assert_eq!(album.explicit, None);
+                assert_eq!(album.year.as_deref(), Some("2024"));
+            }
+        }
+    }
+
     /// The three bylines the Albums tab returned for `moves like jagger livw` (2026-10-19):
     /// a linked artist, an unlinked one, and none at all. The year never ends up in the artist.
     #[test]
@@ -3017,6 +3236,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{fixture}: no The Man Who"));
             assert_eq!(album.year.as_deref(), Some("1999"), "{fixture}");
             assert_eq!(album.artist, "Travis", "{fixture}");
+            assert_eq!(album.kind.as_deref(), Some("Album"), "{fixture}");
         }
     }
 
@@ -3365,6 +3585,58 @@ mod tests {
         // The heading comes from the shelf itself, not a hardcoded one: every capture so far
         // calls it "Top songs", and the page used to print "Popular" over it.
         assert_eq!(a.top_songs_title.as_deref(), Some("Top songs"));
+    }
+
+    #[test]
+    fn music_artist_badges_require_explicit_profile_evidence() {
+        let mut root = json("artist");
+        let artist = parse_artist(&root).unwrap();
+        assert!(!artist.verified && !artist.official_artist_channel);
+        for (style, verified, official) in [
+            ("BADGE_STYLE_TYPE_VERIFIED", true, false),
+            ("BADGE_STYLE_TYPE_VERIFIED_ARTIST", false, true),
+            ("BADGE_STYLE_TYPE_MEDIA", false, false),
+        ] {
+            root["header"]["musicImmersiveHeaderRenderer"]["badges"] =
+                serde_json::json!([{"metadataBadgeRenderer": {"style": style}}]);
+            let artist = parse_artist(&root).unwrap();
+            assert_eq!(
+                (artist.verified, artist.official_artist_channel),
+                (verified, official)
+            );
+        }
+    }
+
+    #[test]
+    fn web_artist_badges_are_bound_to_the_requested_channel_title() {
+        let id = "UCzpl23pGTHVYqvKsgY0A-_w";
+        for (icon, verified, official) in [
+            ("CHECK_CIRCLE_FILLED", true, false),
+            ("AUDIO_BADGE", false, true),
+            ("MUSIC_EXPLICIT_BADGE", false, false),
+        ] {
+            let mut root = serde_json::json!({
+                "metadata": {"channelMetadataRenderer": {"externalId": id}},
+                "header": {"pageHeaderRenderer": {"content": {"pageHeaderViewModel": {}}}},
+            });
+            let header =
+                &mut root["header"]["pageHeaderRenderer"]["content"]["pageHeaderViewModel"];
+            header["title"]["dynamicTextViewModel"]["text"]["attachmentRuns"] = serde_json::json!([
+                {"element": {"type": {"imageType": {"image": {"sources": [
+                    {"clientResource": {"imageName": icon}}
+                ]}}}}}
+            ]);
+            let html = format!("<script>var ytInitialData = {root};</script>");
+            let badges = artist_channel_badges(&html, id);
+            assert_eq!(
+                (badges.verified, badges.official_artist_channel),
+                (verified, official)
+            );
+            let other = artist_channel_badges(&html, "UCtxdfwb9wfkoGocVUAJ-Bmg");
+            assert!(!other.verified && !other.official_artist_channel);
+        }
+        let consent = artist_channel_badges("<title>Before you continue</title>", id);
+        assert!(!consent.verified && !consent.official_artist_channel);
     }
 
     /// The hero is the letterboxed channel art, not the square portrait slot the avatar uses.
