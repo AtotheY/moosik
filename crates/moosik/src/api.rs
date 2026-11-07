@@ -12,7 +12,7 @@ mod home_page;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use ytmapi_rs::YtMusic;
 use ytmapi_rs::auth::AuthToken;
 use ytmapi_rs::auth::BrowserToken;
@@ -24,14 +24,14 @@ use ytmapi_rs::common::{
 };
 use ytmapi_rs::parse::{
     GetAlbum, GetArtist, GetArtistAlbumsAlbum, MoodCategorySection, MoodPlaylistCategory,
-    PlaylistItem, PlaylistSong, SearchResultSong,
+    PlaylistItem, PlaylistSong, ProcessedResult, SearchResultSong,
 };
 use ytmapi_rs::query::AddHistoryItemQuery;
 use ytmapi_rs::query::SearchQuery;
 use ytmapi_rs::query::search::BasicSearch;
 use ytmapi_rs::query::search::{AlbumsFilter, FilteredSearch, FilteredSearchType};
 use ytmapi_rs::query::song::GetSongTrackingUrlQuery;
-use ytmapi_rs::query::{GetArtistAlbumsQuery, GetArtistQuery};
+use ytmapi_rs::query::{GetAlbumQuery, GetArtistAlbumsQuery, GetArtistQuery};
 
 use crate::auth;
 use crate::innertube;
@@ -116,12 +116,47 @@ enum ClientRef {
     Browser(YtMusic<BrowserToken>),
 }
 
+type ClientInit<T> = OnceCell<Result<T, Arc<dyn std::error::Error + Send + Sync>>>;
+
+struct ClientCache<T>(Mutex<Arc<ClientInit<T>>>);
+
+impl<T: Clone> ClientCache<T> {
+    fn new() -> Self {
+        Self(Mutex::default())
+    }
+
+    async fn get_or_build(&self, build: impl AsyncFnOnce() -> Result<T>) -> Result<T> {
+        let init = Arc::clone(&*self.0.lock().await);
+        let result = init
+            .get_or_init(|| async {
+                build()
+                    .await
+                    .map_err(|e| Arc::from(e.into_boxed_dyn_error()))
+            })
+            .await;
+        match result {
+            Ok(client) => Ok(client.clone()),
+            Err(error) => {
+                let mut current = self.0.lock().await;
+                if Arc::ptr_eq(&init, &current) {
+                    *current = Arc::default();
+                }
+                Err(anyhow::Error::new(Arc::clone(error)))
+            }
+        }
+    }
+
+    async fn replace(&self, client: Option<T>) {
+        *self.0.lock().await = Arc::new(OnceCell::new_with(client.map(Ok)));
+    }
+}
+
 pub struct Api {
     /// Behind a lock because switching brand account rebuilds it — the page id is a default
     /// header on the client, which is the only hook `ytmapi-rs` leaves us.
     http: Mutex<ytmapi_rs::Client>,
-    noauth: Mutex<Option<YtMusic<NoAuthToken>>>,
-    browser: Mutex<Option<YtMusic<BrowserToken>>>,
+    noauth: ClientCache<YtMusic<NoAuthToken>>,
+    browser: ClientCache<Option<YtMusic<BrowserToken>>>,
     session: Mutex<Option<auth::Session>>,
     /// The session's cookie as yt-dlp sees it: kept in step with `session` wherever that is
     /// set or cleared, so playback and downloads run as the signed-in account too.
@@ -146,8 +181,8 @@ impl Api {
         Ok(Self {
             ytdlp_session,
             http: Mutex::new(http_client_for(page_id.as_deref())?),
-            noauth: Mutex::new(None),
-            browser: Mutex::new(None),
+            noauth: ClientCache::new(),
+            browser: ClientCache::new(),
             session: Mutex::new(session),
             refresh: Mutex::new(()),
             refresh_failed: Mutex::new(None),
@@ -161,63 +196,52 @@ impl Api {
     }
 
     async fn noauth(&self) -> Result<YtMusic<NoAuthToken>> {
-        if let Some(yt) = self.noauth.lock().await.clone() {
-            return Ok(yt);
-        }
-        let yt = ytmapi_rs::builder::YtMusicBuilder::new_with_client(self.http().await)
-            .build()
+        self.noauth
+            .get_or_build(async || {
+                ytmapi_rs::builder::YtMusicBuilder::new_with_client(self.http().await)
+                    .build()
+                    .await
+                    .context("could not reach YouTube Music")
+            })
             .await
-            .context("could not reach YouTube Music")?;
-        *self.noauth.lock().await = Some(yt.clone());
-        Ok(yt)
     }
 
-    /// Build the signed-in client from the stored cookie, so it is ready when needed. `Ok(false)`
+    /// Build the signed-in client from the stored cookie, so it is ready when needed. `Ok(None)`
     /// means there is no stored session to build one from — not signed in, not an error; `Err` is
     /// a real failure (an invalid cookie, or the client failing to build).
-    async fn ensure_browser(&self) -> Result<bool> {
-        if self.browser.lock().await.is_some() {
-            return Ok(true);
-        }
-        let Some(cookie) = self.session.lock().await.as_ref().map(|s| s.cookie.clone()) else {
-            return Ok(false);
-        };
-        let http = self.http().await;
-        let token = match BrowserToken::from_str(&cookie, &http).await {
-            Ok(token) => token,
-            // Building the token is a request of its own, so with no connection it fails too —
-            // and that is no reason to tell someone offline that their sign-in is gone.
-            Err(e) if looks_offline(&e.to_string()) => {
-                return Err(anyhow::Error::new(e).context("could not reach YouTube Music"));
-            }
-            Err(e) => {
-                return Err(anyhow::Error::new(e)
-                    .context("the saved cookie is invalid or expired; sign in again"));
-            }
-        };
-        let yt = ytmapi_rs::builder::YtMusicBuilder::new_with_client(http)
-            .with_auth_token(token)
-            .build()
-            .context("could not build the signed-in client")?;
-        *self.browser.lock().await = Some(yt);
-        Ok(true)
+    async fn browser(&self) -> Result<Option<YtMusic<BrowserToken>>> {
+        self.browser
+            .get_or_build(async || {
+                let Some(cookie) = self.session.lock().await.as_ref().map(|s| s.cookie.clone())
+                else {
+                    return Ok(None);
+                };
+                let http = self.http().await;
+                let token = match BrowserToken::from_str(&cookie, &http).await {
+                    Ok(token) => token,
+                    // Building the token is a request of its own, so with no connection it fails too —
+                    // and that is no reason to tell someone offline that their sign-in is gone.
+                    Err(e) if looks_offline(&e.to_string()) => {
+                        return Err(anyhow::Error::new(e).context("could not reach YouTube Music"));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::Error::new(e)
+                            .context("the saved cookie is invalid or expired; sign in again"));
+                    }
+                };
+                ytmapi_rs::builder::YtMusicBuilder::new_with_client(http)
+                    .with_auth_token(token)
+                    .build()
+                    .map(Some)
+                    .context("could not build the signed-in client")
+            })
+            .await
     }
 
     /// The client to run a request against: the signed-in cookie client if there is one, else
     /// anonymous.
-    ///
-    /// A single call to `ensure_browser` decides which — checking `is_signed_in` first and then
-    /// separately building the browser client used to leave a window where a concurrent
-    /// `forget_session`/sign-out landed in between, turning what should have been a silent
-    /// fallback to anonymous into a spurious "not signed in" error.
     async fn client_ref(&self) -> Result<ClientRef> {
-        if self.ensure_browser().await? {
-            let yt = self
-                .browser
-                .lock()
-                .await
-                .clone()
-                .context("signed-in client not built")?;
+        if let Some(yt) = self.browser().await? {
             Ok(ClientRef::Browser(yt))
         } else {
             Ok(ClientRef::NoAuth(self.noauth().await?))
@@ -324,7 +348,7 @@ impl Api {
         }
         *self.refresh_failed.lock().await = None;
         self.share_with_ytdlp(Some(&cookie));
-        *self.browser.lock().await = Some(yt);
+        self.browser.replace(Some(Some(yt))).await;
         Ok(account)
     }
 
@@ -333,15 +357,9 @@ impl Api {
     /// A Google account may own brand channels alongside the personal one. The personal entry has
     /// no page id; the brand ones do, and that id is what selects them.
     pub async fn accounts(&self) -> Result<Vec<model::Account>> {
-        if !self.ensure_browser().await? {
+        let Some(yt) = self.browser().await? else {
             return Ok(Vec::new());
-        }
-        let yt = self
-            .browser
-            .lock()
-            .await
-            .clone()
-            .context("signed-in client not built")?;
+        };
         let json = yt
             .json_query(AccountsListQuery)
             .await
@@ -358,8 +376,8 @@ impl Api {
     pub async fn switch_account(&self, page_id: Option<String>) -> Result<()> {
         *self.http.lock().await = http_client_for(page_id.as_deref())?;
         // Both derived clients carry the old header; drop them so they rebuild from the new one.
-        *self.noauth.lock().await = None;
-        *self.browser.lock().await = None;
+        self.noauth.replace(None).await;
+        self.browser.replace(None).await;
         Ok(())
     }
 
@@ -372,7 +390,7 @@ impl Api {
     pub async fn forget_session(&self) {
         self.share_with_ytdlp(None);
         *self.session.lock().await = None;
-        *self.browser.lock().await = None;
+        self.browser.replace(None).await;
     }
 
     /// Sign out for real: forget the credential and remove it from disk.
@@ -397,15 +415,9 @@ impl Api {
     /// stored session be discarded. `Err` means the check could not be made, and the session must
     /// be kept: a stored sign-in should survive being offline.
     pub async fn verify_session(&self) -> Result<Option<String>> {
-        if !self.ensure_browser().await? {
+        let Some(yt) = self.browser().await? else {
             return Ok(None);
-        }
-        let yt = self
-            .browser
-            .lock()
-            .await
-            .clone()
-            .context("signed-in client not built")?;
+        };
 
         if let Some(account) = account_name(&yt).await? {
             return Ok(Some(account));
@@ -415,10 +427,8 @@ impl Api {
             return Ok(None);
         }
         let yt = self
-            .browser
-            .lock()
-            .await
-            .clone()
+            .browser()
+            .await?
             .context("signed-in client not built")?;
         account_name(&yt).await
     }
@@ -753,49 +763,10 @@ impl Api {
     }
 
     pub async fn get_album(&self, id: &str) -> Result<model::Album> {
-        // The typed query parses the tracks, but its library state comes from the toggle's
-        // default icon — which does not flip when the album is saved (verified live: a saved
-        // album still renders `BOOKMARK_BORDER`). The raw browse of the same id reads
-        // `isToggled` instead. Concurrent, so the truth costs no latency; a raw failure
-        // keeps the typed state rather than losing the page.
-        let raw = BrowseQuery::feed_owned(id.to_owned());
-        let (album, header) = tokio::join!(
-            async {
-                match self.client_ref().await? {
-                    ClientRef::NoAuth(yt) => run_album(&yt, id).await,
-                    ClientRef::Browser(yt) => run_album(&yt, id).await,
-                }
-            },
-            self.run_browse_owned(raw, id),
-        );
-        let mut out = map_album(id, album?);
-        match header {
-            Ok(json) => {
-                // A raw album browse renders the responsive header; the scan stays inside
-                // it, because the track rows below carry their own bookmark menu items.
-                if let Some(toggle) =
-                    innertube::find_header_toggle(&json, "musicResponsiveHeaderRenderer")
-                {
-                    out.in_library = toggle.in_library;
-                }
-                // And those rows are the only place the tracks' own ratings live: the typed
-                // parser has no field for a like button, so every album track used to arrive
-                // unrated and a song you had liked did not look liked once it was playing.
-                let states = innertube::track_states(&json);
-                merge_track_states(&mut out.tracks, &states);
-                // The rows' own credits, where a track's differ from the album's.
-                for track in &mut out.tracks {
-                    if let Some(state) = states.get(&track.video_id)
-                        && !state.artists.is_empty()
-                    {
-                        track.artists = state.artists.clone();
-                    }
-                }
-            }
-            Err(e) => tracing::debug!(%id, error = %format!("{e:#}"),
-                "raw album browse failed; keeping the typed library state"),
+        match self.client_ref().await? {
+            ClientRef::NoAuth(yt) => run_album(&yt, id).await,
+            ClientRef::Browser(yt) => run_album(&yt, id).await,
         }
-        Ok(out)
     }
 
     /// The signed-in user's library, in four sections fetched concurrently.
@@ -1502,10 +1473,7 @@ impl Api {
         };
         // One file per feed: a single path would be overwritten by whichever browse finished last,
         // which is never the one you are trying to look at.
-        if let Some(dir) = std::env::var_os("MOOSIK_DUMP_BROWSE") {
-            let path = std::path::Path::new(&dir).with_extension(format!("{browse_id}.json"));
-            let _ = std::fs::write(path, serde_json::to_vec_pretty(&json).unwrap_or_default());
-        }
+        dump_browse(&browse_id, &json);
         Ok(json)
     }
 
@@ -2533,6 +2501,13 @@ fn dump(var: &str, json: &serde_json::Value) {
     }
 }
 
+fn dump_browse(browse_id: &str, json: &serde_json::Value) {
+    if let Some(dir) = std::env::var_os("MOOSIK_DUMP_BROWSE") {
+        let path = std::path::Path::new(&dir).with_extension(format!("{browse_id}.json"));
+        let _ = std::fs::write(path, serde_json::to_vec_pretty(json).unwrap_or_default());
+    }
+}
+
 /// Whether an error reads as "no connection" rather than as YouTube refusing something: the
 /// request never got an answer. Read from the text because the errors arrive as strings in the
 /// app's events, and each layer — reqwest, `ytmapi-rs`, yt-dlp — words it its own way.
@@ -2636,10 +2611,35 @@ async fn run_artist<A: AuthToken>(yt: &YtMusic<A>, id: &str) -> Result<GetArtist
         .with_context(|| format!("could not load artist {id}"))
 }
 
-async fn run_album<A: AuthToken>(yt: &YtMusic<A>, id: &str) -> Result<GetAlbum> {
-    yt.get_album(AlbumID::from_raw(id.to_owned()))
+async fn run_album<A: AuthToken>(yt: &YtMusic<A>, id: &str) -> Result<model::Album> {
+    let query = GetAlbumQuery::new(AlbumID::from_raw(id));
+    let json = yt
+        .json_query::<GetAlbumQuery>(&query)
         .await
-        .with_context(|| format!("could not load album {id}"))
+        .with_context(|| format!("could not load album {id}"))?;
+    let raw = json.clone().into_inner();
+    dump_browse(id, &raw);
+    let album = ProcessedResult {
+        query: &query,
+        source: String::new(),
+        json,
+    }
+    .parse_into()
+    .with_context(|| format!("could not load album {id}"))?;
+    let mut album = map_album(id, album);
+    if let Some(toggle) = innertube::find_header_toggle(&raw, "musicResponsiveHeaderRenderer") {
+        album.in_library = toggle.in_library;
+    }
+    let states = innertube::track_states(&raw);
+    merge_track_states(&mut album.tracks, &states);
+    for track in &mut album.tracks {
+        if let Some(state) = states.get(&track.video_id)
+            && !state.artists.is_empty()
+        {
+            track.artists = state.artists.clone();
+        }
+    }
+    Ok(album)
 }
 
 /// The raw JSON for an artist expansion ("Show all"), so [`crate::innertube`] can read the
@@ -3028,9 +3028,6 @@ fn map_album(id: &str, a: GetAlbum) -> model::Album {
             library_add: None,
             library_remove: None,
             set_video_id: None,
-            // The typed parser carries no video kind at all — `get_album`'s raw-browse pass
-            // corrects this afterward via `merge_track_states`, so this default only survives
-            // for a track that pass couldn't resolve.
             wide: false,
             rank: None,
             trend: crate::model::ChartTrend::Unknown,
@@ -3090,6 +3087,29 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn concurrent_client_builds_share_a_failure_and_can_retry() {
+        let cache = ClientCache::<u32>::new();
+        let builds = std::cell::Cell::new(0);
+        let failing_build = async || {
+            builds.set(builds.get() + 1);
+            tokio::task::yield_now().await;
+            anyhow::bail!("temporary error")
+        };
+        let (first, second) = tokio::join!(
+            cache.get_or_build(failing_build),
+            cache.get_or_build(failing_build),
+        );
+        assert_eq!(first.unwrap_err().to_string(), "temporary error");
+        assert_eq!(second.unwrap_err().to_string(), "temporary error");
+        assert_eq!(builds.get(), 1);
+
+        assert_eq!(cache.get_or_build(async || Ok(2)).await.unwrap(), 2);
+        assert_eq!(cache.get_or_build(async || Ok(3)).await.unwrap(), 2);
+        cache.replace(Some(4)).await;
+        assert_eq!(cache.get_or_build(async || Ok(5)).await.unwrap(), 4);
+    }
 
     #[test]
     fn artist_badge_lookup_uses_the_channel_linked_by_the_music_profile() {

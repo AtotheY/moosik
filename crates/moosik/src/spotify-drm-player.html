@@ -16,24 +16,28 @@ let desiredVolume = 70;
 let volumeChanged = false;
 let pendingSeek = null;
 let seekChanged = false;
+let waitingForSeek = false;
 let sourceUrl = null;
 let mediaLoaded = false;
+let mediaComplete = false;
+let declaredDuration = 0;
 let sendingState = false;
 let queuedState = null;
 
 function snapshot() {
+  const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
   return {
     position: Number.isFinite(audio.currentTime) ? audio.currentTime : 0,
-    duration: Number.isFinite(audio.duration) ? audio.duration : 0,
-    paused: audio.paused,
+    duration: mediaComplete ? duration : Math.max(duration, declaredDuration),
+    paused: waitingForSeek ? desiredPaused : audio.paused,
     ended: errorCode === null && (stopped || audio.ended),
-    buffering: !stopped && errorCode === null && buffering,
-    seeking: audio.seeking,
+    buffering: !stopped && errorCode === null && (buffering || waitingForSeek),
+    seeking: audio.seeking || (pendingSeek !== null && audio.readyState >= 1),
     rate: Number.isFinite(audio.playbackRate) ? audio.playbackRate : 1,
     volume: audio.volume * 100,
     muted: audio.muted,
     playing: playing && !stopped && errorCode === null && !audio.paused && !audio.ended && !buffering,
-    ready: !stopped && errorCode === null && audio.readyState >= 2,
+    ready: !stopped && errorCode === null && mediaLoaded && !waitingForSeek && audio.readyState >= 2,
     errorCode,
   };
 }
@@ -71,6 +75,7 @@ function fail(code) {
   errorCode = [1, 2, 3, 4, 10, 11, 12].includes(code) ? code : 10;
   playing = false;
   buffering = false;
+  requests.abort();
   audio.pause();
   publish();
 }
@@ -87,23 +92,43 @@ async function request(path, options = {}) {
 }
 
 function applySeek() {
-  if (pendingSeek === null || audio.readyState < 1 || stopped || errorCode !== null) return;
-  const target = Number.isFinite(audio.duration)
+  if (pendingSeek === null || stopped || errorCode !== null) return;
+  if (audio.readyState < 1 || (!mediaComplete && (!audio.buffered.length || pendingSeek > audio.buffered.end(audio.buffered.length - 1)))) {
+    if (mediaLoaded && !waitingForSeek) {
+      waitingForSeek = true;
+      audio.pause();
+    }
+    return;
+  }
+  const target = mediaComplete && Number.isFinite(audio.duration)
     ? Math.min(pendingSeek, Math.max(0, audio.duration))
     : pendingSeek;
   audio.currentTime = target;
   pendingSeek = null;
+  if (waitingForSeek) {
+    waitingForSeek = false;
+    void applyPause();
+  }
+}
+
+function startWhenBuffered() {
+  if (stopped || errorCode !== null) return;
+  applySeek();
+  if (mediaLoaded || pendingSeek !== null || (!mediaComplete && !audio.buffered.length)) return;
+  mediaLoaded = true;
+  publish();
+  void applyPause();
 }
 
 async function applyPause() {
   if (stopped || errorCode !== null) return;
-  if (desiredPaused) {
+  if (desiredPaused || waitingForSeek) {
     audio.pause();
   } else if (mediaLoaded) {
     try {
       await audio.play();
     } catch (_) {
-      if (!desiredPaused && !stopped) fail(10);
+      if (!desiredPaused && !waitingForSeek && !stopped) fail(10);
     }
   }
 }
@@ -171,7 +196,7 @@ audio.addEventListener('pause', () => { playing = false; publish(); });
 audio.addEventListener('ended', () => { playing = false; buffering = false; publish(); });
 audio.addEventListener('error', () => fail(audio.error?.code));
 audio.addEventListener('loadedmetadata', () => {
-  try { applySeek(); } catch (_) { fail(10); }
+  try { startWhenBuffered(); } catch (_) { fail(10); }
   publish();
 });
 for (const event of ['loadeddata', 'canplay']) {
@@ -183,8 +208,6 @@ for (const event of ['seeking', 'seeked', 'durationchange', 'volumechange', 'rat
 
 async function begin() {
   try {
-    const media = request('media').then(response => response.arrayBuffer());
-    void media.catch(() => {});
     if (!isSecureContext || typeof navigator.requestMediaKeySystemAccess !== 'function') {
       fail(11);
       return;
@@ -193,6 +216,8 @@ async function begin() {
       fail(12);
       return;
     }
+    const media = request('media');
+    void media.catch(() => {});
     let access;
     try {
       access = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
@@ -208,6 +233,7 @@ async function begin() {
     }
     const meta = await (await request('meta')).json();
     if (stopped) return;
+    if (Number.isFinite(meta.duration) && meta.duration > 0 && meta.duration <= 86400) declaredDuration = meta.duration;
     if (!volumeChanged && Number.isFinite(meta.volume)) desiredVolume = Math.max(0, Math.min(100, meta.volume));
     audio.volume = desiredVolume / 100;
     if (!seekChanged && Number.isFinite(meta.startAt) && meta.startAt >= 0) pendingSeek = meta.startAt;
@@ -244,30 +270,34 @@ async function begin() {
     });
     const certificate = await request('certificate');
     if (!await keys.setServerCertificate(await certificate.arrayBuffer())) throw new Error();
-    const encrypted = await media;
+    const reader = (await media).body.getReader();
     if (stopped || errorCode !== null) return;
     const source = new MediaSource();
     sourceUrl = URL.createObjectURL(source);
-    const appended = new Promise((resolve, reject) => {
+    const opened = new Promise((resolve, reject) => {
       source.addEventListener('sourceopen', () => {
-        if (stopped || errorCode !== null) { resolve(); return; }
         try {
-          const buffer = source.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-          buffer.addEventListener('error', () => { fail(10); reject(new Error()); });
-          buffer.addEventListener('updateend', () => {
-            try { source.endOfStream(); resolve(); } catch (_) { reject(new Error()); }
-          }, {once: true});
-          buffer.appendBuffer(encrypted);
+          resolve(source.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"'));
         } catch (_) { reject(new Error()); }
       }, {once: true});
     });
     audio.src = sourceUrl;
-    await appended;
+    const buffer = await opened;
+    while (!stopped && errorCode === null) {
+      const {done, value} = await reader.read();
+      if (done || stopped || errorCode !== null) break;
+      await new Promise((resolve, reject) => {
+        buffer.onupdateend = resolve;
+        buffer.onerror = reject;
+        buffer.appendBuffer(value);
+      });
+      startWhenBuffered();
+    }
     if (stopped || errorCode !== null) return;
-    mediaLoaded = true;
-    applySeek();
+    mediaComplete = true;
+    source.endOfStream();
+    startWhenBuffered();
     publish();
-    await applyPause();
   } catch (_) {
     if (!stopped) fail(10);
   }

@@ -1,7 +1,7 @@
 use std::{
     path::PathBuf,
     sync::OnceLock,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +21,7 @@ struct Cached {
 
 static TRANSPORT: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
 static SIGN_IN: Mutex<()> = Mutex::const_new(());
+static SIGN_IN_STATUS: std::sync::Mutex<Option<(Instant, bool)>> = std::sync::Mutex::new(None);
 
 fn session_path() -> Result<PathBuf> {
     crate::profile_dirs()
@@ -29,7 +30,15 @@ fn session_path() -> Result<PathBuf> {
 }
 
 pub fn is_signed_in() -> bool {
-    session_path().is_ok_and(|path| path.is_file())
+    let mut status = SIGN_IN_STATUS.lock().unwrap();
+    if let Some((checked_at, signed_in)) = *status
+        && checked_at.elapsed() < Duration::from_secs(1)
+    {
+        return signed_in;
+    }
+    let signed_in = session_path().is_ok_and(|path| path.is_file());
+    *status = Some((Instant::now(), signed_in));
+    signed_in
 }
 
 fn now_ms() -> u64 {
@@ -66,6 +75,8 @@ fn save(session: &WebSession) -> Result<()> {
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
+    } else {
+        *SIGN_IN_STATUS.lock().unwrap() = Some((Instant::now(), true));
     }
     result
 }
@@ -96,6 +107,7 @@ pub async fn sign_out() -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => bail!("Could not remove the Spotify session"),
     }
+    *SIGN_IN_STATUS.lock().unwrap() = Some((Instant::now(), false));
     *cached = None;
     Ok(())
 }

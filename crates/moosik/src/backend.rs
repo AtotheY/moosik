@@ -778,16 +778,15 @@ async fn lrclib(http: &reqwest::Client, track: &Track) -> Option<crate::model::L
 /// audio version, when one exists, is to search for it. Match confidence is deliberately loose
 /// (trimmed, case-insensitive whole-string compare) since remasters/features/parenthetical tags
 /// can differ between the two uploads; a search failure or no close-enough match just means the
-/// caller falls back to the original id, never blocks or delays playback.
-async fn audio_alternative(api: &Api, track: &Track) -> Option<String> {
+/// caller falls back to the original id.
+async fn audio_alternative(api: &Api, track: &Track) -> anyhow::Result<Option<String>> {
     let artist = track.artist_line();
     let query = format!("{} {}", track.title, artist);
     let results = api
         .search_scoped(&query, SearchScope::Songs)
         .await
-        .inspect_err(|e| warn!(error = %format!("{e:#}"), "audio-alternative search failed"))
-        .ok()?;
-    results.into_iter().find_map(|entry| match entry {
+        .inspect_err(|e| warn!(error = %format!("{e:#}"), "audio-alternative search failed"))?;
+    Ok(results.into_iter().find_map(|entry| match entry {
         Entry::Song(t)
             if t.title.trim().eq_ignore_ascii_case(track.title.trim())
                 && t.artist_line().trim().eq_ignore_ascii_case(artist.trim()) =>
@@ -795,7 +794,27 @@ async fn audio_alternative(api: &Api, track: &Track) -> Option<String> {
             Some(t.video_id)
         }
         _ => None,
-    })
+    }))
+}
+
+struct AudioPrefetch {
+    video_id: String,
+    alternative: tokio::sync::OnceCell<Option<String>>,
+}
+
+impl AudioPrefetch {
+    async fn resolve_id(
+        &self,
+        lookup: impl Future<Output = anyhow::Result<Option<String>>>,
+    ) -> anyhow::Result<VideoId> {
+        let alternative = self.alternative.get_or_try_init(|| lookup).await;
+        VideoId::new(
+            alternative
+                .ok()
+                .and_then(Option::as_deref)
+                .unwrap_or(&self.video_id),
+        )
+    }
 }
 
 /// Split plain text into lines, trimming the ends.
@@ -1355,6 +1374,7 @@ pub struct Backend {
     tracking_http: reqwest::Client,
     api: Arc<Api>,
     resolver: Arc<StreamCache<ChainResolver>>,
+    audio_prefetch: std::sync::Mutex<Option<Arc<AudioPrefetch>>>,
     /// Plays the guest resolver's streams to mpv in ranges (see `moosik_resolve::StreamProxy`).
     /// `None` only if no loopback port could be opened; those streams then play by URL, slowly.
     proxy: Option<Arc<moosik_resolve::StreamProxy>>,
@@ -1475,6 +1495,7 @@ impl Backend {
             tracking_http: crate::trusted_requests::client_builder().build()?,
             api,
             resolver,
+            audio_prefetch: std::sync::Mutex::new(None),
             proxy,
             video_resolver: Arc::new(video_resolver),
             tx,
@@ -1601,6 +1622,7 @@ impl Backend {
     pub fn set_browsing_epoch(&self, epoch: u64) {
         if self.browse_epoch.swap(epoch, Ordering::AcqRel) != epoch {
             self.invalidate_search_cache();
+            self.audio_prefetch.lock().unwrap().take();
         }
     }
 
@@ -3225,6 +3247,13 @@ impl Backend {
             crate::player::PlaybackHandle::Mpv(mpv) => mpv,
         };
         let downloads = Arc::clone(&self.downloads);
+        let audio_prefetch = self
+            .audio_prefetch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|prefetch| track.wide && prefetch.video_id == track.video_id)
+            .cloned();
         let (resolver, api, tx, ctx) = (
             Arc::clone(&self.resolver),
             Arc::clone(&self.api),
@@ -3312,14 +3341,20 @@ impl Backend {
             // resolve/scrobble it instead. `track` itself (row, title, thumbnail, album link)
             // stays exactly the album track throughout; only the id handed to the resolver
             // changes.
-            let resolve_id = if track.wide {
-                audio_alternative(&api, &track)
-                    .await
-                    .unwrap_or_else(|| track.video_id.clone())
+            let id = if let Some(prefetch) = audio_prefetch {
+                prefetch.resolve_id(audio_alternative(&api, &track)).await
+            } else if track.wide {
+                VideoId::new(
+                    audio_alternative(&api, &track)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| track.video_id.clone()),
+                )
             } else {
-                track.video_id.clone()
+                VideoId::new(&track.video_id)
             };
-            let id = match VideoId::new(resolve_id) {
+            let id = match id {
                 Ok(id) => id,
                 Err(e) => {
                     Self::emit(
@@ -3519,7 +3554,7 @@ impl Backend {
     /// With yt-dlp at ~2-3s per resolve this is what makes the *next* track start instantly, and
     /// it is a prerequisite for gapless: mpv needs the next URL before the current track ends.
     pub fn prefetch(&self, track: Track) {
-        if track.is_spotify() {
+        if track.is_spotify() || track.local_path.is_some() {
             return;
         }
         // On disk already: there is nothing to resolve, and with no yt-dlp that futile call is
@@ -3532,10 +3567,33 @@ impl Backend {
         {
             return;
         }
+        let audio_prefetch = if track.wide {
+            let mut slot = self.audio_prefetch.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|prefetch| prefetch.video_id == track.video_id)
+            {
+                return;
+            }
+            let prefetch = Arc::new(AudioPrefetch {
+                video_id: track.video_id.clone(),
+                alternative: tokio::sync::OnceCell::new(),
+            });
+            *slot = Some(Arc::clone(&prefetch));
+            Some(prefetch)
+        } else {
+            None
+        };
+        let api = Arc::clone(&self.api);
         let resolver = Arc::clone(&self.resolver);
         let proxy = self.proxy.clone();
         self.rt.spawn(async move {
-            let Ok(id) = VideoId::new(track.video_id) else {
+            let id = if let Some(prefetch) = audio_prefetch {
+                prefetch.resolve_id(audio_alternative(&api, &track)).await
+            } else {
+                VideoId::new(track.video_id)
+            };
+            let Ok(id) = id else {
                 return;
             };
             // Resolved, and for a ranged stream its first 256 KiB fetched too, so the switch
@@ -3794,6 +3852,41 @@ fn scrobble_nonce() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prefetch_and_play_share_the_audio_alternative_lookup() {
+        let prefetch = AudioPrefetch {
+            video_id: "original001".into(),
+            alternative: tokio::sync::OnceCell::new(),
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let lookup = || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            Ok(Some("alternate01".into()))
+        };
+        let (warm, play) =
+            tokio::join!(prefetch.resolve_id(lookup()), prefetch.resolve_id(lookup()));
+        assert_eq!(warm.unwrap().as_str(), "alternate01");
+        assert_eq!(play.unwrap().as_str(), "alternate01");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_prefetch_does_not_hold_the_fallback_for_playback() {
+        let prefetch = AudioPrefetch {
+            video_id: "original001".into(),
+            alternative: tokio::sync::OnceCell::new(),
+        };
+        let warm = prefetch
+            .resolve_id(async { Err(anyhow::anyhow!("temporary error")) })
+            .await;
+        assert_eq!(warm.unwrap().as_str(), "original001");
+        let play = prefetch
+            .resolve_id(async { Ok(Some("alternate01".into())) })
+            .await;
+        assert_eq!(play.unwrap().as_str(), "alternate01");
+    }
 
     #[test]
     fn search_provider_changes_track_membership_without_reordering_invalidations() {

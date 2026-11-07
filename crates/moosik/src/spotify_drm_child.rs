@@ -112,7 +112,6 @@ mod windows {
     use std::cell::RefCell;
     use std::io::BufReader;
     use std::rc::Rc;
-    use std::time::{Duration, Instant};
 
     use anyhow::{Context, Result};
     use tao::event::{Event, WindowEvent};
@@ -182,7 +181,7 @@ mod windows {
             .build(&window)
             .context("Could not create the Spotify audio renderer")?;
         event_loop.run_return(|event, _, control_flow| {
-            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+            *control_flow = ControlFlow::Wait;
             match event {
                 Event::UserEvent(RendererEvent::Load(target)) => {
                     let url = target.url.as_str().to_owned();

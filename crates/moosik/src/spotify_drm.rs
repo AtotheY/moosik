@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -11,21 +11,24 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use moosik_spotify::{PreparedTrack, Transport};
+use moosik_spotify::{PreparedTrack, RangeData, Transport};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Notify, OnceCell},
+    sync::{Mutex as AsyncMutex, Notify},
     task::{JoinHandle, JoinSet},
 };
 
 const HTML: &str = include_str!("spotify-drm-player.html");
 const LIMIT: u64 = 64 * 1024 * 1024;
+const FIRST_MEDIA_RANGE: u64 = 128 * 1024;
+const MEDIA_RANGE: u64 = 1024 * 1024;
 const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RENDERER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const RENDERER_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const PLAYBACK_READY_GRACE: Duration = Duration::from_secs(45);
 const CACHE_HEADER: &[u8; 8] = b"MOOSIKC1";
 static CACHE_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -36,6 +39,7 @@ static CACHE_USAGE_KNOWN: AtomicBool = AtomicBool::new(false);
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
 static RENDERER_POOL: Mutex<RendererPool> = Mutex::new(RendererPool {
     child: None,
+    retirement: None,
     ownership: RendererOwnership {
         next: 0,
         active: None,
@@ -164,19 +168,19 @@ fn trim_cache(limit: u64, incoming: u64) -> Result<()> {
     Ok(())
 }
 
-fn decode_cache(bytes: &[u8]) -> Option<Vec<u8>> {
-    if bytes.get(..8)? != CACHE_HEADER {
+fn verify_cached(file: &mut impl Read) -> Option<u64> {
+    let mut header = [0; 48];
+    file.read_exact(&mut header).ok()?;
+    let len = u64::from_le_bytes(header[8..16].try_into().ok()?);
+    if &header[..8] != CACHE_HEADER || len == 0 || len > LIMIT {
         return None;
     }
-    let len = u64::from_le_bytes(bytes.get(8..16)?.try_into().ok()?);
-    let media = bytes.get(48..)?;
-    if len == 0 || len > LIMIT || media.len() as u64 != len {
-        return None;
-    }
-    (&Sha256::digest(media)[..] == bytes.get(16..48)?).then(|| media.to_vec())
+    let mut digest = Sha256::new();
+    let actual = io::copy(&mut file.take(len + 1), &mut digest).ok()?;
+    (actual == len && digest.finalize()[..] == header[16..]).then_some(len)
 }
 
-fn read_cached(file_id: &str) -> Option<Vec<u8>> {
+fn open_cached(file_id: &str) -> Option<(std::fs::File, u64)> {
     let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     if !CACHE_ENABLED.load(Ordering::SeqCst) {
         return None;
@@ -187,29 +191,33 @@ fn read_cached(file_id: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut file = std::fs::File::open(&path).ok()?;
-    let mut encoded = Vec::with_capacity(metadata.len() as usize);
-    Read::by_ref(&mut file)
-        .take(LIMIT + 49)
-        .read_to_end(&mut encoded)
-        .ok()?;
-    let media = decode_cache(&encoded);
-    if media.is_some() {
+    if let Some(len) = verify_cached(&mut file) {
+        file.seek(SeekFrom::Start(48)).ok()?;
         let _ = file.set_modified(SystemTime::now());
+        Some((file, len))
     } else {
         drop(file);
         let _ = std::fs::remove_file(&path);
         CACHE_USAGE_KNOWN.store(false, Ordering::SeqCst);
+        None
     }
-    media
 }
 
-fn write_cached(file_id: &str, bytes: &[u8], generation: u64) -> Result<()> {
+fn cache_write_allowed(len: u64, generation: u64) -> bool {
+    CACHE_ENABLED.load(Ordering::SeqCst)
+        && CACHE_GENERATION.load(Ordering::SeqCst) == generation
+        && cache_entry_fits(len, CACHE_LIMIT.load(Ordering::SeqCst))
+}
+
+fn write_cached(
+    file_id: &str,
+    mut media: std::fs::File,
+    len: u64,
+    digest: &[u8],
+    generation: u64,
+) -> Result<()> {
     let _guard = CACHE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    let limit = CACHE_LIMIT.load(Ordering::SeqCst);
-    if !CACHE_ENABLED.load(Ordering::SeqCst)
-        || CACHE_GENERATION.load(Ordering::SeqCst) != generation
-        || !cache_entry_fits(bytes.len() as u64, limit)
-    {
+    if !cache_write_allowed(len, generation) {
         return Ok(());
     }
     let directory = cache_dir()?;
@@ -218,7 +226,7 @@ fn write_cached(file_id: &str, bytes: &[u8], generation: u64) -> Result<()> {
     if destination.is_file() {
         return Ok(());
     }
-    trim_cache(limit, bytes.len() as u64 + 48)?;
+    trim_cache(CACHE_LIMIT.load(Ordering::SeqCst), len + 48)?;
     let temporary = directory.join(format!(
         "{}.part-{:016x}",
         cache_name(file_id),
@@ -230,9 +238,12 @@ fn write_cached(file_id: &str, bytes: &[u8], generation: u64) -> Result<()> {
             .create_new(true)
             .open(&temporary)?;
         file.write_all(CACHE_HEADER)?;
-        file.write_all(&(bytes.len() as u64).to_le_bytes())?;
-        file.write_all(&Sha256::digest(bytes))?;
-        file.write_all(bytes)?;
+        file.write_all(&len.to_le_bytes())?;
+        file.write_all(digest)?;
+        media.seek(SeekFrom::Start(0))?;
+        if io::copy(&mut Read::take(media, len), &mut file)? != len {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, destination)
@@ -240,7 +251,7 @@ fn write_cached(file_id: &str, bytes: &[u8], generation: u64) -> Result<()> {
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
     } else {
-        CACHE_USAGE.fetch_add(bytes.len() as u64 + 48, Ordering::SeqCst);
+        CACHE_USAGE.fetch_add(len + 48, Ordering::SeqCst);
     }
     result.map_err(Into::into)
 }
@@ -318,16 +329,22 @@ impl RendererOwnership {
         self.active = None;
         true
     }
+
+    fn is_idle_since(&self, token: u64) -> bool {
+        self.active.is_none() && self.next == token
+    }
 }
 
 struct RendererPool {
     child: Option<Child>,
+    retirement: Option<JoinHandle<()>>,
     ownership: RendererOwnership,
 }
 
 struct RendererLease {
     token: u64,
     reused: bool,
+    runtime: tokio::runtime::Handle,
 }
 
 impl RendererLease {
@@ -339,6 +356,9 @@ impl RendererLease {
             .ownership
             .acquire(handle.0.canceled.load(Ordering::SeqCst))
             .context("Spotify playback canceled")?;
+        if let Some(retirement) = pool.retirement.take() {
+            retirement.abort();
+        }
         let reused = pool.child.as_mut().is_some_and(|child| {
             child.try_wait().is_ok_and(|status| status.is_none())
                 && send_renderer(
@@ -361,7 +381,11 @@ impl RendererLease {
                 }
             }
         }
-        Ok(Self { token, reused })
+        Ok(Self {
+            token,
+            reused,
+            runtime: tokio::runtime::Handle::current(),
+        })
     }
 
     fn exited(&self) -> bool {
@@ -384,10 +408,39 @@ impl Drop for RendererLease {
         if !pool.ownership.release(self.token) {
             return;
         }
-        if pool.child.as_mut().is_some_and(|child| {
-            send_renderer(child, crate::spotify_drm_child::RendererCommand::Stop).is_err()
-        }) && let Some(child) = pool.child.take()
-        {
+        let Some(child) = pool.child.as_mut() else {
+            return;
+        };
+        if send_renderer(child, crate::spotify_drm_child::RendererCommand::Stop).is_err() {
+            retire_renderer(pool.child.take().unwrap());
+            return;
+        }
+        let token = self.token;
+        let deadline = tokio::time::Instant::now() + RENDERER_IDLE_TIMEOUT;
+        pool.retirement = Some(self.runtime.spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            let mut pool = RENDERER_POOL
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if pool.ownership.is_idle_since(token) {
+                pool.retirement.take();
+                if let Some(child) = pool.child.take() {
+                    retire_renderer(child);
+                }
+            }
+        }));
+    }
+}
+
+pub fn retire_idle_renderer() {
+    let mut pool = RENDERER_POOL
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if pool.ownership.active.is_none() {
+        if let Some(retirement) = pool.retirement.take() {
+            retirement.abort();
+        }
+        if let Some(child) = pool.child.take() {
             retire_renderer(child);
         }
     }
@@ -565,7 +618,7 @@ impl Handle {
 struct Broker {
     transport: Transport,
     track: PreparedTrack,
-    media: OnceCell<Arc<Vec<u8>>>,
+    media: AsyncMutex<()>,
     certificate: Vec<u8>,
     prefix: String,
     origin: String,
@@ -632,7 +685,7 @@ async fn start(
     let broker = Arc::new(Broker {
         transport,
         track,
-        media: OnceCell::new(),
+        media: AsyncMutex::new(()),
         certificate,
         prefix,
         origin,
@@ -668,23 +721,19 @@ async fn start(
             }
         }
     });
-    let renderer = match RendererLease::acquire(&url, &handle) {
-        Ok(renderer) => renderer,
-        Err(error) => {
-            server.abort();
-            return Err(error);
-        }
-    };
-    let renderer_reused = renderer.reused;
-    {
+    let renderer_reused = {
         let mut resources = handle.0.resources.lock().unwrap_or_else(|e| e.into_inner());
-        let created = Resources { server, renderer };
-        ensure!(
-            !handle.0.canceled.load(Ordering::SeqCst),
-            "Spotify playback canceled"
-        );
-        *resources = Some(created);
-    }
+        let renderer = match RendererLease::acquire(&url, &handle) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                server.abort();
+                return Err(error);
+            }
+        };
+        let reused = renderer.reused;
+        *resources = Some(Resources { server, renderer });
+        reused
+    };
     let renderer_started = Instant::now();
     let deadline = renderer_started
         + MEDIA_DOWNLOAD_TIMEOUT
@@ -783,8 +832,11 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             .await
         }
         ("GET", "meta") => {
-            let meta =
-                serde_json::to_vec(&json!({"volume":broker.volume,"startAt":broker.start_at}))?;
+            let meta = serde_json::to_vec(&json!({
+                "volume": broker.volume,
+                "startAt": broker.start_at,
+                "duration": broker.track.metadata.duration_ms.map(|ms| ms as f64 / 1000.0),
+            }))?;
             respond(&mut socket, 200, "application/json", &meta).await
         }
         ("GET", "certificate") => {
@@ -797,78 +849,17 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             .await
         }
         ("GET", "media") => {
-            let bytes = tokio::time::timeout(MEDIA_DOWNLOAD_TIMEOUT, async {
-                let download = broker.media.get_or_try_init(|| async {
-                    let started = Instant::now();
-                    let file_id = broker.track.file_id.clone();
-                    if let Ok(Some(bytes)) =
-                        tokio::task::spawn_blocking(move || read_cached(&file_id)).await
-                    {
-                        tracing::info!(
-                            elapsed_ms = started.elapsed().as_millis(),
-                            cache_hit = true,
-                            "Spotify media ready"
-                        );
-                        return Ok(Arc::new(bytes));
-                    }
-                    let first = broker
-                        .transport
-                        .fetch_range(&broker.track, 0, 1024 * 1024 - 1)
-                        .await?;
-                    ensure!(
-                        first.total_len <= LIMIT && first.total_len > 0,
-                        "Spotify media exceeds the 64 MiB limit"
-                    );
-                    let total = first.total_len;
-                    let mut bytes = first.bytes;
-                    ensure!(
-                        bytes.len() as u64 <= total,
-                        "Spotify media range exceeds its length"
-                    );
-                    while (bytes.len() as u64) < total {
-                        ensure!(
-                            !inner.canceled.load(Ordering::SeqCst),
-                            "Spotify playback canceled"
-                        );
-                        let start = bytes.len() as u64;
-                        let range = broker
-                            .transport
-                            .fetch_range(
-                                &broker.track,
-                                start,
-                                (start + 1024 * 1024 - 1).min(total - 1),
-                            )
-                            .await?;
-                        ensure!(
-                            range.total_len == total
-                                && !range.bytes.is_empty()
-                                && start + range.bytes.len() as u64 <= total,
-                            "Spotify media changed during playback"
-                        );
-                        bytes.extend_from_slice(&range.bytes);
-                    }
-                    let bytes = Arc::new(bytes);
-                    if !inner.canceled.load(Ordering::SeqCst) {
-                        let file_id = broker.track.file_id.clone();
-                        let saved = bytes.clone();
-                        let generation = broker.cache_generation;
-                        drop(tokio::task::spawn_blocking(move || {
-                            write_cached(&file_id, &saved, generation)
-                        }));
-                    }
-                    tracing::info!(
-                        elapsed_ms = started.elapsed().as_millis(),
-                        cache_hit = false,
-                        "Spotify media ready"
-                    );
-                    Result::<Arc<Vec<u8>>>::Ok(bytes)
-                });
-                download.await
-            })
-            .await;
-            match bytes {
-                Ok(Ok(bytes)) => respond(&mut socket, 200, "audio/mp4", bytes).await,
-                Ok(Err(_)) | Err(_) => respond(&mut socket, 502, "text/plain", b"").await,
+            let mut response_started = false;
+            match tokio::time::timeout(
+                MEDIA_DOWNLOAD_TIMEOUT,
+                serve_media(&mut socket, &broker, &mut response_started),
+            )
+            .await
+            {
+                Ok(Ok(())) => Ok(()),
+                _ if !response_started => respond(&mut socket, 502, "text/plain", b"").await,
+                Ok(Err(error)) => Err(error),
+                Err(error) => Err(error.into()),
             }
         }
         ("POST", "license") => {
@@ -886,13 +877,15 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
         }
         ("GET", "commands") => {
             let notified = inner.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let empty = inner
                 .commands
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty();
             if empty {
-                let _ = tokio::time::timeout(Duration::from_secs(1), notified).await;
+                let _ = tokio::time::timeout(Duration::from_secs(20), notified).await;
             }
             let commands: Vec<Value> = inner
                 .commands
@@ -910,11 +903,127 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
         }
         ("POST", "state") => {
             let state: BrowserState = serde_json::from_slice(&body)?;
+            let finished = state.ended || state.error_code.is_some();
             state.update(&inner)?;
-            respond(&mut socket, 200, "text/plain", b"").await
+            let result = respond(&mut socket, 200, "text/plain", b"").await;
+            if finished {
+                inner
+                    .resources
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+            }
+            result
         }
         _ => respond(&mut socket, 404, "text/plain", b"").await,
     }
+}
+
+async fn serve_media(
+    socket: &mut TcpStream,
+    broker: &Broker,
+    response_started: &mut bool,
+) -> Result<()> {
+    let _stream = broker.media.lock().await;
+    let started = Instant::now();
+    let file_id = broker.track.file_id.clone();
+    if let Ok(Some((file, len))) = tokio::task::spawn_blocking(move || open_cached(&file_id)).await
+    {
+        *response_started = true;
+        respond_head(socket, 200, "audio/mp4", len).await?;
+        let mut media = AsyncReadExt::take(tokio::fs::File::from_std(file), len);
+        ensure!(
+            tokio::io::copy(&mut media, socket).await? == len,
+            "Spotify cache entry changed during playback"
+        );
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            cache_hit = true,
+            "Spotify media ready"
+        );
+        return Ok(());
+    }
+
+    let mut range = broker
+        .transport
+        .fetch_range(&broker.track, 0, FIRST_MEDIA_RANGE - 1)
+        .await?;
+    let total = range.total_len;
+    ensure!(
+        (1..=LIMIT).contains(&total),
+        "Spotify media exceeds the 64 MiB limit"
+    );
+    check_media_range(&range, 0, total)?;
+    *response_started = true;
+    respond_head(socket, 200, "audio/mp4", total).await?;
+    socket.write_all(&range.bytes).await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        "Spotify media started"
+    );
+
+    let generation = broker.cache_generation;
+    let mut cache = if cache_write_allowed(total, generation) {
+        tokio::task::spawn_blocking(tempfile::tempfile)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(tokio::fs::File::from_std)
+    } else {
+        None
+    };
+    let mut digest = Sha256::new();
+    let mut offset = 0;
+    loop {
+        if let Some(file) = &mut cache {
+            if file.write_all(&range.bytes).await.is_ok() {
+                digest.update(&range.bytes);
+            } else {
+                cache = None;
+            }
+        }
+        offset += range.bytes.len() as u64;
+        if offset == total {
+            break;
+        }
+        drop(range);
+        range = broker
+            .transport
+            .fetch_range(
+                &broker.track,
+                offset,
+                (offset + MEDIA_RANGE - 1).min(total - 1),
+            )
+            .await?;
+        check_media_range(&range, offset, total)?;
+        socket.write_all(&range.bytes).await?;
+    }
+    if let Some(mut file) = cache
+        && file.flush().await.is_ok()
+    {
+        let file = file.into_std().await;
+        let file_id = broker.track.file_id.clone();
+        let digest = digest.finalize();
+        drop(tokio::task::spawn_blocking(move || {
+            write_cached(&file_id, file, total, &digest, generation)
+        }));
+    }
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        cache_hit = false,
+        "Spotify media ready"
+    );
+    Ok(())
+}
+
+fn check_media_range(range: &RangeData, offset: u64, total: u64) -> Result<()> {
+    ensure!(
+        range.total_len == total
+            && !range.bytes.is_empty()
+            && offset + range.bytes.len() as u64 <= total,
+        "Spotify media changed during playback"
+    );
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -984,16 +1093,19 @@ impl BrowserState {
 }
 
 async fn respond(socket: &mut TcpStream, status: u16, mime: &str, body: &[u8]) -> Result<()> {
-    let head = format!(
-        "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; media-src blob:; base-uri 'none'; frame-ancestors 'none'\r\n\r\n",
-        body.len()
-    );
     tokio::time::timeout(RENDERER_RESPONSE_TIMEOUT, async {
-        socket.write_all(head.as_bytes()).await?;
+        respond_head(socket, status, mime, body.len() as u64).await?;
         socket.write_all(body).await
     })
     .await??;
     Ok(())
+}
+
+async fn respond_head(socket: &mut TcpStream, status: u16, mime: &str, len: u64) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status} Response\r\nContent-Type: {mime}\r\nContent-Length: {len}\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; connect-src 'self'; media-src blob:; base-uri 'none'; frame-ancestors 'none'\r\n\r\n",
+    );
+    socket.write_all(head.as_bytes()).await
 }
 
 fn capability() -> String {
@@ -1060,10 +1172,14 @@ mod tests {
         let mut ownership = RendererOwnership::default();
         let first = ownership.acquire(false).unwrap();
         assert!(ownership.release(first));
+        assert!(ownership.is_idle_since(first));
         let second = ownership.acquire(false).unwrap();
+        assert!(!ownership.is_idle_since(first));
         assert!(!ownership.release(first));
         assert_eq!(ownership.active, Some(second));
         assert!(ownership.release(second));
+        assert!(!ownership.is_idle_since(first));
+        assert!(ownership.is_idle_since(second));
         let third = ownership.acquire(false).unwrap();
         assert!(!ownership.release(second));
         assert_eq!(ownership.active, Some(third));
@@ -1141,12 +1257,18 @@ mod tests {
         encoded.extend_from_slice(&(media.len() as u64).to_le_bytes());
         encoded.extend_from_slice(&Sha256::digest(media));
         encoded.extend_from_slice(media);
-        assert_eq!(decode_cache(&encoded).as_deref(), Some(media.as_slice()));
+        assert_eq!(
+            verify_cached(&mut encoded.as_slice()),
+            Some(media.len() as u64)
+        );
         for length in [0, 8, 16, 47, encoded.len() - 1] {
-            assert!(decode_cache(&encoded[..length]).is_none());
+            assert!(verify_cached(&mut &encoded[..length]).is_none());
         }
+        encoded.push(0);
+        assert!(verify_cached(&mut encoded.as_slice()).is_none());
+        encoded.pop();
         *encoded.last_mut().unwrap() ^= 1;
-        assert!(decode_cache(&encoded).is_none());
+        assert!(verify_cached(&mut encoded.as_slice()).is_none());
     }
 
     #[test]

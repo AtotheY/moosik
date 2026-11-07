@@ -225,6 +225,7 @@ impl Player {
             self.init_error = None;
             PlaybackHandle::Spotify(crate::spotify_drm::Handle::new(ctx))
         } else {
+            crate::spotify_drm::retire_idle_renderer();
             PlaybackHandle::Mpv(self.handle()?)
         };
         self.active = Some(handle.clone());
