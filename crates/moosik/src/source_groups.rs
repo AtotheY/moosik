@@ -173,6 +173,28 @@ pub fn entry_provider(entry: &Entry) -> Provider {
     }
 }
 
+pub(crate) fn prioritize_entries(items: &mut Vec<Entry>, preferred: Option<Provider>) {
+    let Some(first) = items.first().map(entry_provider) else {
+        return;
+    };
+    let primary = preferred
+        .filter(|provider| items.iter().any(|entry| entry_provider(entry) == *provider))
+        .unwrap_or(first);
+    if items.iter().all(|entry| entry_provider(entry) == primary) {
+        return;
+    }
+    let weight = if preferred == Some(primary) { 2 } else { 1 };
+    let (primary_entries, other_entries): (Vec<_>, Vec<_>) = std::mem::take(items)
+        .into_iter()
+        .partition(|entry| entry_provider(entry) == primary);
+    let mut primary = primary_entries.into_iter();
+    for other in other_entries {
+        items.extend(primary.by_ref().take(weight));
+        items.push(other);
+    }
+    items.extend(primary);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SongSignature {
     title: String,

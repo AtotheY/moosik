@@ -113,7 +113,7 @@ fn providers(app: &mut App, ui: &mut egui::Ui) {
             g.wide_row(
                 ui,
                 "Preferred source",
-                "Default for matching songs and profiles.",
+                "Priority for combined lists and matching items.",
                 |ui| {
                     for &provider in &available {
                         if widgets::chip(ui, &p, provider.name(), preferred == provider).clicked() {

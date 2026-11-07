@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::app::{App, Route};
 use crate::model::{Artist, ArtistLink, Entry, Provider, Shelf};
+use crate::source_groups::prioritize_entries;
 use crate::{theme, widgets};
 
 use super::source_rows;
@@ -26,44 +27,61 @@ struct DisplayShelf {
     shelf: Shelf,
 }
 
-fn discography_section(shelf: &Shelf) -> Option<&'static str> {
-    if shelf.items.is_empty()
-        || !shelf
-            .items
-            .iter()
-            .all(|entry| matches!(entry, Entry::Album(_)))
-    {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SharedSection {
+    Discography(&'static str),
+    RelatedArtists,
+}
+
+fn shared_section(shelf: &Shelf) -> Option<SharedSection> {
+    if shelf.items.is_empty() {
         return None;
     }
-    match shelf
+    let title = shelf
         .title
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .to_lowercase()
-        .as_str()
+        .to_lowercase();
+    if matches!(title.as_str(), "fans might also like" | "fans also like")
+        && shelf.items.iter().all(Entry::is_artist)
     {
-        "albums" => Some("albums"),
-        "singles & eps" | "singles and eps" => Some("singles & eps"),
-        "singles" => Some("singles"),
-        "eps" => Some("eps"),
-        "compilations" => Some("compilations"),
-        "popular releases" => Some("popular releases"),
-        "discography" => Some("discography"),
-        _ => None,
+        return Some(SharedSection::RelatedArtists);
     }
+    if !shelf
+        .items
+        .iter()
+        .all(|entry| matches!(entry, Entry::Album(_)))
+    {
+        return None;
+    }
+    let section = match title.as_str() {
+        "albums" => "albums",
+        "singles & eps" | "singles and eps" => "singles & eps",
+        "singles" => "singles",
+        "eps" => "eps",
+        "compilations" => "compilations",
+        "popular releases" => "popular releases",
+        "discography" => "discography",
+        _ => return None,
+    };
+    Some(SharedSection::Discography(section))
 }
 
-fn display_shelves(sources: &[ShelfSource], combined: bool) -> Vec<DisplayShelf> {
+fn display_shelves(
+    sources: &[ShelfSource],
+    combined: bool,
+    preferred: Option<Provider>,
+) -> Vec<DisplayShelf> {
     let mut shelves: Vec<DisplayShelf> = Vec::new();
     for (source_index, source) in sources.iter().enumerate() {
         for (index, original) in source.shelves.iter().enumerate() {
             if original.items.is_empty() {
                 continue;
             }
-            let section = combined.then(|| discography_section(original)).flatten();
+            let section = combined.then(|| shared_section(original)).flatten();
             let mut shelf = original.clone();
-            if let Some(section) = section {
+            if let Some(SharedSection::Discography(section)) = section {
                 let kind = match section {
                     "albums" => Some("Album"),
                     "singles" => Some("Single"),
@@ -93,11 +111,14 @@ fn display_shelves(sources: &[ShelfSource], combined: bool) -> Vec<DisplayShelf>
             if let Some(section) = section
                 && let Some(existing) = shelves.iter_mut().find(|existing| {
                     !existing.sources.contains(&source_index)
-                        && discography_section(&existing.shelf) == Some(section)
+                        && shared_section(&existing.shelf) == Some(section)
                 })
             {
                 existing.sources.push(source_index);
                 existing.shelf.items.extend(shelf.items);
+                if section == SharedSection::RelatedArtists {
+                    existing.shelf.title = "Fans also like".to_owned();
+                }
             } else {
                 shelves.push(DisplayShelf {
                     sources: vec![source_index],
@@ -105,6 +126,11 @@ fn display_shelves(sources: &[ShelfSource], combined: bool) -> Vec<DisplayShelf>
                     shelf,
                 });
             }
+        }
+    }
+    for shelf in &mut shelves {
+        if shelf.sources.len() > 1 {
+            prioritize_entries(&mut shelf.shelf.items, preferred);
         }
     }
     shelves
@@ -115,6 +141,7 @@ pub(crate) struct State {
     pair: Option<(String, String)>,
     youtube: Profile,
     spotify: Profile,
+    entries_preferred: Option<Provider>,
     pub entries: Vec<Entry>,
     pub revision: u64,
     pub rows: source_rows::State,
@@ -173,6 +200,7 @@ impl State {
         self.pair = None;
         self.youtube = Profile::default();
         self.spotify = Profile::default();
+        self.entries_preferred = None;
         self.entries.clear();
         self.revision = self.revision.wrapping_add(1);
         self.rows = source_rows::State::default();
@@ -217,28 +245,22 @@ impl State {
         }
     }
 
+    fn set_entry_preference(&mut self, preferred: Option<Provider>) {
+        if self.entries_preferred != preferred {
+            self.entries_preferred = preferred;
+            self.rebuild_entries();
+        }
+    }
+
     fn rebuild_entries(&mut self) {
-        let youtube = self
+        let mut entries = self
             .youtube
             .artist
-            .as_ref()
-            .map(|artist| artist.top_songs.as_slice())
-            .unwrap_or_default();
-        let spotify = self
-            .spotify
-            .artist
-            .as_ref()
-            .map(|artist| artist.top_songs.as_slice())
-            .unwrap_or_default();
-        let mut entries = Vec::with_capacity(youtube.len() + spotify.len());
-        for index in 0..youtube.len().max(spotify.len()) {
-            for track in [youtube.get(index), spotify.get(index)]
-                .into_iter()
-                .flatten()
-            {
-                entries.push(Entry::Song(track.clone()));
-            }
-        }
+            .iter()
+            .chain(self.spotify.artist.iter())
+            .flat_map(|artist| artist.top_songs.iter().cloned().map(Entry::Song))
+            .collect();
+        prioritize_entries(&mut entries, self.entries_preferred);
         if self.entries != entries {
             self.entries = entries;
             self.revision = self.revision.wrapping_add(1);
@@ -257,6 +279,9 @@ impl State {
 }
 
 pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
+    let combined = app.can_group_sources();
+    let preferred = combined.then_some(app.settings.preferred_provider);
+    app.artist_sources.set_entry_preference(preferred);
     let header = app
         .artist_sources
         .preferred_profile(app.settings.preferred_provider)
@@ -303,7 +328,7 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
             })
         })
         .collect();
-    let shelves = display_shelves(&sources, app.can_group_sources());
+    let shelves = display_shelves(&sources, combined, preferred);
     let marks = [Provider::YouTubeMusic, Provider::Spotify]
         .into_iter()
         .filter_map(|provider| {
@@ -404,12 +429,11 @@ pub(crate) fn page(app: &mut App, ui: &mut egui::Ui) {
         }
         if !app.artist_sources.entries.is_empty() {
             super::section(ui, &app.palette, "Popular");
-            let enabled = app.can_group_sources();
             let mut rows = std::mem::take(&mut app.artist_sources.rows);
             rows.set_entries(
                 &app.artist_sources.entries,
                 app.artist_sources.revision,
-                enabled,
+                combined,
             );
             source_rows::draw(
                 app,
@@ -554,6 +578,16 @@ mod tests {
         })
     }
 
+    fn artist(id: &str, name: &str) -> Entry {
+        Entry::Artist(crate::model::ArtistRef {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            subscribers: None,
+            thumbnail: None,
+            actions: crate::model::ArtistActions::default(),
+        })
+    }
+
     fn shelf(title: &str, items: Vec<Entry>) -> Shelf {
         Shelf {
             title: title.to_owned(),
@@ -603,7 +637,7 @@ mod tests {
                 )],
             ),
         ];
-        let shelves = display_shelves(&sources, true);
+        let shelves = display_shelves(&sources, true, None);
         assert_eq!(shelves.len(), 1);
         assert_eq!(shelves[0].sources, [0, 1]);
         assert_eq!(
@@ -613,7 +647,7 @@ mod tests {
                 .iter()
                 .map(Entry::title)
                 .collect::<Vec<_>>(),
-            ["Record", "Another", "Record", "Record (Deluxe)"]
+            ["Record", "Record", "Another", "Record (Deluxe)"]
         );
         let groups = crate::source_groups::group_entries(&shelves[0].shelf.items, true);
         assert_eq!(groups.len(), 3);
@@ -633,6 +667,53 @@ mod tests {
         };
         assert!(original.artist.is_empty());
         assert!(original.artists.is_empty());
+    }
+
+    #[test]
+    fn related_artist_aliases_join_one_shelf_with_preferred_source_order() {
+        let youtube = artist("UCrelated", "Related");
+        let spotify = artist("spotify:artist:1111111111111111111111", "Related");
+        let youtube_only = artist("UConly", "YouTube only");
+        let spotify_only = artist("spotify:artist:2222222222222222222222", "Spotify only");
+        let mixed = shelf(
+            "Fans also like",
+            vec![spotify.clone(), album("yt", "Record", "Artist")],
+        );
+        let sources = [
+            source(
+                Provider::YouTubeMusic,
+                vec![shelf(
+                    "Fans might also like",
+                    vec![youtube.clone(), youtube_only.clone()],
+                )],
+            ),
+            source(
+                Provider::Spotify,
+                vec![
+                    shelf(
+                        "Fans also like",
+                        vec![spotify.clone(), spotify_only.clone()],
+                    ),
+                    mixed.clone(),
+                ],
+            ),
+        ];
+        let shelves = display_shelves(&sources, true, Some(Provider::Spotify));
+        assert_eq!(shelves.len(), 2);
+        assert_eq!(shelves[0].sources, [0, 1]);
+        assert_eq!(shelves[0].shelf.title, "Fans also like");
+        assert_eq!(
+            shelves[0].shelf.items,
+            [spotify, spotify_only, youtube, youtube_only]
+        );
+        let groups = crate::source_groups::group_entries(&shelves[0].shelf.items, true);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(
+            groups[0].providers(),
+            [Provider::Spotify, Provider::YouTubeMusic]
+        );
+        assert_eq!(shelves[1].sources, [1]);
+        assert_eq!(shelves[1].shelf, mixed);
     }
 
     #[test]
@@ -676,7 +757,7 @@ mod tests {
                 ],
             ),
         ];
-        let shelves = display_shelves(&sources, true);
+        let shelves = display_shelves(&sources, true, None);
         assert_eq!(shelves.len(), 4);
         assert_eq!(shelves[0].shelf.items[0], credited);
         assert_eq!(shelves[1].sources, [0]);
@@ -699,7 +780,7 @@ mod tests {
                 vec![shelf("Albums", vec![album("sp", "Record", "Artist")])],
             ),
         ];
-        let shelves = display_shelves(&sources, false);
+        let shelves = display_shelves(&sources, false, Some(Provider::Spotify));
         assert_eq!(shelves.len(), 2);
         for (index, shelf) in shelves.iter().enumerate() {
             assert_eq!(shelf.sources, [index]);
@@ -732,7 +813,7 @@ mod tests {
                 )],
             ),
         ];
-        let shelves = display_shelves(&sources, true);
+        let shelves = display_shelves(&sources, true, None);
         let groups = crate::source_groups::group_entries(&shelves[0].shelf.items, true);
         assert_eq!(groups.len(), 2);
         assert_eq!(
@@ -768,7 +849,7 @@ mod tests {
                     )],
                 ),
             ];
-            let shelves = display_shelves(&sources, true);
+            let shelves = display_shelves(&sources, true, None);
             let groups = crate::source_groups::group_entries(&shelves[0].shelf.items, true);
             assert_eq!(groups.len(), 2, "{title}");
             let Entry::Album(album) = &shelves[0].shelf.items[0] else {
