@@ -2444,18 +2444,18 @@ pub(crate) fn page_header(
     let text_top = art_rect.top() + (art_size - block_h).max(0.0);
     let mut y = text_top + title_rel;
     if !h.kind_label.is_empty() {
-        let source_w = if let Some(source) = h.source {
-            widgets::source_name_indicator(
+        let source_w = if let Some(source) = h
+            .source
+            .and_then(|source| widgets::visible_source_badge(ui, source))
+        {
+            widgets::source_badge(
                 ui,
                 palette,
-                egui::Rect::from_center_size(
-                    egui::pos2(tx + 9.0, text_top + KIND_CENTRE),
-                    egui::vec2(18.0, 18.0),
-                ),
+                egui::pos2(tx, text_top + KIND_CENTRE),
                 source,
                 ui.id().with((h.salt, "source")),
             );
-            22.0
+            widgets::SOURCE_BADGE_WIDTH
         } else {
             0.0
         };
@@ -2546,16 +2546,18 @@ pub(crate) fn page_header(
         }
         (true, Some(plain)) => {
             let source_w = if h.kind_label.is_empty()
-                && let Some(source) = h.source
+                && let Some(source) = h
+                    .source
+                    .and_then(|source| widgets::visible_source_badge(ui, source))
             {
-                widgets::source_name_indicator(
+                widgets::source_badge(
                     ui,
                     palette,
-                    egui::Rect::from_center_size(egui::pos2(tx + 9.0, y), egui::vec2(18.0, 18.0)),
+                    egui::pos2(tx, y),
                     source,
                     ui.id().with((h.salt, "source")),
                 );
-                22.0
+                widgets::SOURCE_BADGE_WIDTH
             } else {
                 0.0
             };
