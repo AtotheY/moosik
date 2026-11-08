@@ -851,7 +851,14 @@ impl PlayQueue {
             return;
         };
         self.tracks.drain(..drop);
-        self.history.forget_within_queue();
+        self.history.played.retain_mut(|point| {
+            let Some(index) = point.index.checked_sub(drop) else {
+                return false;
+            };
+            point.index = index;
+            point.queue_len -= drop;
+            true
+        });
         self.reindex(|i| i.checked_sub(drop));
     }
 
@@ -1417,6 +1424,38 @@ mod tests {
         assert_eq!(q.current(), Some(MAX_PLAYED_PREFIX));
         assert_eq!(q.current_track().unwrap().video_id, current.to_string());
         assert_eq!(q.resume_here(), Some(9.0));
+    }
+
+    #[test]
+    fn repeated_prefix_trims_preserve_recent_tracks_and_previous() {
+        let id = |i| format!("spotify:track:{i:022}");
+        let last = MAX_PLAYED_PREFIX + 1;
+        let list: Vec<_> = (0..=last).map(id).collect();
+        let refs: Vec<_> = list.iter().map(String::as_str).collect();
+        let mut q = queue(&refs, 1);
+        q.remember_current();
+        q.set_current(last);
+        for i in last + 1..=last + 2 {
+            let index = q.len();
+            q.remember_current();
+            q.insert(index, track(&id(i)), Slot::Next(0), None);
+            q.set_current(index);
+            q.trim_played_prefix();
+        }
+        assert_eq!(
+            q.recent_spotify_tracks(),
+            [id(last + 2), id(last + 1), id(last)]
+        );
+        for expected in [last + 1, last] {
+            let Some(Rewind::WithinQueue { index, queue_len }) = q.rewind() else {
+                panic!("the surviving track should still be reachable");
+            };
+            q.truncate(queue_len);
+            q.set_current(index);
+            assert_eq!(q.current_track().unwrap().video_id, id(expected));
+            assert_eq!(q.len(), index + 1);
+        }
+        assert!(q.rewind().is_none());
     }
 
     /// A replaced queue drops the restored position, which belonged to the old queue's song.
