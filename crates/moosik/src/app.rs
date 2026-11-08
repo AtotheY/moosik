@@ -3885,7 +3885,8 @@ impl App {
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        let Some(handle) = player.playback_handle(track.is_spotify(), self.ctx.clone()) else {
+        let Some(handle) = player.playback_handle(track.is_spotify(), self.ctx.clone(), volume)
+        else {
             return;
         };
         // The old file is still loaded for an instant; without clearing this, `poll_playback`
@@ -7587,10 +7588,8 @@ impl App {
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        let handle = player.playback_handle(track.is_spotify(), self.ctx.clone());
-        // The user's volume, not `player.volume()`: the Audio normaliser folds each track's gain
-        // into the live value, and the next track must not inherit this one's.
         let volume = if self.muted { 0.0 } else { self.last_volume };
+        let handle = player.playback_handle(track.is_spotify(), self.ctx.clone(), volume);
         let init_error = player.init_error().map(str::to_owned);
         let Some(handle) = handle else {
             // libmpv could not be brought up — surface it now, the same message an eager
