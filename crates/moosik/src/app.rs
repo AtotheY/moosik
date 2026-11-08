@@ -887,6 +887,39 @@ pub(crate) struct Radio {
     pub(crate) chosen: std::collections::HashSet<String>,
 }
 
+struct SpotifyAutoplay {
+    generation: u64,
+    advance_after: Option<u64>,
+    state: SpotifyAutoplayState,
+}
+
+enum SpotifyAutoplayState {
+    Loading { retrying: bool },
+    RetryAt(Instant),
+    Ready(Option<Box<Track>>),
+    Failed,
+}
+
+impl SpotifyAutoplay {
+    fn finish(&mut self, result: Result<Option<Track>, String>, now: Instant) -> bool {
+        let SpotifyAutoplayState::Loading { retrying } = self.state else {
+            return false;
+        };
+        self.state = match result {
+            Ok(track) => SpotifyAutoplayState::Ready(track.map(Box::new)),
+            Err(error) => {
+                tracing::debug!(%error, "Spotify autoplay failed");
+                if retrying {
+                    SpotifyAutoplayState::Failed
+                } else {
+                    SpotifyAutoplayState::RetryAt(now + Duration::from_secs(5))
+                }
+            }
+        };
+        matches!(self.state, SpotifyAutoplayState::Ready(Some(_)))
+    }
+}
+
 impl Radio {
     /// The latent river for a hand-picked queue. `None` only for an empty queue.
     fn pending(tracks: &[Track]) -> Option<Self> {
@@ -1741,6 +1774,7 @@ pub struct App {
     pub(crate) repeat: RepeatMode,
     /// A river extension is in flight. Guards the low-water trigger, which runs every frame.
     radio_loading: bool,
+    spotify_autoplay: Option<SpotifyAutoplay>,
     /// The Up Next panel is open.
     pub(crate) upnext_open: bool,
     pub(crate) queue_undo: Option<(u64, crate::queue::EditSnapshot, Option<Radio>)>,
@@ -2127,6 +2161,7 @@ impl App {
         }
         if no_autoplay {
             settings.autoplay = false;
+            settings.spotify_autoplay = false;
         }
         let theme_watch = theme::custom::Watcher::new();
         let palette = settings.palette(&cc.egui_ctx, &custom_themes);
@@ -2320,6 +2355,7 @@ impl App {
             radio: None,
             repeat: RepeatMode::Off,
             radio_loading: false,
+            spotify_autoplay: None,
             upnext_open: queue,
             queue_undo: None,
             lyrics_open: lyrics,
@@ -2683,6 +2719,11 @@ impl App {
         change(&mut self.settings);
         if self.settings == before {
             return;
+        }
+        if !self.settings.spotify_autoplay
+            && let Some(autoplay) = &mut self.spotify_autoplay
+        {
+            autoplay.advance_after = None;
         }
         if self.settings.check_for_updates != before.check_for_updates
             && self.update.next_check.is_some()
@@ -3533,6 +3574,21 @@ impl App {
             }
         }
 
+        let retrying_advance = self.spotify_autoplay.as_ref().is_some_and(|autoplay| {
+            autoplay.generation == self.play_generation
+                && autoplay.advance_after == Some(self.playback_choice)
+                && matches!(autoplay.state, SpotifyAutoplayState::RetryAt(_))
+        });
+        if retrying_advance
+            || (self.playback_started
+                && self
+                    .q
+                    .peek_next(self.repeat, self.radio.as_ref().map(|r| &r.chosen))
+                    .is_none())
+        {
+            self.prepare_spotify_autoplay(false);
+        }
+
         // Hand the OS widget the current transport. After the advance/autoplay above, so a track
         // that just changed is what the OS shows.
         self.poll_together();
@@ -3849,6 +3905,9 @@ impl App {
     }
 
     fn set_media_paused(&mut self, paused: bool) {
+        if paused && let Some(autoplay) = &mut self.spotify_autoplay {
+            autoplay.advance_after = None;
+        }
         if !self.playback_started {
             if !paused && !self.now.resolving {
                 self.toggle_playback();
@@ -6917,6 +6976,17 @@ impl App {
                     }
                 }
                 Event::Playing(..) => {}
+                Event::SpotifyAutoplay { generation, result } => {
+                    if let Some(autoplay) = &mut self.spotify_autoplay
+                        && generation == self.play_generation
+                        && generation == autoplay.generation
+                        && autoplay.finish(result, Instant::now())
+                        && autoplay.advance_after == Some(self.playback_choice)
+                        && self.spotify_autoplay_enabled()
+                    {
+                        self.advance_queue();
+                    }
+                }
                 Event::MixLoaded { .. } if self.following() => {}
                 Event::MixLoaded { seed, mut queue } => {
                     // The player overlay is the now-playing song's own rating and the only like
@@ -7612,6 +7682,84 @@ impl App {
         self.advance_queue();
     }
 
+    fn spotify_autoplay_enabled(&self) -> bool {
+        self.settings.spotify_autoplay
+            && self.repeat == RepeatMode::Off
+            && !self.following()
+            && self.play_generation != 0
+            && self.q.current_track().is_some_and(Track::is_spotify)
+            && crate::spotify::is_signed_in()
+    }
+
+    fn prepare_spotify_autoplay(&mut self, advancing: bool) {
+        let retry = match self
+            .spotify_autoplay
+            .as_ref()
+            .filter(|autoplay| autoplay.generation == self.play_generation)
+        {
+            Some(SpotifyAutoplay {
+                state: SpotifyAutoplayState::RetryAt(at),
+                advance_after,
+                ..
+            }) => Some((*at, *advance_after)),
+            Some(_) => return,
+            None => None,
+        };
+        if !self.spotify_autoplay_enabled() {
+            return;
+        }
+        if !advancing
+            && let Some((at, _)) = retry
+            && let Some(wait) = at.checked_duration_since(Instant::now())
+        {
+            self.ctx.request_repaint_after(wait);
+            return;
+        }
+        self.spotify_autoplay = Some(SpotifyAutoplay {
+            generation: self.play_generation,
+            advance_after: retry.and_then(|(_, advance_after)| advance_after),
+            state: SpotifyAutoplayState::Loading {
+                retrying: retry.is_some(),
+            },
+        });
+        if let Some(track) = self.q.current_track() {
+            self.backend.spotify_autoplay(
+                self.play_generation,
+                track.video_id.clone(),
+                self.q.recent_spotify_tracks(),
+            );
+        }
+    }
+
+    fn advance_spotify_autoplay(&mut self) {
+        if !self.spotify_autoplay_enabled() {
+            return;
+        }
+        self.prepare_spotify_autoplay(true);
+        let Some(autoplay) = &mut self.spotify_autoplay else {
+            return;
+        };
+        match &mut autoplay.state {
+            SpotifyAutoplayState::Loading { .. } => {
+                autoplay.advance_after = Some(self.playback_choice);
+            }
+            SpotifyAutoplayState::Ready(next) => {
+                if let Some(track) = next.take() {
+                    let index = self.q.len();
+                    self.q.insert(
+                        index,
+                        *track,
+                        Slot::Next(0),
+                        self.radio.as_ref().map(|r| &r.chosen),
+                    );
+                    self.play_index(index);
+                    self.q.trim_played_prefix();
+                }
+            }
+            SpotifyAutoplayState::RetryAt(_) | SpotifyAutoplayState::Failed => {}
+        }
+    }
+
     fn advance_queue(&mut self) {
         if self.play_session_next() {
             return;
@@ -7639,7 +7787,7 @@ impl App {
                     self.play_index_restore(current);
                 }
             }
-            None => {}
+            None => self.advance_spotify_autoplay(),
         }
     }
 
@@ -7772,6 +7920,9 @@ impl App {
     /// both land here. Before playback has started there is nothing to seek, so it moves the
     /// restored position instead.
     pub(crate) fn seek_to(&mut self, seconds: f64) {
+        if let Some(autoplay) = &mut self.spotify_autoplay {
+            autoplay.advance_after = None;
+        }
         if self.playback_started {
             if matches!(self.spotify_pause, SpotifyPause::Waiting(_)) {
                 self.spotify_pause = SpotifyPause::Waiting(Instant::now());
@@ -8549,6 +8700,11 @@ impl App {
                 if let Some(radio) = &mut self.radio {
                     radio.state = River::Dead;
                 }
+                self.spotify_autoplay = Some(SpotifyAutoplay {
+                    generation: self.play_generation,
+                    advance_after: None,
+                    state: SpotifyAutoplayState::Ready(None),
+                });
                 let mut indices = upcoming;
                 indices.sort_unstable();
                 let mut changed = false;
@@ -11405,6 +11561,27 @@ mod tests {
         assert!(river_call(&pending, Some(0), 0, &queue, false).is_none());
         let open = radio(River::Open("tok".into()), "a", &[]);
         assert!(river_call(&open, Some(0), 0, &queue, false).is_none());
+    }
+
+    #[test]
+    fn spotify_autoplay_retries_a_failure_once_but_accepts_an_empty_result() {
+        let now = Instant::now();
+        let mut autoplay = SpotifyAutoplay {
+            generation: 1,
+            advance_after: Some(2),
+            state: SpotifyAutoplayState::Loading { retrying: false },
+        };
+        assert!(!autoplay.finish(Err("connection lost".into()), now));
+        assert!(matches!(autoplay.state, SpotifyAutoplayState::RetryAt(at) if at > now));
+        assert_eq!(autoplay.advance_after, Some(2));
+
+        autoplay.state = SpotifyAutoplayState::Loading { retrying: true };
+        assert!(!autoplay.finish(Err("connection lost".into()), now));
+        assert!(matches!(autoplay.state, SpotifyAutoplayState::Failed));
+
+        autoplay.state = SpotifyAutoplayState::Loading { retrying: false };
+        assert!(!autoplay.finish(Ok(None), now));
+        assert!(matches!(autoplay.state, SpotifyAutoplayState::Ready(None)));
     }
 
     /// A page only keeps the river flowing while it adds something and hands back a token.

@@ -170,6 +170,14 @@ pub async fn metadata(input: &str) -> Result<Option<Track>> {
     Ok(Some(track(metadata)))
 }
 
+pub(crate) async fn autoplay_next(seed: &str, recent: &[String]) -> Result<Option<Track>> {
+    Ok(transport()
+        .await?
+        .autoplay_next(seed, recent)
+        .await?
+        .map(catalog_track))
+}
+
 pub async fn search(query: &str) -> Result<SearchResults> {
     let items = search_scope(query, SearchScope::All).await?;
     Ok(SearchResults {
