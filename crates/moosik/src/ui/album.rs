@@ -82,7 +82,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         };
         let kind_label = kind;
         let meta = meta_line(a);
-        let like_id = a.like_id.clone();
+        let like_id = a.like_id.clone().filter(|_| !a.id.starts_with("spotify:"));
         let in_library = a.in_library;
         let art_top = ui.cursor().top();
         let out = crate::ui::page_header(
@@ -91,11 +91,17 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             images,
             backend,
             crate::ui::PageHeader {
+                source: Some(if a.id.starts_with("spotify:") {
+                    "Spotify"
+                } else {
+                    "YouTube Music"
+                }),
                 art_url: a.thumbnail.as_ref(),
                 art_size: PAGE_ART_SIZE,
                 circle: false,
                 kind_label: &kind_label,
                 title: &a.title,
+                verification: None,
                 description: None,
                 artists: &a.artists,
                 second_plain: None,
@@ -146,7 +152,10 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             remove_from_library: false,
                             context_only: false,
                             // The album's own radio seeds from its audio playlist id.
-                            radio_id: a.like_id.as_deref(),
+                            radio_id: a
+                                .like_id
+                                .as_deref()
+                                .filter(|_| !a.id.starts_with("spotify:")),
                             save_as_new: None,
                             tracks_pending: None,
                         },

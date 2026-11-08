@@ -568,7 +568,10 @@ mod tests {
         assert_eq!(track.like, crate::model::LikeStatus::Like);
         assert!(track.local_path.is_none());
         let local = Metadata {
-            id: "/tmp/moosik-test-song.flac".into(),
+            id: std::env::temp_dir()
+                .join("moosik-test-song.flac")
+                .to_string_lossy()
+                .into_owned(),
             ..meta
         }
         .to_track();

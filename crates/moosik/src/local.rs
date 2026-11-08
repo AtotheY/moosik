@@ -109,8 +109,50 @@ fn track_from_path(path: &Path) -> Option<Track> {
     })
 }
 
+pub fn search(tracks: &[crate::model::Track], query: &str) -> crate::model::SearchResults {
+    let query = query.to_lowercase();
+    let terms: Vec<_> = query.split_whitespace().collect();
+    let items = if terms.is_empty() {
+        Vec::new()
+    } else {
+        tracks
+            .iter()
+            .filter(|track| {
+                let fields = std::iter::once(track.title.as_str())
+                    .chain(track.artists.iter().map(|artist| artist.name.as_str()))
+                    .chain(track.album.as_deref());
+                let text = fields.collect::<Vec<_>>().join(" ").to_lowercase();
+                terms.iter().all(|term| text.contains(term))
+            })
+            .cloned()
+            .map(crate::model::Entry::Song)
+            .collect::<Vec<_>>()
+    };
+    crate::model::SearchResults {
+        no_results: items.is_empty(),
+        items,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_search_matches_words_across_title_artist_and_album() {
+        let mut track = super::track_from_path(std::path::Path::new("One More Time.flac")).unwrap();
+        track.artists = vec![crate::model::ArtistLink::plain("Daft Punk")];
+        track.album = Some("Discovery".to_owned());
+        let tracks = vec![track];
+        let found = super::search(&tracks, "DAFT discovery time");
+        assert_eq!(found.items.len(), 1);
+        assert_eq!(
+            found.items[0].track().unwrap().provider(),
+            crate::model::Provider::Local
+        );
+        assert!(super::search(&tracks, "missing").no_results);
+        assert!(super::search(&tracks, "  ").items.is_empty());
+    }
+
     use super::*;
 
     /// Not a real audio file — lofty will refuse to read tags from it — but the scan still has

@@ -21,17 +21,20 @@ use crate::auth::{self, AuthState};
 use crate::downloads;
 use crate::images;
 use crate::model::{
-    Album, Artist, Entry, Library, MoodPlaylists, Playlist, SearchResults, SearchScope, Shelf,
-    Track,
+    Album, Artist, Entry, Library, MoodPlaylists, Paged, Playlist, Provider, SearchResults,
+    SearchScope, Shelf, Track,
 };
 use crate::player;
+use crate::search_cache::{
+    Key as SearchKey, SearchCache, Snapshot as SearchSnapshot, Value as SearchValue,
+};
 
 /// Commit each successful page to the queue before asking for the next one.
 async fn collect_folder_pages<T, FirstPage, NextPage>(
     playlists: Vec<(String, String)>,
     tracks: &mut Vec<T>,
     first: impl Fn(String) -> FirstPage,
-    more: impl Fn(String) -> NextPage,
+    more: impl Fn(String, String) -> NextPage,
 ) -> Vec<String>
 where
     FirstPage: Future<Output = anyhow::Result<crate::model::Paged<T>>>,
@@ -49,7 +52,7 @@ where
                         break;
                     };
                     page = if visited.insert(token.clone()) {
-                        more(token).await
+                        more(id.clone(), token).await
                     } else {
                         Err(anyhow::anyhow!("repeated playlist continuation"))
                     };
@@ -74,20 +77,46 @@ pub enum Event {
         tracks: Vec<Track>,
         incomplete: Vec<String>,
     },
+    BrowseScoped {
+        epoch: u64,
+        event: Box<Event>,
+    },
+    ProviderBrowseWarning {
+        message: String,
+        epoch: u64,
+    },
+    SpotifySignInFinished(Result<(), String>),
+    SpotifySignOutFinished(Result<(), String>),
+    SpotifyProfileLoaded {
+        profile: crate::model::AccountProfile,
+    },
+    SpotifyProfileFailed {
+        error: String,
+    },
     SearchDone {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         results: SearchResults,
+        warnings: Vec<String>,
     },
     SearchFailed {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         error: String,
     },
     ScopedSearchDone {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         scope: crate::model::SearchScope,
         results: Vec<Entry>,
+        warnings: Vec<String>,
     },
     ScopedSearchFailed {
+        request: u64,
+        provider: Option<Provider>,
         query: String,
         scope: crate::model::SearchScope,
         error: String,
@@ -95,12 +124,16 @@ pub enum Event {
     /// Autocomplete for the search field. `query` is the staleness guard: the app drops a reply
     /// whose query is no longer in the box.
     SuggestionsDone {
+        provider: Option<Provider>,
         query: String,
         items: Vec<String>,
+        source_revision: u64,
     },
     SuggestionsFailed {
+        provider: Option<Provider>,
         query: String,
         error: String,
+        source_revision: u64,
     },
     /// A download in progress: `percent` is 0–100.
     DownloadProgress {
@@ -177,6 +210,12 @@ pub enum Event {
         complete: bool,
         epoch: u64,
     },
+    LikedMusicPage {
+        provider: Provider,
+        epoch: u64,
+        generation: u64,
+        result: Result<Paged<Track>, String>,
+    },
     AlbumLoaded {
         id: String,
         album: Album,
@@ -195,10 +234,12 @@ pub enum Event {
     },
     PlaylistMore {
         id: String,
+        revision: u64,
         page: crate::innertube::Page,
     },
     PlaylistMoreFailed {
         id: String,
+        revision: u64,
         error: String,
     },
     /// Whether the account holds YouTube Premium. `None` when it could not be asked (offline,
@@ -230,15 +271,25 @@ pub enum Event {
     /// doc comment for why a reply whose epoch has since moved on must be dropped.
     LibraryLoaded {
         library: Library,
+        failed_provider: Option<(Provider, String)>,
         epoch: u64,
+        songs_generation: u64,
+    },
+    LibraryProviderRetried {
+        epoch: u64,
+        request: u64,
+        provider: Provider,
+        result: Result<crate::providers::Loaded<Library>, String>,
     },
     LibraryMore {
         epoch: u64,
+        songs_generation: u64,
         section: crate::api::LibrarySection,
         page: crate::innertube::Page,
     },
     LibraryMoreFailed {
         epoch: u64,
+        songs_generation: u64,
         section: crate::api::LibrarySection,
         error: String,
     },
@@ -258,6 +309,7 @@ pub enum Event {
     LibraryFailed {
         error: String,
         epoch: u64,
+        songs_generation: u64,
     },
     SubscriptionChanged {
         channel_id: String,
@@ -277,6 +329,7 @@ pub enum Event {
     },
     ReleasesLoaded {
         shelves: Vec<Shelf>,
+        warnings: Vec<String>,
     },
     ReleasesFailed {
         error: String,
@@ -319,11 +372,14 @@ pub enum Event {
         next: Option<String>,
         /// See `LibraryLoaded::epoch`'s own doc comment.
         epoch: u64,
+        request: u64,
+        warnings: Vec<String>,
     },
     HomeFailed {
         filter: Option<String>,
         error: String,
         epoch: u64,
+        request: u64,
     },
     /// The next page of the home feed, loaded on scroll.
     HomeMore {
@@ -331,20 +387,24 @@ pub enum Event {
         shelves: Vec<Shelf>,
         next: Option<String>,
         epoch: u64,
+        request: u64,
     },
     HomeMoreFailed {
         filter: Option<String>,
         error: String,
         epoch: u64,
+        request: u64,
     },
     /// The full list behind a Home shelf's "Show all", from that shelf's own "more" target.
     HomeShelfLoaded {
         title: String,
         items: Vec<crate::model::Entry>,
+        request: u64,
     },
     HomeShelfFailed {
         title: String,
         error: String,
+        request: u64,
     },
     MoodPlaylistsLoaded {
         params: String,
@@ -413,6 +473,15 @@ pub enum Event {
         video_id: String,
         previous: bool,
         error: String,
+    },
+    SpotifyTrackLiked {
+        track: Track,
+        liked: bool,
+        result: Result<(), String>,
+    },
+    EditablePlaylists {
+        video_id: String,
+        result: Result<crate::model::EditablePlaylists, String>,
     },
     /// A page's (album or playlist header) library toggle landed. `album` picks the page to
     /// repaint; `in_library` is the new state.
@@ -530,6 +599,9 @@ impl Event {
     /// Whether this event carries what a big response was parsed into: a feed, a library, a page.
     /// The parse tree behind it is already freed, and the memory it used is worth handing back.
     fn follows_big_parse(&self) -> bool {
+        if let Self::BrowseScoped { event, .. } = self {
+            return event.follows_big_parse();
+        }
         matches!(
             self,
             Event::HomeLoaded { .. }
@@ -537,8 +609,10 @@ impl Event {
                 | Event::HomeShelfLoaded { .. }
                 | Event::SidebarPlaylists { .. }
                 | Event::LibraryLoaded { .. }
+                | Event::LibraryProviderRetried { result: Ok(_), .. }
                 | Event::LibraryMore { .. }
                 | Event::LikedPage { .. }
+                | Event::LikedMusicPage { result: Ok(_), .. }
                 | Event::SearchDone { .. }
                 | Event::ScopedSearchDone { .. }
                 | Event::ArtistLoaded { .. }
@@ -560,6 +634,8 @@ impl Event {
             self,
             Event::SearchDone { .. }
                 | Event::SearchFailed { .. }
+                | Event::SpotifyProfileLoaded { .. }
+                | Event::SpotifyProfileFailed { .. }
                 | Event::ScopedSearchDone { .. }
                 | Event::ScopedSearchFailed { .. }
                 | Event::ArtistLoaded { .. }
@@ -571,6 +647,7 @@ impl Event {
                 | Event::PlaylistSuggestions { .. }
                 | Event::LibraryLoaded { .. }
                 | Event::LibraryFailed { .. }
+                | Event::LikedMusicPage { .. }
                 | Event::ExploreLoaded { .. }
                 | Event::ExploreFailed { .. }
                 | Event::ReleasesLoaded { .. }
@@ -598,6 +675,7 @@ impl Event {
     pub fn error(&self) -> Option<&str> {
         match self {
             Event::SearchFailed { error, .. }
+            | Event::SpotifyProfileFailed { error }
             | Event::ScopedSearchFailed { error, .. }
             | Event::SuggestionsFailed { error, .. }
             | Event::DownloadFailed { error, .. }
@@ -607,8 +685,14 @@ impl Event {
             | Event::PlaylistFailed { error, .. }
             | Event::PlaylistMoreFailed { error, .. }
             | Event::LibraryMoreFailed { error, .. }
+            | Event::LikedMusicPage {
+                result: Err(error), ..
+            }
             | Event::SidebarPlaylistsFailed { error, .. }
             | Event::LibraryFailed { error, .. }
+            | Event::LibraryProviderRetried {
+                result: Err(error), ..
+            }
             | Event::SubscriptionFailed { error, .. }
             | Event::ExploreFailed { error, .. }
             | Event::ReleasesFailed { error, .. }
@@ -626,6 +710,12 @@ impl Event {
             | Event::LyricsFailed { error, .. }
             | Event::RatingFailed { error, .. }
             | Event::LibraryToggleFailed { error, .. }
+            | Event::SpotifyTrackLiked {
+                result: Err(error), ..
+            }
+            | Event::EditablePlaylists {
+                result: Err(error), ..
+            }
             | Event::PageLibraryFailed { error, .. }
             | Event::PlaylistEditFailed { error, .. }
             | Event::PlaylistDeleteFailed { error, .. }
@@ -711,16 +801,15 @@ async fn lrclib(http: &reqwest::Client, track: &Track) -> Option<crate::model::L
 /// audio version, when one exists, is to search for it. Match confidence is deliberately loose
 /// (trimmed, case-insensitive whole-string compare) since remasters/features/parenthetical tags
 /// can differ between the two uploads; a search failure or no close-enough match just means the
-/// caller falls back to the original id, never blocks or delays playback.
-async fn audio_alternative(api: &Api, track: &Track) -> Option<String> {
+/// caller falls back to the original id.
+async fn audio_alternative(api: &Api, track: &Track) -> anyhow::Result<Option<String>> {
     let artist = track.artist_line();
     let query = format!("{} {}", track.title, artist);
     let results = api
         .search_scoped(&query, SearchScope::Songs)
         .await
-        .inspect_err(|e| warn!(error = %format!("{e:#}"), "audio-alternative search failed"))
-        .ok()?;
-    results.into_iter().find_map(|entry| match entry {
+        .inspect_err(|e| warn!(error = %format!("{e:#}"), "audio-alternative search failed"))?;
+    Ok(results.into_iter().find_map(|entry| match entry {
         Entry::Song(t)
             if t.title.trim().eq_ignore_ascii_case(track.title.trim())
                 && t.artist_line().trim().eq_ignore_ascii_case(artist.trim()) =>
@@ -728,7 +817,27 @@ async fn audio_alternative(api: &Api, track: &Track) -> Option<String> {
             Some(t.video_id)
         }
         _ => None,
-    })
+    }))
+}
+
+struct AudioPrefetch {
+    video_id: String,
+    alternative: tokio::sync::OnceCell<Option<String>>,
+}
+
+impl AudioPrefetch {
+    async fn resolve_id(
+        &self,
+        lookup: impl Future<Output = anyhow::Result<Option<String>>>,
+    ) -> anyhow::Result<VideoId> {
+        let alternative = self.alternative.get_or_try_init(|| lookup).await;
+        VideoId::new(
+            alternative
+                .ok()
+                .and_then(Option::as_deref)
+                .unwrap_or(&self.video_id),
+        )
+    }
 }
 
 /// Split plain text into lines, trimming the ends.
@@ -958,13 +1067,337 @@ async fn cover_bytes(http: &reqwest::Client, track: &Track) -> Option<Vec<u8>> {
     Some(response.bytes().await.ok()?.to_vec())
 }
 
+struct SearchProviders {
+    allowed: Vec<Provider>,
+    revision: u64,
+}
+
+impl Default for SearchProviders {
+    fn default() -> Self {
+        Self {
+            allowed: vec![Provider::YouTubeMusic],
+            revision: 0,
+        }
+    }
+}
+
+impl SearchProviders {
+    fn replace(&mut self, allowed: Vec<Provider>) -> bool {
+        let allowed: Vec<_> = Provider::ALL
+            .into_iter()
+            .filter(|provider| allowed.contains(provider))
+            .collect();
+        if self.allowed == allowed {
+            return false;
+        }
+        self.allowed = allowed;
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+}
+
+struct SearchContext {
+    api: Arc<Api>,
+    cache: Arc<SearchCache>,
+    snapshot: SearchSnapshot,
+    local_tracks: Arc<Vec<Track>>,
+    allowed: Vec<Provider>,
+    source_revision: u64,
+    sources: Arc<std::sync::RwLock<SearchProviders>>,
+}
+
+impl SearchContext {
+    fn sources_current(&self) -> bool {
+        self.sources
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .revision
+            == self.source_revision
+    }
+
+    fn require_allowed(&self, provider: Provider) -> anyhow::Result<()> {
+        require_search_provider(&self.allowed, Some(provider))
+    }
+}
+
+fn require_search_provider(allowed: &[Provider], selected: Option<Provider>) -> anyhow::Result<()> {
+    if let Some(provider) = selected
+        && !allowed.contains(&provider)
+    {
+        anyhow::bail!("{} is not available for search", provider.name());
+    }
+    Ok(())
+}
+
+fn search_candidates(
+    allowed: &[Provider],
+    selected: Option<Provider>,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<Vec<Provider>> {
+    require_search_provider(allowed, selected)?;
+    Ok(Provider::ALL
+        .into_iter()
+        .filter(|provider| {
+            allowed.contains(provider)
+                && selected.is_none_or(|selected| selected == *provider)
+                && provider.search_scopes().contains(&scope)
+                && (selected.is_some() || *provider != Provider::Spotify || spotify_signed_in)
+        })
+        .collect())
+}
+
+async fn search_source(
+    context: &SearchContext,
+    provider: Provider,
+    query: &str,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<SearchResults> {
+    context.require_allowed(provider)?;
+    if provider == Provider::Spotify && !spotify_signed_in {
+        anyhow::bail!("Sign in to Spotify in Settings first");
+    }
+    let key = SearchKey::results(provider, query, scope, context.snapshot);
+    let value = context
+        .cache
+        .get_or_fetch(key, || async {
+            let results = match provider {
+                Provider::YouTubeMusic if scope == SearchScope::All => {
+                    context.api.search(query).await?
+                }
+                Provider::YouTubeMusic => {
+                    let items = context.api.search_scoped(query, scope).await?;
+                    SearchResults {
+                        no_results: items.is_empty(),
+                        items,
+                        ..Default::default()
+                    }
+                }
+                Provider::Spotify
+                    if matches!(scope, SearchScope::All | SearchScope::Songs)
+                        && crate::spotify::track_uri(query).is_some() =>
+                {
+                    let track = crate::spotify::metadata(query).await?;
+                    SearchResults {
+                        no_results: track.is_none(),
+                        items: track.into_iter().map(Entry::Song).collect(),
+                        ..Default::default()
+                    }
+                }
+                Provider::Spotify if scope == SearchScope::All => {
+                    crate::spotify::search(query).await?
+                }
+                Provider::Spotify => {
+                    let items = crate::spotify::search_scope(query, scope).await?;
+                    SearchResults {
+                        no_results: items.is_empty(),
+                        items,
+                        ..Default::default()
+                    }
+                }
+                Provider::Local => {
+                    let tracks = Arc::clone(&context.local_tracks);
+                    let query = query.to_owned();
+                    tokio::task::spawn_blocking(move || crate::local::search(&tracks, &query))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("Local search failed: {error}"))?
+                }
+            };
+            Ok(SearchValue::Results(results))
+        })
+        .await?;
+    match value.as_ref() {
+        SearchValue::Results(results) => Ok(results.clone()),
+        SearchValue::Suggestions(_) => anyhow::bail!("Search cache returned an invalid result"),
+    }
+}
+
+async fn search_sources(
+    context: &SearchContext,
+    selected: Option<Provider>,
+    query: &str,
+    scope: SearchScope,
+    spotify_signed_in: bool,
+) -> anyhow::Result<(SearchResults, Vec<String>)> {
+    let candidates = search_candidates(&context.allowed, selected, scope, spotify_signed_in)?;
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok((
+            SearchResults {
+                no_results: true,
+                ..Default::default()
+            },
+            Vec::new(),
+        ));
+    }
+    let fetch = |provider| {
+        let enabled = candidates.contains(&provider);
+        async move {
+            if enabled {
+                Some((
+                    provider,
+                    search_source(context, provider, query, scope, spotify_signed_in).await,
+                ))
+            } else {
+                None
+            }
+        }
+    };
+    let (youtube, spotify, local) = tokio::join!(
+        fetch(Provider::YouTubeMusic),
+        fetch(Provider::Spotify),
+        fetch(Provider::Local)
+    );
+    merge_search_results([youtube, spotify, local].into_iter().flatten().collect())
+}
+
+fn interleave<T>(lists: Vec<Vec<T>>) -> Vec<T> {
+    let capacity = lists.iter().map(Vec::len).sum();
+    let mut lists: Vec<_> = lists.into_iter().map(Vec::into_iter).collect();
+    let mut items = Vec::with_capacity(capacity);
+    loop {
+        let mut added = false;
+        for list in &mut lists {
+            if let Some(item) = list.next() {
+                items.push(item);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    items
+}
+
+fn merge_search_results(
+    responses: Vec<(Provider, anyhow::Result<SearchResults>)>,
+) -> anyhow::Result<(SearchResults, Vec<String>)> {
+    let mut results = Vec::new();
+    let mut warnings = Vec::new();
+    for (provider, response) in responses {
+        match response {
+            Ok(result) => results.push(result),
+            Err(error) => warnings.push(format!("{}: {error:#}", provider.name())),
+        }
+    }
+    if results.is_empty() && !warnings.is_empty() {
+        anyhow::bail!("{}", warnings.join("\n"));
+    }
+    let no_results = warnings.is_empty() && results.iter().all(|result| result.no_results);
+    let did_you_mean = results
+        .iter()
+        .find_map(|result| result.did_you_mean.clone());
+    let items = interleave(results.into_iter().map(|result| result.items).collect());
+    Ok((
+        SearchResults {
+            no_results: items.is_empty() && no_results,
+            items,
+            did_you_mean,
+        },
+        warnings,
+    ))
+}
+
+async fn source_suggestions(
+    context: &SearchContext,
+    provider: Provider,
+    query: &str,
+) -> anyhow::Result<Vec<String>> {
+    context.require_allowed(provider)?;
+    let key = SearchKey::suggestions(provider, query, context.snapshot);
+    let value = context
+        .cache
+        .get_or_fetch(key, || async {
+            let items = match provider {
+                Provider::YouTubeMusic => context.api.suggestions(query).await?,
+                Provider::Local => {
+                    let results =
+                        search_source(context, provider, query, SearchScope::All, false).await?;
+                    let mut titles = Vec::new();
+                    for entry in results.items {
+                        let title = entry.title().trim();
+                        if !title.is_empty()
+                            && !titles
+                                .iter()
+                                .any(|existing: &String| existing.eq_ignore_ascii_case(title))
+                        {
+                            titles.push(title.to_owned());
+                            if titles.len() == 8 {
+                                break;
+                            }
+                        }
+                    }
+                    titles
+                }
+                Provider::Spotify => Vec::new(),
+            };
+            Ok(SearchValue::Suggestions(items))
+        })
+        .await?;
+    match value.as_ref() {
+        SearchValue::Suggestions(items) => Ok(items.clone()),
+        SearchValue::Results(_) => anyhow::bail!("Search cache returned invalid suggestions"),
+    }
+}
+
+async fn search_suggestions(
+    context: &SearchContext,
+    selected: Option<Provider>,
+    query: &str,
+) -> anyhow::Result<Vec<String>> {
+    let candidates = search_candidates(&context.allowed, selected, SearchScope::All, true)?;
+    let query = query.trim();
+    if query.is_empty() || crate::spotify::resource_uri(query).is_some() {
+        return Ok(Vec::new());
+    }
+    let fetch = |provider| {
+        let enabled = candidates.contains(&provider);
+        async move {
+            if enabled {
+                Some(source_suggestions(context, provider, query).await)
+            } else {
+                None
+            }
+        }
+    };
+    let (youtube, local) = tokio::join!(fetch(Provider::YouTubeMusic), fetch(Provider::Local));
+    let mut lists = Vec::new();
+    let mut errors = Vec::new();
+    for response in [youtube, local].into_iter().flatten() {
+        match response {
+            Ok(items) => lists.push(items),
+            Err(error) => errors.push(format!("{error:#}")),
+        }
+    }
+    if lists.iter().all(Vec::is_empty) && !errors.is_empty() {
+        anyhow::bail!("{}", errors.join("\n"));
+    }
+    let mut items = Vec::new();
+    for item in interleave(lists) {
+        if !items
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&item))
+        {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
 pub struct Backend {
+    browse_epoch: AtomicU64,
+    search_cache: Arc<SearchCache>,
+    local_search_tracks: std::sync::RwLock<Arc<Vec<Track>>>,
+    search_providers: Arc<std::sync::RwLock<SearchProviders>>,
     rt: tokio::runtime::Runtime,
     /// One client, reused for every cover, so connections stay pooled.
     http: reqwest::Client,
     tracking_http: reqwest::Client,
     api: Arc<Api>,
     resolver: Arc<StreamCache<ChainResolver>>,
+    audio_prefetch: std::sync::Mutex<Option<Arc<AudioPrefetch>>>,
     /// Plays the guest resolver's streams to mpv in ranges (see `moosik_resolve::StreamProxy`).
     /// `None` only if no loopback port could be opened; those streams then play by URL, slowly.
     proxy: Option<Arc<moosik_resolve::StreamProxy>>,
@@ -1073,6 +1506,10 @@ impl Backend {
         );
 
         Ok(Self {
+            browse_epoch: AtomicU64::new(0),
+            search_cache: Arc::new(SearchCache::default()),
+            local_search_tracks: std::sync::RwLock::new(Arc::new(Vec::new())),
+            search_providers: Arc::new(std::sync::RwLock::new(SearchProviders::default())),
             rt,
             http: reqwest::Client::builder()
                 .use_rustls_tls()
@@ -1081,6 +1518,7 @@ impl Backend {
             tracking_http: crate::trusted_requests::client_builder().build()?,
             api,
             resolver,
+            audio_prefetch: std::sync::Mutex::new(None),
             proxy,
             video_resolver: Arc::new(video_resolver),
             tx,
@@ -1101,6 +1539,17 @@ impl Backend {
     /// Download one track to `~/Music/moosik`, reporting progress, then write its tags and cover.
     /// Completion carries the `Track` back so the app can add it to the index.
     pub fn download_track(&self, track: Track, format: &'static str) {
+        if track.is_spotify() {
+            Self::emit(
+                &self.tx,
+                &self.ctx,
+                Event::DownloadFailed {
+                    video_id: track.video_id,
+                    error: "Spotify downloads are unavailable".to_owned(),
+                },
+            );
+            return;
+        }
         let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
         let session = self.api.ytdlp_session();
         self.rt.spawn(async move {
@@ -1145,6 +1594,9 @@ impl Backend {
         let session = self.api.ytdlp_session();
         self.rt.spawn(async move {
             for track in tracks {
+                if track.is_spotify() {
+                    continue;
+                }
                 let video_id = track.video_id.clone();
                 match run_download(&track, &session, format, &tx, &ctx).await {
                     Ok(path) => {
@@ -1188,6 +1640,79 @@ impl Backend {
         if big {
             crate::memory::trim_after_parse();
         }
+    }
+
+    pub fn set_browsing_epoch(&self, epoch: u64) {
+        if self.browse_epoch.swap(epoch, Ordering::AcqRel) != epoch {
+            self.invalidate_search_cache();
+            self.audio_prefetch.lock().unwrap().take();
+        }
+    }
+
+    pub fn invalidate_search_cache(&self) {
+        self.search_cache.invalidate();
+    }
+
+    pub fn set_local_search_tracks(&self, tracks: Vec<Track>) {
+        let mut current = self
+            .local_search_tracks
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.as_ref() != &tracks {
+            *current = Arc::new(tracks);
+            self.search_cache.invalidate_local();
+        }
+    }
+
+    pub fn set_search_providers(&self, providers: Vec<Provider>) -> bool {
+        let mut current = self
+            .search_providers
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.replace(providers) {
+            self.search_cache.invalidate();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn search_sources_revision(&self) -> u64 {
+        self.search_providers
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .revision
+    }
+
+    fn search_context(&self) -> SearchContext {
+        let tracks = self
+            .local_search_tracks
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let providers = self
+            .search_providers
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        SearchContext {
+            api: Arc::clone(&self.api),
+            cache: Arc::clone(&self.search_cache),
+            snapshot: self.search_cache.snapshot(),
+            local_tracks: Arc::clone(&tracks),
+            allowed: providers.allowed.clone(),
+            source_revision: providers.revision,
+            sources: Arc::clone(&self.search_providers),
+        }
+    }
+
+    fn emit_browse(tx: &Sender<Event>, ctx: &egui::Context, epoch: u64, event: Event) {
+        Self::emit(
+            tx,
+            ctx,
+            Event::BrowseScoped {
+                epoch,
+                event: Box::new(event),
+            },
+        );
     }
 
     /// Ask GitHub whether a newer release is out, after `delay`: the launch check waits until
@@ -1278,52 +1803,123 @@ impl Backend {
         self.ctx.copy_text(text);
     }
 
-    pub fn search(&self, query: String) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+    pub fn search(&self, request: u64, provider: Option<Provider>, query: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let spotify_signed_in = crate::spotify::is_signed_in();
         self.rt.spawn(async move {
-            let event = match api.search(&query).await {
-                Ok(results) => Event::SearchDone { query, results },
-                Err(e) => Event::SearchFailed {
+            let result = search_sources(
+                &context,
+                provider,
+                &query,
+                SearchScope::All,
+                spotify_signed_in,
+            )
+            .await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok((results, warnings)) => Event::SearchDone {
+                    request,
+                    provider,
                     query,
-                    error: format!("{e:#}"),
-                },
-            };
-            Self::emit(&tx, &ctx, event);
-        });
-    }
-
-    /// Autocomplete for the search field. Failure is silent — the field simply shows nothing — so
-    /// only a debug line marks it.
-    pub fn fetch_suggestions(&self, query: String) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
-            let event = match api.suggestions(&query).await {
-                Ok(items) => Event::SuggestionsDone { query, items },
-                Err(e) => Event::SuggestionsFailed {
-                    query,
-                    error: format!("{e:#}"),
-                },
-            };
-            Self::emit(&tx, &ctx, event);
-        });
-    }
-
-    pub fn search_scoped(&self, query: String, scope: crate::model::SearchScope) {
-        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
-            let event = match api.search_scoped(&query, scope).await {
-                Ok(results) => Event::ScopedSearchDone {
-                    query,
-                    scope,
                     results,
+                    warnings,
                 },
-                Err(e) => Event::ScopedSearchFailed {
+                Err(error) => Event::SearchFailed {
+                    request,
+                    provider,
                     query,
-                    scope,
-                    error: format!("{e:#}"),
+                    error: format!("{error:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
+    pub fn fetch_suggestions(&self, provider: Option<Provider>, query: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let result = search_suggestions(&context, provider, &query).await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok(items) => Event::SuggestionsDone {
+                    provider,
+                    query,
+                    items,
+                    source_revision: context.source_revision,
+                },
+                Err(error) => Event::SuggestionsFailed {
+                    provider,
+                    query,
+                    error: format!("{error:#}"),
+                    source_revision: context.source_revision,
+                },
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
+    pub fn sign_in_spotify(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = crate::spotify::sign_in()
+                .await
+                .map_err(|error| error.to_string());
+            Self::emit(&tx, &ctx, Event::SpotifySignInFinished(result));
+        });
+    }
+
+    pub fn sign_out_spotify(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = crate::spotify::sign_out()
+                .await
+                .map_err(|error| error.to_string());
+            Self::emit(&tx, &ctx, Event::SpotifySignOutFinished(result));
+        });
+    }
+
+    pub fn search_scoped(
+        &self,
+        request: u64,
+        provider: Option<Provider>,
+        query: String,
+        scope: crate::model::SearchScope,
+    ) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let context = self.search_context();
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let spotify_signed_in = crate::spotify::is_signed_in();
+        self.rt.spawn(async move {
+            let result = search_sources(&context, provider, &query, scope, spotify_signed_in).await;
+            if !context.sources_current() {
+                return;
+            }
+            let event = match result {
+                Ok((results, warnings)) => Event::ScopedSearchDone {
+                    request,
+                    provider,
+                    query,
+                    scope,
+                    results: results.items,
+                    warnings,
+                },
+                Err(error) => Event::ScopedSearchFailed {
+                    request,
+                    provider,
+                    query,
+                    scope,
+                    error: format!("{error:#}"),
+                },
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1359,31 +1955,57 @@ impl Backend {
         });
     }
 
+    pub fn fetch_spotify_profile(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let event = match crate::spotify::account_profile().await {
+                Ok(profile) => Event::SpotifyProfileLoaded { profile },
+                Err(error) => Event::SpotifyProfileFailed {
+                    error: format!("{error:#}"),
+                },
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
     pub fn fetch_artist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.get_artist(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::artist(&id).await
+            } else {
+                api.get_artist(&id).await
+            };
+            let event = match result {
                 Ok(artist) => Event::ArtistLoaded { id, artist },
                 Err(e) => Event::ArtistFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
     pub fn fetch_album(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.get_album(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::album(&id).await
+            } else {
+                api.get_album(&id).await
+            };
+            let event = match result {
                 Ok(album) => Event::AlbumLoaded { id, album },
                 Err(e) => Event::AlbumFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1392,11 +2014,15 @@ impl Backend {
     /// page's own Play button, which never waits for pagination either.
     pub fn play_album(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            match api.get_album(&id).await {
-                Ok(album) => Self::emit(
-                    &tx,
-                    &ctx,
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::album(&id).await
+            } else {
+                api.get_album(&id).await
+            };
+            match result {
+                Ok(album) => Self::emit_browse(&tx, &ctx, epoch,
                     Event::CardTracksReady {
                         id,
                         tracks: album.tracks,
@@ -1412,11 +2038,15 @@ impl Backend {
     /// [`Self::play_album`], for a playlist card.
     pub fn play_playlist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            match api.playlist(&id).await {
-                Ok(playlist) => Self::emit(
-                    &tx,
-                    &ctx,
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::playlist(&id).await
+            } else {
+                api.playlist(&id).await
+            };
+            match result {
+                Ok(playlist) => Self::emit_browse(&tx, &ctx, epoch,
                     Event::CardTracksReady {
                         id,
                         tracks: playlist.tracks.items,
@@ -1429,17 +2059,66 @@ impl Backend {
         });
     }
 
-    pub fn fetch_library(&self, sort: crate::api::LibrarySortParam, epoch: u64) {
+    pub fn fetch_library(
+        &self,
+        sort: crate::api::LibrarySortParam,
+        epoch: u64,
+        songs_generation: u64,
+        youtube: bool,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library(sort).await {
-                Ok(library) => Event::LibraryLoaded { library, epoch },
+            let event = match crate::providers::library(
+                &api,
+                sort,
+                youtube,
+                crate::spotify::is_signed_in(),
+            )
+            .await
+            {
+                Ok(loaded) => {
+                    for message in loaded.warnings {
+                        Self::emit(&tx, &ctx, Event::ProviderBrowseWarning { message, epoch });
+                    }
+                    Event::LibraryLoaded {
+                        library: loaded.value,
+                        failed_provider: loaded.failed_provider,
+                        epoch,
+                        songs_generation,
+                    }
+                }
                 Err(e) => Event::LibraryFailed {
                     error: format!("{e:#}"),
                     epoch,
+                    songs_generation,
                 },
             };
             Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    pub(crate) fn retry_library_provider(
+        &self,
+        provider: Provider,
+        sort: crate::api::LibrarySortParam,
+        epoch: u64,
+        request: u64,
+    ) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = crate::providers::retry_library_provider(&api, provider, sort)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::LibraryProviderRetried {
+                    epoch,
+                    request,
+                    provider,
+                    result,
+                },
+            );
         });
     }
 
@@ -1521,6 +2200,69 @@ impl Backend {
             }
         });
     }
+
+    pub fn fetch_liked_music(
+        &self,
+        provider: Provider,
+        token: Option<String>,
+        epoch: u64,
+        generation: u64,
+    ) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let token = token.or_else(|| {
+                (provider == Provider::Spotify).then(|| {
+                    moosik_spotify::library_start_cursor(moosik_spotify::LibrarySection::Songs)
+                })
+            });
+            let result: anyhow::Result<Paged<Track>> = async {
+                let page = match (provider, token.as_deref()) {
+                    (Provider::YouTubeMusic, None) => {
+                        return Ok(api.playlist("VLLM").await?.tracks);
+                    }
+                    (Provider::YouTubeMusic, Some(token)) => {
+                        api.playlist_more(token.to_owned()).await?
+                    }
+                    (Provider::Spotify, Some(token)) => {
+                        crate::spotify::library_more(crate::api::LibrarySection::Songs, token)
+                            .await?
+                    }
+                    _ => anyhow::bail!("Liked Music is unavailable for {}", provider.name()),
+                };
+                anyhow::ensure!(
+                    page.next
+                        .as_deref()
+                        .is_none_or(|next| { !next.is_empty() && Some(next) != token.as_deref() }),
+                    "Liked Music continuation did not advance"
+                );
+                let items: Vec<_> = page
+                    .items
+                    .into_iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Song(track) | Entry::Video(track) => Some(track),
+                        _ => None,
+                    })
+                    .collect();
+                anyhow::ensure!(
+                    provider != Provider::YouTubeMusic || !items.is_empty() || page.next.is_some(),
+                    "YouTube Music returned an empty Liked Music continuation"
+                );
+                Ok(Paged::new(items, page.next))
+            }
+            .await;
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::LikedMusicPage {
+                    provider,
+                    epoch,
+                    generation,
+                    result: result.map_err(|error| format!("{error:#}")),
+                },
+            );
+        });
+    }
+
     /// The next page of a playlist's tracks.
     ///
     /// Retried a couple of times on failure, unlike every other single-shot fetch in this file:
@@ -1529,8 +2271,9 @@ impl Backend {
     /// way to parallelise it — and at that length, one of them occasionally drops with a
     /// transient body-read error that a bare retry clears right up. Without this, that single
     /// flaky page killed the whole chain and the sort silently never happened.
-    pub fn fetch_playlist_more(&self, id: String, token: String) {
+    pub fn fetch_playlist_more(&self, id: String, token: String, revision: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             const ATTEMPTS: u32 = 3;
             let mut last_err = None;
@@ -1544,7 +2287,12 @@ impl Backend {
                     ))
                     .await;
                 }
-                match api.playlist_more(token.clone()).await {
+                let result = if id.starts_with("spotify:") {
+                    crate::spotify::playlist_more(&token).await
+                } else {
+                    api.playlist_more(token.clone()).await
+                };
+                match result {
                     Ok(p) => {
                         page = Some(p);
                         break;
@@ -1556,13 +2304,14 @@ impl Backend {
                 }
             }
             let event = match page {
-                Some(page) => Event::PlaylistMore { id, page },
+                Some(page) => Event::PlaylistMore { id, revision, page },
                 None => Event::PlaylistMoreFailed {
                     id,
+                    revision,
                     error: format!("{:#}", last_err.expect("loop always sets this on failure")),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1617,11 +2366,25 @@ impl Backend {
     }
 
     /// The first page of your playlists, for the sidebar.
-    pub fn fetch_library_playlists(&self, epoch: u64) {
+    pub fn fetch_library_playlists(&self, epoch: u64, youtube: bool) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library_playlists().await {
-                Ok(page) => Event::SidebarPlaylists { page, epoch },
+            let event = match crate::providers::sidebar_playlists(
+                &api,
+                youtube,
+                crate::spotify::is_signed_in(),
+            )
+            .await
+            {
+                Ok(loaded) => {
+                    for message in loaded.warnings {
+                        Self::emit(&tx, &ctx, Event::ProviderBrowseWarning { message, epoch });
+                    }
+                    Event::SidebarPlaylists {
+                        page: loaded.value,
+                        epoch,
+                    }
+                }
                 Err(e) => Event::SidebarPlaylistsFailed {
                     error: format!("{e:#}"),
                     epoch,
@@ -1637,17 +2400,20 @@ impl Backend {
         section: crate::api::LibrarySection,
         token: String,
         epoch: u64,
+        songs_generation: u64,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.library_more(section, token).await {
+            let event = match crate::providers::library_more(&api, section, &token).await {
                 Ok(page) => Event::LibraryMore {
-                    epoch,
                     section,
                     page,
+                    epoch,
+                    songs_generation,
                 },
                 Err(e) => Event::LibraryMoreFailed {
                     epoch,
+                    songs_generation,
                     section,
                     error: format!("{e:#}"),
                 },
@@ -1696,9 +2462,19 @@ impl Backend {
                 collect_folder_pages(
                     playlists,
                     &mut tracks,
-                    |id| async move { Ok(api.playlist(&id).await?.tracks) },
-                    |token| async move {
-                        let page = api.playlist_more(token).await?;
+                    |id| async move {
+                        Ok(if id.starts_with("spotify:playlist:") {
+                            crate::spotify::playlist(&id).await?.tracks
+                        } else {
+                            api.playlist(&id).await?.tracks
+                        })
+                    },
+                    |id, token| async move {
+                        let page = if id.starts_with("spotify:playlist:") {
+                            crate::spotify::playlist_more(&token).await?
+                        } else {
+                            api.playlist_more(token).await?
+                        };
                         Ok(crate::model::Paged::new(
                             page.items
                                 .into_iter()
@@ -1727,15 +2503,21 @@ impl Backend {
 
     pub fn fetch_playlist(&self, id: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.playlist(&id).await {
+            let result = if id.starts_with("spotify:") {
+                crate::spotify::playlist(&id).await
+            } else {
+                api.playlist(&id).await
+            };
+            let event = match result {
                 Ok(playlist) => Event::PlaylistLoaded { id, playlist },
                 Err(e) => Event::PlaylistFailed {
                     id,
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1746,6 +2528,7 @@ impl Backend {
     /// own section — see [`crate::api::Api::artist_albums`].
     pub fn fetch_artist_albums(&self, browse_id: String, params: String, title: String) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             let event = match api.artist_albums(&browse_id, &params, &title).await {
                 Ok(items) => Event::ArtistAlbumsLoaded {
@@ -1757,7 +2540,7 @@ impl Backend {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1827,17 +2610,20 @@ impl Backend {
         });
     }
 
-    /// New releases, behind Explore's first button. Works signed out.
-    pub fn fetch_new_releases(&self) {
+    pub fn fetch_new_releases(&self, youtube: bool, spotify: bool) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let event = match api.new_releases().await {
-                Ok(shelves) => Event::ReleasesLoaded { shelves },
+            let event = match crate::providers::new_releases(&api, youtube, spotify).await {
+                Ok(loaded) => Event::ReleasesLoaded {
+                    shelves: loaded.value,
+                    warnings: loaded.warnings,
+                },
                 Err(e) => Event::ReleasesFailed {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1901,21 +2687,35 @@ impl Backend {
         });
     }
 
-    pub fn fetch_home(&self, filter: Option<String>, epoch: u64, fetch: crate::model::HomeFetch) {
+    pub fn fetch_home(
+        &self,
+        filter: Option<String>,
+        epoch: u64,
+        request: u64,
+        fetch: crate::model::HomeFetch,
+        sources: crate::providers::HomeSources,
+    ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match api.home(filter.as_deref(), &fetch).await {
-                Ok(feed) => Event::HomeLoaded {
-                    filter,
-                    shelves: feed.shelves,
-                    chips: feed.chips,
-                    next: feed.next,
-                    epoch,
-                },
+            let event = match crate::providers::home(&api, filter.as_deref(), &fetch, sources).await
+            {
+                Ok(loaded) => {
+                    let feed = loaded.value;
+                    Event::HomeLoaded {
+                        filter,
+                        shelves: feed.shelves,
+                        chips: feed.chips,
+                        next: feed.next,
+                        epoch,
+                        request,
+                        warnings: loaded.warnings,
+                    }
+                }
                 Err(e) => Event::HomeFailed {
                     filter,
                     error: format!("{e:#}"),
                     epoch,
+                    request,
                 },
             };
             Self::emit(&tx, &ctx, event);
@@ -1923,7 +2723,7 @@ impl Backend {
     }
 
     /// The next page of the home feed; see `Api::home_more`.
-    pub fn fetch_home_more(&self, token: String, filter: Option<String>, epoch: u64) {
+    pub fn fetch_home_more(&self, token: String, filter: Option<String>, epoch: u64, request: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.home_more(token).await {
@@ -1932,11 +2732,13 @@ impl Backend {
                     shelves,
                     next,
                     epoch,
+                    request,
                 },
                 Err(e) => Event::HomeMoreFailed {
                     filter,
                     error: format!("{e:#}"),
                     epoch,
+                    request,
                 },
             };
             Self::emit(&tx, &ctx, event);
@@ -1946,17 +2748,23 @@ impl Backend {
     /// The full list behind a Home shelf's "Show all". The request is the one an artist shelf's
     /// "Show all" makes — `Api::artist_albums` takes any shelf's (browse id, params) pair and
     /// picks that shelf's own section out of whatever page answers.
-    pub fn fetch_home_shelf(&self, browse_id: String, params: String, title: String) {
+    pub fn fetch_home_shelf(&self, browse_id: String, params: String, title: String, request: u64) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
             let event = match api.artist_albums(&browse_id, &params, &title).await {
-                Ok(items) => Event::HomeShelfLoaded { title, items },
+                Ok(items) => Event::HomeShelfLoaded {
+                    title,
+                    items,
+                    request,
+                },
                 Err(e) => Event::HomeShelfFailed {
                     title,
                     error: format!("{e:#}"),
+                    request,
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            Self::emit_browse(&tx, &ctx, epoch, event);
         });
     }
 
@@ -1976,6 +2784,9 @@ impl Backend {
 
     /// Radio for a song: the `next` endpoint's watch queue.
     pub fn start_mix(&self, video_id: String) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.mix(&video_id).await {
@@ -2015,6 +2826,9 @@ impl Backend {
     /// appended rather than replacing what is playing. The same `next` call as `start_mix`,
     /// with a landing the app can tell apart.
     pub fn seed_mix(&self, seed: String) {
+        if crate::model::is_spotify_id(&seed) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let event = match api.mix(&seed).await {
@@ -2057,10 +2871,17 @@ impl Backend {
         status: crate::model::LikeStatus,
         previous: crate::model::LikeStatus,
     ) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let search_cache = Arc::clone(&self.search_cache);
         self.rt.spawn(async move {
             let event = match api.rate(&video_id, status).await {
-                Ok(()) => return,
+                Ok(()) => {
+                    search_cache.invalidate();
+                    return;
+                }
                 Err(e) => Event::RatingFailed {
                     video_id,
                     attempted: status,
@@ -2158,6 +2979,10 @@ impl Backend {
     /// Save several videos to one playlist with a single summary event. One `add_to_playlist`
     /// per song would toast per song; a page saves dozens, so the page gets one verdict.
     pub fn add_many_to_playlist(&self, playlist_id: String, video_ids: Vec<String>) {
+        let video_ids: Vec<String> = video_ids
+            .into_iter()
+            .filter(|id| !crate::model::is_spotify_id(id))
+            .collect();
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let total = video_ids.len();
@@ -2192,13 +3017,20 @@ impl Backend {
     /// Flip a song's library membership with its own bookmark token. `in_library` is the state
     /// being asked for, so the reply can revert to `!in_library` on refusal.
     pub fn toggle_library(&self, token: String, video_id: String, in_library: bool) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let search_cache = Arc::clone(&self.search_cache);
         self.rt.spawn(async move {
             let event = match api.feedback(&token).await {
-                Ok(()) => Event::LibraryToggled {
-                    video_id,
-                    in_library,
-                },
+                Ok(()) => {
+                    search_cache.invalidate();
+                    Event::LibraryToggled {
+                        video_id,
+                        in_library,
+                    }
+                }
                 Err(e) => Event::LibraryToggleFailed {
                     video_id,
                     previous: !in_library,
@@ -2209,9 +3041,68 @@ impl Backend {
         });
     }
 
+    pub fn set_spotify_liked(&self, track: Track, liked: bool) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        let search_cache = Arc::clone(&self.search_cache);
+        self.rt.spawn(async move {
+            let result = crate::spotify::set_track_liked(&track.video_id, liked).await;
+            if result.is_ok() {
+                search_cache.invalidate();
+            }
+            let event = Event::SpotifyTrackLiked {
+                track,
+                liked,
+                result: result.map_err(|e| format!("{e:#}")),
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
+    pub fn fetch_editable_playlists(&self, provider: Provider, video_id: String) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let result = match provider {
+                Provider::YouTubeMusic => api.editable_playlists(&video_id).await,
+                Provider::Spotify => crate::spotify::editable_playlists(&video_id).await,
+                Provider::Local => Err(anyhow::anyhow!("Local tracks have no account playlists")),
+            }
+            .map_err(|e| format!("{e:#}"));
+            Self::emit_browse(
+                &tx,
+                &ctx,
+                epoch,
+                Event::EditablePlaylists { video_id, result },
+            );
+        });
+    }
+
+    pub fn add_spotify_to_playlist(&self, playlist_id: String, video_id: String) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
+        self.rt.spawn(async move {
+            let event = match crate::spotify::add_playlist_item(&playlist_id, &video_id).await {
+                Ok(()) => Event::PlaylistSaved {
+                    playlist_id,
+                    video_id,
+                },
+                Err(e) => Event::PlaylistSaveFailed {
+                    playlist_id,
+                    video_id,
+                    error: format!("{e:#}"),
+                },
+            };
+            Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
     /// Save a video to one of your playlists. A song already there comes back as
     /// `PlaylistDuplicate` rather than being added twice, unless `allow_duplicate`.
     pub fn add_to_playlist(&self, playlist_id: String, video_id: String, allow_duplicate: bool) {
+        if crate::model::is_spotify_id(&video_id) {
+            return;
+        }
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let reply = api
@@ -2250,12 +3141,19 @@ impl Backend {
         set_video_id: String,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        let epoch = self.browse_epoch.load(Ordering::Acquire);
         self.rt.spawn(async move {
-            let edit = crate::api::PlaylistEdit::RemoveVideo {
-                video_id: video_id.clone(),
-                set_video_id,
+            let spotify = playlist_id.starts_with("spotify:playlist:");
+            let result = if spotify {
+                crate::spotify::remove_playlist_item(&playlist_id, &set_video_id).await
+            } else {
+                let edit = crate::api::PlaylistEdit::RemoveVideo {
+                    video_id: video_id.clone(),
+                    set_video_id,
+                };
+                api.edit_playlist(&playlist_id, edit).await
             };
-            let event = match api.edit_playlist(&playlist_id, edit).await {
+            let event = match result {
                 Ok(()) => Event::PlaylistRemoved {
                     playlist_id,
                     video_id,
@@ -2266,7 +3164,11 @@ impl Backend {
                     error: format!("{e:#}"),
                 },
             };
-            Self::emit(&tx, &ctx, event);
+            if spotify {
+                Self::emit_browse(&tx, &ctx, epoch, event);
+            } else {
+                Self::emit(&tx, &ctx, event);
+            }
         });
     }
 
@@ -2454,12 +3356,25 @@ impl Backend {
     pub fn play(
         &self,
         track: Track,
-        mpv: Arc<Mpv>,
+        handle: crate::player::PlaybackHandle,
         volume: f64,
         normalise: bool,
         start_at: Option<f64>,
     ) -> u64 {
+        let mpv = match handle {
+            crate::player::PlaybackHandle::Spotify(handle) => {
+                return self.play_spotify(track, handle, volume, start_at);
+            }
+            crate::player::PlaybackHandle::Mpv(mpv) => mpv,
+        };
         let downloads = Arc::clone(&self.downloads);
+        let audio_prefetch = self
+            .audio_prefetch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|prefetch| track.wide && prefetch.video_id == track.video_id)
+            .cloned();
         let (resolver, api, tx, ctx) = (
             Arc::clone(&self.resolver),
             Arc::clone(&self.api),
@@ -2469,7 +3384,7 @@ impl Backend {
         // A new play supersedes any scrobble task still running for the old track, and — via the
         // `generation` stamped on every event below — any `Resolving`/`Playing`/`PlaybackFailed`
         // reply still in flight for a previous, now-superseded `play`/`play_video` call.
-        let generation = self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.cancel_play();
         let scrobble = Scrobble {
             api: Arc::clone(&self.api),
             http: self.tracking_http.clone(),
@@ -2547,14 +3462,20 @@ impl Backend {
             // resolve/scrobble it instead. `track` itself (row, title, thumbnail, album link)
             // stays exactly the album track throughout; only the id handed to the resolver
             // changes.
-            let resolve_id = if track.wide {
-                audio_alternative(&api, &track)
-                    .await
-                    .unwrap_or_else(|| track.video_id.clone())
+            let id = if let Some(prefetch) = audio_prefetch {
+                prefetch.resolve_id(audio_alternative(&api, &track)).await
+            } else if track.wide {
+                VideoId::new(
+                    audio_alternative(&api, &track)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| track.video_id.clone()),
+                )
             } else {
-                track.video_id.clone()
+                VideoId::new(&track.video_id)
             };
-            let id = match VideoId::new(resolve_id) {
+            let id = match id {
                 Ok(id) => id,
                 Err(e) => {
                     Self::emit(
@@ -2609,6 +3530,43 @@ impl Backend {
         generation
     }
 
+    fn play_spotify(
+        &self,
+        track: Track,
+        handle: crate::spotify_drm::Handle,
+        volume: f64,
+        start_at: Option<f64>,
+    ) -> u64 {
+        let generation = self.cancel_play();
+        let (tx, ctx, current) = (
+            self.tx.clone(),
+            self.ctx.clone(),
+            Arc::clone(&self.scrobble_generation),
+        );
+        Self::emit(&tx, &ctx, Event::Resolving(track.clone(), generation));
+        self.rt.spawn(async move {
+            let superseded = async {
+                while current.load(Ordering::SeqCst) == generation {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            let result = tokio::select! {
+                result = crate::spotify::play(&track.video_id, handle.clone(), volume, start_at) => result,
+                _ = superseded => { handle.stop(); return; }
+            };
+            if current.load(Ordering::SeqCst) != generation {
+                handle.stop();
+                return;
+            }
+            let event = match result {
+                Ok(()) => Event::Playing(track, generation),
+                Err(error) => Event::PlaybackFailed { track, error: error.to_string(), generation },
+            };
+            Self::emit(&tx, &ctx, event);
+        });
+        generation
+    }
+
     /// Play a music video. Unlike `play`, mpv fetches the video itself through its yt-dlp hook —
     /// the resolver only returns audio-only streams. `track` is `wide`, so its id is the video's.
     ///
@@ -2622,7 +3580,19 @@ impl Backend {
         volume: f64,
         start_at: Option<f64>,
     ) -> u64 {
-        let generation = self.scrobble_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.cancel_play();
+        if track.is_spotify() {
+            Self::emit(
+                &self.tx,
+                &self.ctx,
+                Event::PlaybackFailed {
+                    track,
+                    error: "Spotify video playback is unavailable".to_owned(),
+                    generation,
+                },
+            );
+            return generation;
+        }
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let resolver = Arc::clone(&self.video_resolver);
         let scrobble = Scrobble {
@@ -2689,6 +3659,9 @@ impl Backend {
     /// Warm the video resolver's cache for a track the queue is about to reach, so Next in the
     /// video view starts on the cached URLs instead of paying yt-dlp at that moment.
     pub fn prefetch_video(&self, track: Track) {
+        if track.is_spotify() {
+            return;
+        }
         let resolver = Arc::clone(&self.video_resolver);
         self.rt.spawn(async move {
             if let Ok(id) = VideoId::new(track.video_id) {
@@ -2702,6 +3675,9 @@ impl Backend {
     /// With yt-dlp at ~2-3s per resolve this is what makes the *next* track start instantly, and
     /// it is a prerequisite for gapless: mpv needs the next URL before the current track ends.
     pub fn prefetch(&self, track: Track) {
+        if track.is_spotify() || track.local_path.is_some() {
+            return;
+        }
         // On disk already: there is nothing to resolve, and with no yt-dlp that futile call is
         // the only thing it would log.
         if self
@@ -2712,10 +3688,33 @@ impl Backend {
         {
             return;
         }
+        let audio_prefetch = if track.wide {
+            let mut slot = self.audio_prefetch.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|prefetch| prefetch.video_id == track.video_id)
+            {
+                return;
+            }
+            let prefetch = Arc::new(AudioPrefetch {
+                video_id: track.video_id.clone(),
+                alternative: tokio::sync::OnceCell::new(),
+            });
+            *slot = Some(Arc::clone(&prefetch));
+            Some(prefetch)
+        } else {
+            None
+        };
+        let api = Arc::clone(&self.api);
         let resolver = Arc::clone(&self.resolver);
         let proxy = self.proxy.clone();
         self.rt.spawn(async move {
-            let Ok(id) = VideoId::new(track.video_id) else {
+            let id = if let Some(prefetch) = audio_prefetch {
+                prefetch.resolve_id(audio_alternative(&api, &track)).await
+            } else {
+                VideoId::new(track.video_id)
+            };
+            let Ok(id) = id else {
                 return;
             };
             // Resolved, and for a ranged stream its first 256 KiB fetched too, so the switch
@@ -2754,6 +3753,7 @@ impl Backend {
             let video_id = track.video_id.clone();
             let lyrics = match lrclib(&http, &track).await {
                 Some(lyrics) => Some(lyrics),
+                None if track.is_spotify() => None,
                 None => api.lyrics(&track.video_id).await.unwrap_or(None),
             };
             let event = match lyrics {
@@ -2827,6 +3827,9 @@ impl Scrobble {
     /// Fire-and-forget per play. Reads the toggle here so flipping it takes effect on the
     /// next track; the anonymous gate lives one layer down, in `playback_tracking`.
     fn maybe_start(&self, track: Track, mpv: Arc<Mpv>, generation: u64) {
+        if track.is_spotify() {
+            return;
+        }
         if !crate::settings::load().scrobble {
             return;
         }
@@ -2971,6 +3974,196 @@ fn scrobble_nonce() -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn prefetch_and_play_share_the_audio_alternative_lookup() {
+        let prefetch = AudioPrefetch {
+            video_id: "original001".into(),
+            alternative: tokio::sync::OnceCell::new(),
+        };
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let lookup = || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            Ok(Some("alternate01".into()))
+        };
+        let (warm, play) =
+            tokio::join!(prefetch.resolve_id(lookup()), prefetch.resolve_id(lookup()));
+        assert_eq!(warm.unwrap().as_str(), "alternate01");
+        assert_eq!(play.unwrap().as_str(), "alternate01");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_prefetch_does_not_hold_the_fallback_for_playback() {
+        let prefetch = AudioPrefetch {
+            video_id: "original001".into(),
+            alternative: tokio::sync::OnceCell::new(),
+        };
+        let warm = prefetch
+            .resolve_id(async { Err(anyhow::anyhow!("temporary error")) })
+            .await;
+        assert_eq!(warm.unwrap().as_str(), "original001");
+        let play = prefetch
+            .resolve_id(async { Ok(Some("alternate01".into())) })
+            .await;
+        assert_eq!(play.unwrap().as_str(), "alternate01");
+    }
+
+    #[test]
+    fn search_provider_changes_track_membership_without_reordering_invalidations() {
+        let mut sources = SearchProviders::default();
+        assert_eq!(sources.allowed, [Provider::YouTubeMusic]);
+        assert!(!sources.replace(vec![Provider::YouTubeMusic, Provider::YouTubeMusic]));
+        assert_eq!(sources.revision, 0);
+        let captured = sources.allowed.clone();
+        assert!(sources.replace(vec![Provider::Spotify]));
+        assert_eq!(sources.allowed, [Provider::Spotify]);
+        assert_eq!(sources.revision, 1);
+        assert_eq!(captured, [Provider::YouTubeMusic]);
+        assert!(sources.replace(vec![
+            Provider::Local,
+            Provider::Spotify,
+            Provider::YouTubeMusic
+        ]));
+        assert!(!sources.replace(vec![
+            Provider::Spotify,
+            Provider::YouTubeMusic,
+            Provider::Local,
+            Provider::Spotify
+        ]));
+        assert_eq!(sources.allowed, Provider::ALL);
+        assert_eq!(sources.revision, 2);
+    }
+
+    #[test]
+    fn all_search_uses_only_available_sources_and_supported_scopes() {
+        assert_eq!(
+            search_candidates(&[Provider::Spotify], None, SearchScope::All, true).unwrap(),
+            [Provider::Spotify]
+        );
+        assert_eq!(
+            search_candidates(&[Provider::Local], None, SearchScope::Songs, false).unwrap(),
+            [Provider::Local]
+        );
+        assert_eq!(
+            search_candidates(&[Provider::YouTubeMusic], None, SearchScope::All, true).unwrap(),
+            [Provider::YouTubeMusic]
+        );
+        assert!(
+            search_candidates(
+                &[Provider::Spotify, Provider::Local],
+                None,
+                SearchScope::Videos,
+                true
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            search_candidates(&[], None, SearchScope::All, true)
+                .unwrap()
+                .is_empty()
+        );
+        let error = search_candidates(
+            &[Provider::Spotify],
+            Some(Provider::YouTubeMusic),
+            SearchScope::All,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("YouTube Music is not available"));
+    }
+
+    fn search_rows(ids: &[&str]) -> SearchResults {
+        SearchResults {
+            items: ids
+                .iter()
+                .map(|id| {
+                    Entry::Song(
+                        crate::listening::Metadata {
+                            id: (*id).to_owned(),
+                            title: "Same song".to_owned(),
+                            ..Default::default()
+                        }
+                        .to_track(),
+                    )
+                })
+                .collect(),
+            no_results: ids.is_empty(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn all_search_interleaves_sources_without_dropping_matching_songs() {
+        let (results, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Ok(search_rows(&["yt-1", "yt-2", "yt-3"])),
+            ),
+            (
+                Provider::Spotify,
+                Ok(search_rows(&["spotify:track:3TO7bbrUKrOSPGRTB5MeCz"])),
+            ),
+            (Provider::Local, Ok(search_rows(&["local-1", "local-2"]))),
+        ])
+        .unwrap();
+        let ids: Vec<_> = results
+            .items
+            .iter()
+            .filter_map(Entry::track)
+            .map(|track| track.video_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "yt-1",
+                "spotify:track:3TO7bbrUKrOSPGRTB5MeCz",
+                "local-1",
+                "yt-2",
+                "local-2",
+                "yt-3"
+            ]
+        );
+        assert!(warnings.is_empty());
+        assert!(!results.no_results);
+    }
+
+    #[test]
+    fn partial_search_keeps_healthy_rows_and_names_failed_sources() {
+        let (results, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Err(anyhow::anyhow!("network unavailable")),
+            ),
+            (
+                Provider::Spotify,
+                Ok(search_rows(&["spotify:track:3TO7bbrUKrOSPGRTB5MeCz"])),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(results.items.len(), 1);
+        assert_eq!(warnings, ["YouTube Music: network unavailable"]);
+        let (empty, warnings) = merge_search_results(vec![
+            (
+                Provider::YouTubeMusic,
+                Err(anyhow::anyhow!("network unavailable")),
+            ),
+            (Provider::Local, Ok(search_rows(&[]))),
+        ])
+        .unwrap();
+        assert!(empty.items.is_empty());
+        assert!(!empty.no_results);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            merge_search_results(vec![(
+                Provider::Spotify,
+                Err(anyhow::anyhow!("signed out"))
+            )])
+            .is_err()
+        );
+    }
+
     /// yt-dlp's progress lines, and only those, read as a percentage.
     #[test]
     fn download_progress_lines_parse() {
@@ -3095,10 +4288,37 @@ mod folder_tests {
                     _ => anyhow::bail!("unavailable"),
                 }
             },
-            |_| async { anyhow::bail!("bad continuation") },
+            |_, _| async { anyhow::bail!("bad continuation") },
         )
         .await;
         assert_eq!(tracks, ["private", "first page", "last playlist"]);
         assert_eq!(incomplete, ["deleted", "partial"]);
+    }
+    #[tokio::test]
+    async fn mixed_folder_continuations_keep_their_playlist_source() {
+        let mut tracks = Vec::new();
+        let incomplete = collect_folder_pages(
+            vec![
+                ("youtube-list".to_owned(), "YouTube".to_owned()),
+                ("spotify:playlist:test".to_owned(), "Spotify".to_owned()),
+            ],
+            &mut tracks,
+            |id| async move { Ok(Paged::new(vec![id], Some("next".to_owned()))) },
+            |id, token| async move {
+                assert_eq!(token, "next");
+                Ok(Paged::new(vec![format!("{id}:continued")], None))
+            },
+        )
+        .await;
+        assert!(incomplete.is_empty());
+        assert_eq!(
+            tracks,
+            [
+                "youtube-list",
+                "youtube-list:continued",
+                "spotify:playlist:test",
+                "spotify:playlist:test:continued"
+            ]
+        );
     }
 }

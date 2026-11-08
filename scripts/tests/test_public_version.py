@@ -40,7 +40,7 @@ class PublicVersionTest(unittest.TestCase):
             self.assertEqual(manifest["workspace"]["package"]["version"], new)
             lock_after = tomllib.loads((repo / "Cargo.lock").read_text())["package"]
             changed = [p["name"] for before, p in zip(lock_before, lock_after, strict=True) if before != p]
-            self.assertCountEqual(changed, ["moosik", "moosik-resolve"])
+            self.assertCountEqual(changed, ["moosik", "moosik-resolve", "moosik-spotify"])
             self.assertTrue(all(p["version"] == new for p in lock_after if p["name"] in changed))
             self.assertEqual((repo / f"release-notes/{new}.md").read_text(), "Changes in this release\n")
             result = subprocess.run([sys.executable, SCRIPT, "stamp", "moosik-v" + old],

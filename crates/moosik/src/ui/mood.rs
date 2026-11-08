@@ -55,6 +55,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                     art,
                     &pl.title,
                     &pl.author,
+                    Some("YouTube Music"),
                     widgets::ArtShape::Square,
                     None,
                     false,

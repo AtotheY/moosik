@@ -4,10 +4,391 @@ use egui::{Color32, Rect, Sense, vec2};
 
 use crate::app::{App, RepeatMode, Route};
 use crate::icons::Icon;
-use crate::model::LikeStatus;
+use crate::model::{EditablePlaylists, LikeStatus, Provider, Track};
 use crate::theme;
 use crate::ui::RowAction;
 use crate::widgets;
+
+#[derive(Default)]
+pub(crate) struct PlaylistPicker {
+    track_id: Option<String>,
+    choices: Option<Result<EditablePlaylists, String>>,
+    liked_override: Option<bool>,
+    loading: bool,
+    query: String,
+    focus_search: bool,
+}
+
+impl PlaylistPicker {
+    pub(crate) fn can_add(&self, track_id: &str, playlist_id: &str) -> bool {
+        self.choices_for(track_id).is_some_and(|choices| {
+            choices
+                .playlists
+                .iter()
+                .any(|(playlist, saved)| playlist.id == playlist_id && !saved)
+        })
+    }
+
+    fn choices_for(&self, track_id: &str) -> Option<&EditablePlaylists> {
+        if self.track_id.as_deref() != Some(track_id) {
+            return None;
+        }
+        self.choices.as_ref()?.as_ref().ok()
+    }
+
+    pub(crate) fn loaded(&mut self, track_id: &str, result: Result<EditablePlaylists, String>) {
+        if self.track_id.as_deref() == Some(track_id) {
+            self.loading = false;
+            self.choices = Some(result);
+        }
+    }
+
+    pub(crate) fn note_saved(&mut self, track_id: &str, playlist_id: &str) {
+        if self.track_id.as_deref() == Some(track_id)
+            && let Some(Ok(choices)) = &mut self.choices
+            && let Some((_, member)) = choices
+                .playlists
+                .iter_mut()
+                .find(|(playlist, _)| playlist.id == playlist_id)
+        {
+            *member = true;
+        }
+    }
+
+    pub(crate) fn invalidate(&mut self, track_id: &str) {
+        if self.track_id.as_deref() == Some(track_id) {
+            *self = Self::default();
+        }
+    }
+
+    pub(crate) fn note_liked(&mut self, track_id: &str, liked: bool) {
+        if self.track_id.as_deref() == Some(track_id) {
+            self.liked_override = Some(liked);
+        }
+    }
+
+    fn is_liked(&self, track: &Track) -> bool {
+        if self.track_id.as_deref() == Some(&track.video_id)
+            && let Some(liked) = self.liked_override
+        {
+            return liked;
+        }
+        (if track.is_spotify() {
+            track.in_library
+        } else {
+            track.like == LikeStatus::Like
+        }) || self
+            .choices_for(&track.video_id)
+            .is_some_and(|choices| choices.liked == Some(true))
+    }
+
+    fn contains_track(&self, track: &Track) -> bool {
+        self.is_liked(track)
+            || self
+                .choices_for(&track.video_id)
+                .is_some_and(|choices| choices.playlists.iter().any(|(_, saved)| *saved))
+    }
+}
+
+fn playlist_popup(app: &mut App, ui: &egui::Ui, button: &egui::Response) {
+    let Some(track) = app.now.track.as_ref() else {
+        return;
+    };
+    let provider = track.provider();
+    let picker = &mut app.playlist_picker;
+    if button.clicked() {
+        picker.query.clear();
+        if picker.track_id.as_deref() != Some(track.video_id.as_str()) {
+            picker.track_id = Some(track.video_id.clone());
+            picker.choices = None;
+            picker.liked_override = None;
+            picker.loading = false;
+        }
+        if track.is_spotify()
+            && let Some(liked) = app.liked_music.spotify_liked(&track.video_id)
+        {
+            picker.note_liked(&track.video_id, liked);
+        }
+        if !picker.loading && picker.choices.as_ref().is_none_or(Result::is_err) {
+            picker.loading = true;
+            app.backend
+                .fetch_editable_playlists(provider, track.video_id.clone());
+        }
+    }
+    let palette = app.palette;
+    let popup = egui::Popup::menu(button)
+        .align(egui::RectAlign::TOP_START)
+        .gap(8.0)
+        .frame(widgets::menu_frame(ui, &palette).inner_margin(12))
+        .width(300.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    if button.clicked() {
+        picker.focus_search = !popup.is_open();
+    }
+    let choice = popup
+        .show(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(
+                egui::RichText::new("Add to playlist")
+                    .font(theme::semibold(18.0))
+                    .color(palette.text),
+            );
+            ui.add_space(4.0);
+            let opening = picker.focus_search;
+            let search = playlist_search(ui, &palette, &mut picker.query, opening);
+            if !ui.is_sizing_pass() {
+                picker.focus_search = false;
+            }
+            ui.add_space(4.0);
+
+            let query = picker.query.trim().to_lowercase();
+            let mut action = None;
+            let liked = picker.is_liked(track);
+            let show_liked = "liked songs".contains(&query);
+            if show_liked {
+                let save = playlist_choice(ui, &palette, "Liked Songs", liked, true, |ui, rect| {
+                    super::liked_music::paint_cover(ui, &palette, rect);
+                })
+                .on_hover_text(if liked {
+                    "Remove from Liked Songs"
+                } else {
+                    "Add to Liked Songs"
+                });
+                if save.clicked() {
+                    action = Some(if track.is_spotify() {
+                        RowAction::SetSpotifyLiked {
+                            track: track.clone(),
+                            liked: !liked,
+                        }
+                    } else {
+                        RowAction::Rate {
+                            video_id: track.video_id.clone(),
+                            status: if liked {
+                                LikeStatus::Indifferent
+                            } else {
+                                LikeStatus::Like
+                            },
+                        }
+                    });
+                }
+            }
+            match picker.choices_for(&track.video_id) {
+                Some(choices) => {
+                    let mut matches = choices
+                        .playlists
+                        .iter()
+                        .filter(|(playlist, _)| {
+                            query.is_empty() || playlist.title.to_lowercase().contains(&query)
+                        })
+                        .peekable();
+                    if matches.peek().is_some() {
+                        if show_liked {
+                            widgets::menu_divider(ui, &palette);
+                        }
+                        ui.label(
+                            egui::RichText::new("Your playlists")
+                                .font(theme::semibold(12.0))
+                                .color(palette.secondary),
+                        );
+                        let list_height =
+                            (ui.ctx().content_rect().height() - theme::PLAYER_BAR_HEIGHT - 140.0)
+                                .clamp(44.0, 284.0);
+                        let mut list = egui::ScrollArea::vertical()
+                            .max_height(list_height)
+                            .min_scrolled_height(list_height)
+                            .auto_shrink([false, true]);
+                        if opening || search.changed() {
+                            list = list.vertical_scroll_offset(0.0);
+                        }
+                        list.show(ui, |ui| {
+                            for (playlist, saved) in matches {
+                                let add = ui
+                                    .push_id(&playlist.id, |ui| {
+                                        playlist_choice(
+                                            ui,
+                                            &palette,
+                                            &playlist.title,
+                                            *saved,
+                                            !saved,
+                                            |ui, rect| {
+                                                let art = super::art_texture(
+                                                    &mut app.images,
+                                                    &app.backend,
+                                                    ui.ctx(),
+                                                    playlist.thumbnail.as_ref(),
+                                                    rect.width(),
+                                                );
+                                                widgets::paint_art(
+                                                    ui,
+                                                    &palette,
+                                                    rect,
+                                                    art,
+                                                    widgets::ArtShape::Square,
+                                                );
+                                            },
+                                        )
+                                    })
+                                    .inner;
+                                if add.clicked() {
+                                    action = Some(RowAction::SaveToPlaylist {
+                                        playlist_id: playlist.id.clone(),
+                                        video_id: track.video_id.clone(),
+                                    });
+                                }
+                            }
+                        });
+                    } else if query.is_empty() {
+                        playlist_status(ui, &palette, "No editable playlists");
+                    } else if !show_liked {
+                        playlist_status(ui, &palette, "No matching playlists");
+                    }
+                }
+                _ if picker.loading => {
+                    playlist_status(ui, &palette, "Loading playlists…");
+                }
+                _ => {
+                    playlist_status(ui, &palette, "Could not load playlists");
+                    if widgets::menu_item(ui, &palette, Icon::RefreshCw, "Retry", None).clicked() {
+                        picker.loading = true;
+                        app.backend
+                            .fetch_editable_playlists(provider, track.video_id.clone());
+                    }
+                }
+            }
+            if action.is_some() {
+                ui.close();
+            }
+            action
+        })
+        .and_then(|result| result.inner);
+    if let Some(action) = choice {
+        app.row_action(action);
+    }
+}
+
+fn playlist_search(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    query: &mut String,
+    focus: bool,
+) -> egui::Response {
+    let field = widgets::input_frame(palette)
+        .fill(palette.panel)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(Icon::Search.image(palette.secondary, 15.0));
+                ui.add(
+                    egui::TextEdit::singleline(query)
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .font(theme::regular(13.0))
+                        .hint_text(egui::RichText::new("Find a playlist").color(palette.secondary))
+                        .desired_width(ui.available_width()),
+                )
+            })
+            .inner
+        });
+    if focus && !ui.is_sizing_pass() {
+        field.inner.request_focus();
+    }
+    if field.inner.has_focus() {
+        ui.painter().rect_stroke(
+            field.response.rect,
+            theme::RADIUS,
+            egui::Stroke::new(1.0, palette.secondary),
+            egui::StrokeKind::Inside,
+        );
+    }
+    field.inner
+}
+
+fn playlist_choice(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    title: &str,
+    saved: bool,
+    enabled: bool,
+    paint_cover: impl FnOnce(&egui::Ui, Rect),
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, saved, title)
+    });
+    if ui.is_rect_visible(rect) {
+        let t = if enabled {
+            widgets::lit(ui, &response)
+        } else {
+            0.0
+        };
+        if widgets::held(&response) || t > 0.0 {
+            let fill = if widgets::held(&response) {
+                palette.surface_active
+            } else {
+                palette.surface_hover.gamma_multiply(t)
+            };
+            ui.painter().rect_filled(rect, theme::RADIUS, fill);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                theme::RADIUS,
+                egui::Stroke::new(1.0, palette.secondary),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let offset = widgets::press_offset(&response);
+        let cover = Rect::from_center_size(
+            rect.left_center() + vec2(22.0, 0.0) + offset,
+            vec2(32.0, 32.0),
+        );
+        paint_cover(ui, cover);
+        let label = widgets::truncate_to(
+            ui,
+            title,
+            theme::medium(14.0),
+            (rect.width() - 84.0).max(0.0),
+        );
+        crate::emoji::paint_line(
+            ui,
+            rect.left_center() + vec2(48.0, 0.0) + offset,
+            &label,
+            theme::medium(14.0),
+            palette.text,
+        );
+        let (icon, color) = if saved {
+            (Icon::Check, palette.text)
+        } else {
+            (Icon::Plus, palette.secondary)
+        };
+        icon.image(color, 16.0).paint_at(
+            ui,
+            Rect::from_center_size(
+                rect.right_center() - vec2(16.0, 0.0) + offset,
+                vec2(16.0, 16.0),
+            ),
+        );
+        if enabled && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+    }
+    response
+}
+
+fn playlist_status(ui: &mut egui::Ui, palette: &theme::Palette, message: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(message)
+            .font(theme::regular(13.0))
+            .color(palette.secondary),
+    );
+    ui.add_space(4.0);
+}
 
 /// The player bar's cover is drawn 56pt across and is always on screen.
 const BAR_ART_PT: f32 = 56.0;
@@ -124,12 +505,22 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     };
 
     let title_x = art.right() + 12.0;
-    // Rating in a fixed column at the end of the text field — not hugging the title
-    // text, which dragged the thumbs across the credits on a short title. The title
-    // and the credits share the field width from this column, so a short title leaves
-    // the credits the whole room instead of almost none. No thumb width when signed
-    // out: the thumbs do not draw, so the title keeps the room.
-    let thumbs_w = if app.signed_in() { 72.0 } else { 0.0 };
+    let provider = app.now.track.as_ref().map(Track::provider);
+    let save_picker = match provider {
+        Some(Provider::YouTubeMusic) => app.signed_in(),
+        Some(Provider::Spotify) => crate::spotify::is_signed_in(),
+        _ => false,
+    };
+    let spotify_remove = save_picker
+        && provider == Some(Provider::Spotify)
+        && app.playing_spotify_playlist_item().is_some();
+    let thumbs_w = if spotify_remove {
+        72.0
+    } else if save_picker {
+        36.0
+    } else {
+        0.0
+    };
     // The seek bar is wider than the transport, and its elapsed-time label hangs left of
     // the bar at subtitle height — the title has to clear the label, not just the buttons,
     // or long titles sit underneath it. The total stands in for the elapsed (at least as
@@ -197,7 +588,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .as_ref()
         .map(|t| widgets::subtitle_width(ui, &crate::ui::track_subtitle(t), None))
         .unwrap_or(0.0)
-        .max(widgets::text_width(ui, &title, &theme::medium(13.0)));
+        .max(
+            widgets::text_width(ui, &title, &theme::medium(13.0))
+                + if app.now.track.is_some() { 22.0 } else { 0.0 },
+        );
     let text_w = (content_w + 8.0)
         .clamp(24.0, FIELD_MAX_W)
         .min((transport_start - thumbs_w - 8.0 - title_x).max(0.0))
@@ -213,8 +607,26 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // overflows; a title that fits gets a hit rect the width of its text, so neither the
     // blank field nor the credits answer the pointer.
     let title_font = theme::medium(13.0);
-    let title_pos = egui::pos2(title_x, rect.center().y - 9.0);
-    let title_w = widgets::text_width(ui, &title, &title_font).min(field_w);
+    let source_w = if field_w >= 64.0
+        && let Some(track) = app.now.track.as_ref()
+    {
+        widgets::source_indicator(
+            ui,
+            &p,
+            Rect::from_center_size(
+                egui::pos2(title_x + 9.0, rect.center().y - 9.0),
+                vec2(18.0, 18.0),
+            ),
+            track,
+            ui.id().with("np-source"),
+        );
+        22.0
+    } else {
+        0.0
+    };
+    let title_field_w = field_w - source_w;
+    let title_pos = egui::pos2(title_x + source_w, rect.center().y - 9.0);
+    let title_w = widgets::text_width(ui, &title, &title_font).min(title_field_w);
     let title_rect = Rect::from_min_size(
         egui::pos2(title_pos.x, title_pos.y - widgets::MARQUEE_HIT_H / 2.0),
         vec2(title_w, widgets::MARQUEE_HIT_H),
@@ -223,7 +635,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     let title_hit = widgets::marquee_line(
         ui,
         title_pos,
-        field_w,
+        title_field_w,
         &title,
         title_font,
         p.text,
@@ -312,6 +724,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(route) = navigate {
+        let route = match route {
+            Route::Artist(id) => app.combined_artist_route(&id).unwrap_or(Route::Artist(id)),
+            route => route,
+        };
         app.navigate(route);
     }
     // A primary click on the title opens its album or single; the menu is the right-click.
@@ -321,12 +737,9 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         app.navigate(Route::Album(id));
     }
 
-    // Borrow the track to read `like`; the whole `Track` was being deep-cloned every frame
-    // just for this. `video_id` is only cloned on an actual click.
-    let mut rate: Option<RowAction> = None;
-    if app.signed_in()
-        && let Some(track) = app.now.track.as_ref()
-    {
+    let mut remove = None;
+    let mut picker_button = None;
+    if save_picker && let Some(track) = app.now.track.as_ref() {
         let thumbs = Rect::from_min_size(
             egui::pos2(thumbs_x, rect.center().y - 16.0),
             vec2(thumbs_w, 32.0),
@@ -336,29 +749,30 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
                 .max_rect(thumbs)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        for (up, pressed) in [(true, LikeStatus::Like), (false, LikeStatus::Dislike)] {
-            let (hit, _) = tui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
-            if widgets::rate_button(
-                &mut tui,
-                &p,
-                hit,
-                egui::Id::new(("ytm-bar-thumb", up)),
-                up,
-                track.like == pressed,
-                true,
-            )
-            .on_hover_text(crate::ui::tips::rate(up, track.like == pressed))
-            .clicked()
-            {
-                rate = Some(RowAction::Rate {
-                    video_id: track.video_id.clone(),
-                    status: track.like.toggled(pressed),
-                });
-            }
+        tui.spacing_mut().item_spacing.x = 4.0;
+        if spotify_remove
+            && widgets::spotify_remove_button(&mut tui, &p).clicked()
+            && let Some((playlist_id, uid)) = app.playing_spotify_playlist_item()
+        {
+            remove = Some(RowAction::RemoveFromPlaylist {
+                playlist_id: playlist_id.to_owned(),
+                video_id: track.video_id.clone(),
+                set_video_id: uid.to_owned(),
+            });
         }
+        picker_button = Some(
+            tui.push_id(&track.video_id, |ui| {
+                let saved = app.playlist_picker.contains_track(track);
+                widgets::playlist_save_button(ui, &p, saved, true)
+            })
+            .inner,
+        );
     }
-    if let Some(action) = rate {
+    if let Some(action) = remove {
         app.row_action(action);
+    }
+    if let Some(button) = picker_button {
+        playlist_popup(app, ui, &button);
     }
 
     // Transport, centred on the window so it does not shift with the track title: shuffle and
@@ -528,6 +942,34 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn youtube_picker_distinguishes_likes_from_library_saves() {
+        let mut track = crate::listening::Metadata {
+            id: "video".to_owned(),
+            ..Default::default()
+        }
+        .to_track();
+        let mut picker = PlaylistPicker {
+            track_id: Some(track.video_id.clone()),
+            ..Default::default()
+        };
+        track.in_library = true;
+        assert!(!picker.contains_track(&track));
+        track.like = LikeStatus::Like;
+        assert!(picker.contains_track(&track));
+
+        picker.loaded(
+            &track.video_id,
+            Ok(EditablePlaylists {
+                liked: Some(true),
+                playlists: Vec::new(),
+            }),
+        );
+        track.like = LikeStatus::Indifferent;
+        picker.note_liked(&track.video_id, false);
+        assert!(!picker.contains_track(&track));
+    }
 
     /// A wide window keeps the bar's designed width; a narrow one shrinks it so the duration
     /// label stops short of the control cluster, where the video toggle used to sit on it.

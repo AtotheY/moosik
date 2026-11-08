@@ -79,6 +79,7 @@ pub struct View {
     search: String,
     days: usize,
     discovery: usize,
+    rows: super::source_rows::State,
 }
 
 pub(crate) fn all_time_query() -> crate::listening::Query {
@@ -100,12 +101,18 @@ pub(crate) fn all_time_query() -> crate::listening::Query {
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
+    if !app.signed_in() && app.history_view.tab == 2 {
+        app.history_view.tab = 0;
+    }
     crate::ui::page_title(ui, &p, "Listening history");
     ui.horizontal_wrapped(|ui| {
         for (i, label) in ["Recently played", "Rediscover", "YouTube history"]
             .iter()
             .enumerate()
         {
+            if i == 2 && !app.signed_in() {
+                continue;
+            }
             if widgets::chip(ui, &p, label, app.history_view.tab == i).clicked() {
                 app.history_view.tab = i;
             }
@@ -254,10 +261,19 @@ fn rediscover(app: &mut App, ui: &mut egui::Ui, report: &crate::listening::Repor
             .color(p.secondary),
     );
     let tracks = rule.tracks(report);
+    app.history_view
+        .rows
+        .set_tracks(&tracks, app.can_group_sources());
     ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
-        if !tracks.is_empty() && widgets::pill_button(ui, &p, "Play").clicked() {
-            app.play_row(tracks.clone(), 0);
+        if !tracks.is_empty()
+            && widgets::pill_button(ui, &p, "Play").clicked()
+            && let Some((queue, index)) =
+                app.history_view
+                    .rows
+                    .playback_queue(0, app.settings.preferred_provider, None)
+        {
+            app.play_row(queue, index);
         }
         if widgets::chip(ui, &p, "Keep as smart playlist", false).clicked() {
             app.new_playlist = Some(rule.title().into());
@@ -277,31 +293,15 @@ fn rediscover(app: &mut App, ui: &mut egui::Ui, report: &crate::listening::Repor
         );
         return;
     }
+    let mut rows = std::mem::take(&mut app.history_view.rows);
     crate::ui::page_scroll(app, "rediscover-tracks").show(ui, |ui| {
-        let signed_in = app.signed_in();
-        let result = crate::ui::track_rows(
+        super::source_rows::draw(
+            app,
             ui,
-            &p,
-            &mut app.images,
-            &app.backend,
-            &mut app.stats,
-            &app.liked,
-            &app.now,
-            &tracks,
-            false,
-            None,
-            &app.library.playlists.items,
-            signed_in,
-            false,
-            false,
+            &mut rows,
+            "rediscover-songs",
+            super::source_rows::Playback::List,
         );
-        if let Some(action) = result.action {
-            app.row_action(action);
-        }
-        match result.click {
-            Some(crate::ui::ListClick::Row(i)) => app.play_row(tracks.clone(), i),
-            Some(crate::ui::ListClick::Link(route)) => app.navigate(route),
-            _ => {}
-        }
     });
+    app.history_view.rows = rows;
 }

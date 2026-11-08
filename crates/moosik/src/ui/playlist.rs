@@ -35,6 +35,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     if app.playlist.is_none() {
         return;
     }
+    let grouped_tracks = smart_private_projection(app);
 
     let wash = crate::ui::header_wash_colour(
         app,
@@ -44,13 +45,15 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // The tint travels with the page: painted in scroll coordinates, it scrolls away
         // with the header instead of lingering as a background.
         crate::ui::header_wash(ui, &app.palette, app.content_rect, ui.cursor().min.y, wash);
-        header(app, ui);
+        header(app, ui, grouped_tracks.as_deref());
         crate::ui::info_popup(app, ui);
         // Breathing room between the header and the first row.
         ui.add_space(10.0);
         // Both lists number their row controls from zero. Keep the playlist's
         // hover, click and drag targets separate from the suggestions below.
-        ui.push_id("playlist-tracks", |ui| track_list(app, ui));
+        ui.push_id("playlist-tracks", |ui| {
+            track_list(app, ui, grouped_tracks.is_some());
+        });
         suggestions(app, ui);
         if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
             let id = pl.id.clone();
@@ -60,7 +63,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                         || if pl.source == crate::model::PlaylistSource::Local {
                             d.tracks.iter().all(|t| t.local_path.is_some())
                         } else {
-                            app.signed_in() && d.tracks.iter().all(|t| t.local_path.is_none())
+                            pl.source == crate::model::PlaylistSource::YouTube
+                                && app.signed_in()
+                                && d.tracks
+                                    .iter()
+                                    .all(|t| t.local_path.is_none() && !t.is_spotify())
                         })
             });
             if accepts {
@@ -87,10 +94,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
 /// YouTube Music draws there, with its Refresh. Only once the whole list is in: below a
 /// partial one it would sit between pages of the playlist itself.
 fn suggestions(app: &mut App, ui: &mut egui::Ui) {
-    let complete = app
-        .playlist
-        .as_ref()
-        .is_some_and(|p| p.editable && p.tracks.next.is_none());
+    let complete = app.playlist.as_ref().is_some_and(|p| {
+        p.editable && p.source != crate::model::PlaylistSource::Spotify && p.tracks.next.is_none()
+    });
     if !complete {
         return;
     }
@@ -171,6 +177,7 @@ fn suggestions(app: &mut App, ui: &mut egui::Ui) {
             |i| {
                 let t = &tracks[i];
                 crate::ui::RowSpec {
+                    source: Some(t.source_name()),
                     number: None,
                     rank: None,
                     trend: crate::model::ChartTrend::Unknown,
@@ -260,16 +267,29 @@ fn sort_control(app: &mut App, ui: &mut egui::Ui, anchor: egui::Pos2) {
     }
 }
 
-fn header(app: &mut App, ui: &mut egui::Ui) {
+fn smart_private_projection(app: &mut App) -> Option<Vec<crate::model::Track>> {
+    let enabled = app.can_group_sources();
+    let playlist = app
+        .playlist
+        .as_ref()
+        .filter(|playlist| playlist.id.starts_with("private:") && !playlist.editable)?;
+    app.playlist_source_rows
+        .set_tracks(&playlist.tracks.items, enabled);
+    Some(
+        app.playlist_source_rows
+            .playback_queue(0, app.settings.preferred_provider, None)
+            .map(|(tracks, _)| tracks)
+            .unwrap_or_default(),
+    )
+}
+
+fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::model::Track]>) {
     let signed_in = app.signed_in();
     let playing = app
         .playlist
         .as_ref()
         .is_some_and(|pl| app.is_playing_any(&pl.tracks));
 
-    // Read everything the header and its ••• menu need while `app.playlist` / `app.library`
-    // are borrowed: the menu takes the real track slice, not a per-frame clone of a list that
-    // is 5000 rows on Liked Music. Only the outcomes cross back out to act on `app`.
     let (out, menu_action, write, rail_ref, in_library, menu_description, is_expanding) = {
         let crate::app::App {
             settings,
@@ -295,7 +315,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             "Playlist"
         }
         .to_owned();
-        let meta = meta_line(pl);
+        let meta = grouped_tracks.map_or_else(|| meta_line(pl), projected_meta);
         // The owner, folded into the meta line below rather than a separate row: linked where
         // the page gave a channel id, so their profile can be opened from the name. Liked Music
         // is an auto list with no maker to show.
@@ -314,10 +334,14 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         } else {
             pl.library_add.as_deref()
         })
+        .filter(|_| pl.source != crate::model::PlaylistSource::Spotify)
         .map(str::to_owned);
-        let like =
-            (signed_in && pl.saveable && !pl.editable && !crate::model::is_liked_auto(&pl.id))
-                .then(|| crate::model::bare_playlist_id(&pl.id).to_owned());
+        let like = (signed_in
+            && pl.source != crate::model::PlaylistSource::Spotify
+            && pl.saveable
+            && !pl.editable
+            && !crate::model::is_liked_auto(&pl.id))
+        .then(|| crate::model::bare_playlist_id(&pl.id).to_owned());
         let (write, rail_ref) = match (token, like) {
             (Some(token), _) => (Some(crate::backend::PageWrite::Feedback(token)), None),
             (None, Some(id)) => (
@@ -343,11 +367,21 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             images,
             backend,
             crate::ui::PageHeader {
+                source: match pl.source {
+                    crate::model::PlaylistSource::Spotify => Some("Spotify"),
+                    crate::model::PlaylistSource::YouTube => Some("YouTube Music"),
+                    crate::model::PlaylistSource::Local => Some(if pl.id.starts_with("private:") {
+                        "Private playlist"
+                    } else {
+                        "Local file"
+                    }),
+                },
                 art_url: pl.thumbnail.as_ref(),
                 art_size: PAGE_ART_SIZE,
                 circle: false,
                 kind_label: &kind_label,
                 title: &pl.title,
+                verification: None,
                 description: pl.description.as_deref(),
                 artists: &[],
                 second_plain: None,
@@ -390,13 +424,14 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         dots,
                         widgets::PageMenu {
                             page_id: &pl.id,
-                            tracks: &pl.tracks.items,
+                            tracks: grouped_tracks.unwrap_or(&pl.tracks.items),
                             artist_id: None,
                             playlists: &library.playlists.items,
                             signed_in,
                             share_url: menu_share,
                             has_info: menu_has_info,
-                            manage: pl.editable || pl.id.starts_with("private:"),
+                            manage: pl.source != crate::model::PlaylistSource::Spotify
+                                && (pl.editable || pl.id.starts_with("private:")),
                             remove_from_library: false,
                             context_only: false,
                             // A local playlist has no YouTube radio to start.
@@ -435,11 +470,15 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
     };
 
     if out.play {
-        let tracks = app
-            .playlist
-            .as_ref()
-            .map(|pl| pl.tracks.items.clone())
-            .unwrap_or_default();
+        let tracks = grouped_tracks.map_or_else(
+            || {
+                app.playlist
+                    .as_ref()
+                    .map(|pl| pl.tracks.items.clone())
+                    .unwrap_or_default()
+            },
+            <[crate::model::Track]>::to_vec,
+        );
         // Already on this playlist: the button just showed Pause, so clicking it again means
         // resume/pause, not "start over from track 1".
         if app.queue_matches(&tracks) {
@@ -498,6 +537,23 @@ fn meta_line(playlist: &Playlist) -> String {
     )
 }
 
+fn projected_meta(tracks: &[crate::model::Track]) -> String {
+    let count = format!(
+        "{} {}",
+        tracks.len(),
+        if tracks.len() == 1 { "track" } else { "tracks" },
+    );
+    let duration = (!tracks.is_empty())
+        .then(|| {
+            tracks.iter().try_fold(0u64, |total, track| {
+                total.checked_add(track.duration.filter(|duration| *duration > 0)?)
+            })
+        })
+        .flatten()
+        .map(widgets::fmt_duration);
+    meta_text(Some(&count), tracks.len(), duration.as_deref())
+}
+
 /// The count, then the length when YouTube gave an exact one. A length carrying a "+" ("4+
 /// hours") totals only the first batch of a long list, so it is dropped rather than shown wrong.
 fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> String {
@@ -511,7 +567,7 @@ fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> Stri
     parts.join(" • ")
 }
 
-fn track_list(app: &mut App, ui: &mut egui::Ui) {
+fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
     if let Some(pl) = app
         .playlist
         .as_ref()
@@ -542,6 +598,20 @@ fn track_list(app: &mut App, ui: &mut egui::Ui) {
         }
         return;
     }
+    if grouped {
+        let mut rows = std::mem::take(&mut app.playlist_source_rows);
+        ui.push_id("smart-playlist-rows", |ui| {
+            super::source_rows::draw(
+                app,
+                ui,
+                &mut rows,
+                "smart-playlist",
+                super::source_rows::Playback::List,
+            );
+        });
+        app.playlist_source_rows = rows;
+        return;
+    }
     let signed_in = app.signed_in();
     let clicked = {
         let App {
@@ -559,7 +629,7 @@ fn track_list(app: &mut App, ui: &mut egui::Ui) {
         // "Remove from playlist" only on your own lists — never LM, never someone else's.
         let playlist_id = playlist
             .as_ref()
-            .filter(|p| p.editable)
+            .filter(|p| p.editable || p.source == crate::model::PlaylistSource::Spotify)
             .map(|p| p.id.as_str());
         // Liked Music is liked all the way down; its thumbs show only under the pointer.
         let liked_music = playlist
@@ -789,7 +859,29 @@ fn confirm_modal(
 
 #[cfg(test)]
 mod tests {
-    use super::meta_text;
+    use super::{meta_text, projected_meta};
+
+    fn track(duration: Option<u64>) -> crate::model::Track {
+        let mut track = crate::listening::Metadata::default().to_track();
+        track.duration = duration;
+        track
+    }
+
+    #[test]
+    fn projected_meta_uses_visible_count_and_complete_duration() {
+        assert_eq!(projected_meta(&[track(Some(74))]), "1 track • 1:14");
+        assert_eq!(
+            projected_meta(&[track(Some(60)), track(Some(90))]),
+            "2 tracks • 2:30"
+        );
+    }
+
+    #[test]
+    fn projected_meta_omits_incomplete_or_empty_duration() {
+        assert_eq!(projected_meta(&[track(Some(60)), track(None)]), "2 tracks");
+        assert_eq!(projected_meta(&[track(Some(0))]), "1 track");
+        assert_eq!(projected_meta(&[]), "0 tracks");
+    }
 
     #[test]
     fn a_partial_length_is_not_shown() {

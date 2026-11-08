@@ -12,6 +12,75 @@ use serde::{Deserialize, Serialize};
 use crate::theme::Palette;
 use crate::theme::custom::{CustomTheme, Themes};
 
+pub const YOUTUBE_CACHE_MIN_MIB: u64 = 16;
+pub const YOUTUBE_CACHE_MAX_MIB: u64 = 128;
+pub const SPOTIFY_CACHE_MIN_MIB: u64 = 1;
+pub const SPOTIFY_CACHE_MAX_MIB: u64 = 1_048_576;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeSource {
+    #[default]
+    Combined,
+    YouTubeMusic,
+    Spotify,
+    Local,
+}
+
+impl HomeSource {
+    pub const ALL: [Self; 4] = [
+        Self::Combined,
+        Self::YouTubeMusic,
+        Self::Spotify,
+        Self::Local,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Combined => "Combined",
+            Self::YouTubeMusic => "YouTube Music",
+            Self::Spotify => "Spotify",
+            Self::Local => "Local",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedCacheLimit {
+    Unsigned(u64),
+    Signed(i64),
+}
+
+fn deserialize_cache_limit<'de, D>(
+    deserializer: D,
+    min: u64,
+    max: u64,
+) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let limit = match SavedCacheLimit::deserialize(deserializer)? {
+        SavedCacheLimit::Unsigned(limit) => limit,
+        SavedCacheLimit::Signed(limit) => u64::try_from(limit).unwrap_or(min),
+    };
+    Ok(limit.clamp(min, max))
+}
+
+fn deserialize_youtube_cache_limit<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_cache_limit(deserializer, YOUTUBE_CACHE_MIN_MIB, YOUTUBE_CACHE_MAX_MIB)
+}
+
+fn deserialize_spotify_cache_limit<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_cache_limit(deserializer, SPOTIFY_CACHE_MIN_MIB, SPOTIFY_CACHE_MAX_MIB)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -270,6 +339,13 @@ pub struct Settings {
     pub adaptive_art_color: bool,
     /// What the resolver asks for.
     pub quality: Quality,
+    pub preferred_provider: crate::model::Provider,
+    pub youtube_cache_enabled: bool,
+    #[serde(deserialize_with = "deserialize_youtube_cache_limit")]
+    pub youtube_cache_limit_mb: u64,
+    pub spotify_cache_enabled: bool,
+    #[serde(deserialize_with = "deserialize_spotify_cache_limit")]
+    pub spotify_cache_limit_mb: u64,
     /// Keep playing related songs when a hand-picked queue nears its end. YouTube's own radio,
     /// fetched for the queue's last track. On by default, as on the site.
     pub autoplay: bool,
@@ -283,6 +359,8 @@ pub struct Settings {
     /// The order of Home's sections, as [`crate::model::HomeSection::key`]s. Read through
     /// [`crate::model::normalise_order`], which makes any saved list complete.
     pub home_order: Vec<String>,
+    pub home_source: HomeSource,
+    pub home_primary_provider: Option<crate::model::Provider>,
     /// Spend more of Home's load following the feed until the sections ranked highest have
     /// appeared, so the order is kept more closely, up to a time limit. Off, Home loads as
     /// quickly as it always did.
@@ -351,10 +429,17 @@ impl Default for Settings {
             scroll_fades: false,
             adaptive_art_color: true,
             quality: Quality::default(),
+            preferred_provider: crate::model::Provider::Spotify,
+            youtube_cache_enabled: true,
+            youtube_cache_limit_mb: 32,
+            spotify_cache_enabled: true,
+            spotify_cache_limit_mb: 512,
             autoplay: true,
             queue_click_keeps_order: false,
             fullscreen_lyrics: true,
             home_order: crate::model::default_order_keys(),
+            home_source: HomeSource::Combined,
+            home_primary_provider: None,
             home_strict_order: false,
             normalise_volume: false,
             double_click_to_play: true,
@@ -511,6 +596,59 @@ pub fn save(settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_limits_keep_defaults_and_custom_sizes_when_saved() {
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.youtube_cache_limit_mb, 32);
+        assert_eq!(defaults.spotify_cache_limit_mb, 512);
+        let settings = Settings {
+            youtube_cache_limit_mb: 79,
+            spotify_cache_limit_mb: 8192,
+            ..Settings::default()
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.youtube_cache_limit_mb, 79);
+        assert_eq!(restored.spotify_cache_limit_mb, 8192);
+    }
+
+    #[test]
+    fn saved_cache_limits_normalize_without_dropping_other_settings() {
+        let low: Settings = serde_json::from_str(
+            r#"{"theme":"light","youtube_cache_limit_mb":-1,"spotify_cache_limit_mb":0}"#,
+        )
+        .unwrap();
+        assert_eq!(low.theme, Theme::Light);
+        assert_eq!(low.youtube_cache_limit_mb, YOUTUBE_CACHE_MIN_MIB);
+        assert_eq!(low.spotify_cache_limit_mb, SPOTIFY_CACHE_MIN_MIB);
+        let high: Settings = serde_json::from_value(serde_json::json!({
+            "youtube_cache_limit_mb": u64::MAX,
+            "spotify_cache_limit_mb": u64::MAX,
+        }))
+        .unwrap();
+        assert_eq!(high.youtube_cache_limit_mb, YOUTUBE_CACHE_MAX_MIB);
+        assert_eq!(high.spotify_cache_limit_mb, SPOTIFY_CACHE_MAX_MIB);
+    }
+
+    #[test]
+    fn preferred_provider_defaults_to_spotify_and_survives_saving() {
+        assert_eq!(
+            Settings::default().preferred_provider,
+            crate::model::Provider::Spotify
+        );
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.preferred_provider, crate::model::Provider::Spotify);
+        for provider in crate::model::Provider::ALL {
+            let settings = Settings {
+                preferred_provider: provider,
+                ..Settings::default()
+            };
+            let encoded = serde_json::to_string(&settings).unwrap();
+            let decoded: Settings = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded.preferred_provider, provider);
+        }
+    }
 
     #[test]
     fn discord_defaults_and_saved_choices_survive_upgrades() {

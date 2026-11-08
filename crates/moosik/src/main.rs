@@ -8,6 +8,27 @@ use eframe::egui;
 use moosik::{app, mark_start, window_icon};
 
 fn main() -> eframe::Result {
+    let early_args: Vec<String> = std::env::args().collect();
+    if let Some(at) = early_args
+        .iter()
+        .position(|arg| arg == moosik::spotify_drm_child::ARG)
+    {
+        let result = early_args
+            .get(at + 1)
+            .ok_or_else(|| anyhow::anyhow!("Missing protected player URL"))
+            .and_then(|url| moosik::spotify_drm_child::run(url));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+    if let Some(at) = early_args
+        .iter()
+        .position(|arg| arg == moosik::spotify_web_login::ARG)
+    {
+        let result = early_args
+            .get(at + 1)
+            .ok_or_else(|| anyhow::anyhow!("Missing sign-in transfer path"))
+            .and_then(|path| moosik::spotify_web_login::capture_here(std::path::Path::new(path)));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     mark_start();
     // Before any other thread exists: how glibc treats freed memory (see `memory.rs`).
     moosik::memory::tune();
@@ -309,6 +330,16 @@ fn main() -> eframe::Result {
             .dx12
             .presentation_system =
             wgpu::Dx12SwapchainKind::from_env().unwrap_or(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+        let device_descriptor = setup.device_descriptor;
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = device_descriptor(adapter);
+            if adapter.get_info().backend == wgpu::Backend::Dx12 {
+                descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+                let limits = &mut descriptor.required_limits;
+                limits.max_non_sampler_bindings = limits.max_non_sampler_bindings.min(8192);
+            }
+            descriptor
+        });
         native_options.wgpu_options.wgpu_setup = WgpuSetup::CreateNew(setup);
     }
     // A test aid for debug builds: `MOOSIK_NO_VSYNC=1` stops the swap from waiting for the screen,

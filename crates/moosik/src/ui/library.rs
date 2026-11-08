@@ -7,10 +7,21 @@ use crate::api::LibrarySection;
 use crate::app::{App, LibrarySort, RailFilter, Route};
 use crate::auth::AuthState;
 use crate::theme;
-use crate::ui::{ListClick, art_texture, card_is_visible, centered, failed, track_rows};
+use crate::ui::{ListClick, centered, failed, track_rows};
 use crate::widgets;
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    let local = app.has_local_music();
+    let downloads = !app.downloads.entries.is_empty();
+    if (app.rail_filter == RailFilter::Local && !local)
+        || (app.rail_filter == RailFilter::Downloads && !downloads)
+    {
+        app.rail_filter = if app.local_playlists.is_empty() {
+            RailFilter::Songs
+        } else {
+            RailFilter::Playlists
+        };
+    }
     // The title scrolls away with the page rather than staying pinned over it.
     crate::ui::page_scroll(app, "library").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Your library");
@@ -19,6 +30,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         let mut picked = None;
         ui.horizontal_wrapped(|ui| {
             for filter in RailFilter::ALL {
+                if (filter == RailFilter::Local && !local)
+                    || (filter == RailFilter::Downloads && !downloads)
+                {
+                    continue;
+                }
                 if widgets::chip(ui, &app.palette, filter.label(), app.rail_filter == filter)
                     .clicked()
                 {
@@ -44,11 +60,18 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
 
-        if app.rail_filter == RailFilter::Playlists && !app.signed_in() {
+        if app.rail_filter == RailFilter::Playlists && !app.has_library_account() {
+            if app.library.playlists.is_empty() {
+                prompt(app, ui);
+            }
             super::organizer::grid(app, ui);
             if widgets::pill_button(ui, &app.palette, "New private playlist").clicked() {
                 app.new_private_playlist(vec![], app.organizer.current_folder().map(str::to_owned));
             }
+            return;
+        }
+        if app.has_library_account() && !matches!(app.auth, AuthState::Checking) {
+            content(app, ui);
             return;
         }
         match &app.auth {
@@ -83,13 +106,19 @@ fn skeletons(app: &App, ui: &mut egui::Ui) {
 
 fn prompt(app: &mut App, ui: &mut egui::Ui) {
     ui.label(
-        egui::RichText::new("Sign in to see your library.")
+        egui::RichText::new("Manage your music providers in Settings.")
             .font(theme::regular(13.0))
             .color(app.palette.secondary),
     );
     ui.add_space(12.0);
-    if widgets::pill_button(ui, &app.palette, "Sign in").clicked() {
-        app.sign_in();
+    if widgets::pill_button(ui, &app.palette, "Manage providers").clicked() {
+        app.settings_tab = crate::ui::settings::SettingsTab::Providers;
+        app.settings_provider = app
+            .connected_providers()
+            .first()
+            .copied()
+            .unwrap_or(crate::model::Provider::YouTubeMusic);
+        app.navigate(Route::Settings);
     }
 }
 
@@ -109,17 +138,44 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         skeletons(app, ui);
         return;
     }
+    if let Some((provider, error)) = &app.library_failed_provider {
+        let retrying = app.library_source_retry.is_some();
+        let retry = ui
+            .horizontal_wrapped(|ui| {
+                let label = if retrying {
+                    format!("Retrying {}…", provider.name())
+                } else {
+                    format!("{} library couldn’t load", provider.name())
+                };
+                ui.label(egui::RichText::new(label).color(app.palette.secondary))
+                    .on_hover_text(error);
+                ui.add_enabled_ui(app.can_retry_library_provider(), |ui| {
+                    widgets::outline_button(ui, &app.palette, "Retry").clicked()
+                })
+                .inner
+            })
+            .inner;
+        if retry {
+            app.retry_library_provider();
+        }
+        ui.add_space(8.0);
+    }
 
     let empty = app.library.songs.is_empty()
         && app.library.artists.is_empty()
         && app.library.albums.is_empty()
         && app.library.playlists.is_empty();
-    if empty && app.rail_filter != RailFilter::Playlists {
+    if empty
+        && app.rail_filter != RailFilter::Playlists
+        && app.library.songs.next.is_none()
+        && app.library.artists.next.is_none()
+        && app.library.albums.next.is_none()
+        && app.library.playlists.next.is_none()
+    {
         centered(
             app,
             ui,
-            "Nothing here yet: songs, albums and playlists you save on YouTube Music \
-             will show up here.",
+            "Songs, artists, albums and playlists saved with your connected accounts appear here.",
         );
         return;
     }
@@ -153,6 +209,33 @@ fn content(app: &mut App, ui: &mut egui::Ui) {
         RailFilter::Local => unreachable!("Local is intercepted in page() before content()"),
         RailFilter::Downloads => {
             unreachable!("Downloads is intercepted in page() before content()")
+        }
+    }
+    let section = match app.rail_filter {
+        RailFilter::Songs => LibrarySection::Songs,
+        RailFilter::Artists => LibrarySection::Artists,
+        RailFilter::Albums => LibrarySection::Albums,
+        RailFilter::Playlists => LibrarySection::Playlists,
+        _ => return,
+    };
+    if let Some((_, error)) = app
+        .library_paging_errors
+        .iter()
+        .find(|(failed, _)| *failed == section)
+    {
+        ui.label(egui::RichText::new(error).color(app.palette.danger));
+        if widgets::outline_button(ui, &app.palette, "Try again").clicked() {
+            app.retry_library_more(section);
+        }
+    } else {
+        let empty = match section {
+            LibrarySection::Songs => app.library.songs.is_empty(),
+            LibrarySection::Artists => app.library.artists.is_empty(),
+            LibrarySection::Albums => app.library.albums.is_empty(),
+            LibrarySection::Playlists => app.library.playlists.is_empty(),
+        };
+        if empty {
+            app.load_more_library(section);
         }
     }
 }
@@ -251,195 +334,95 @@ fn sort_row(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn song_list(app: &mut App, ui: &mut egui::Ui) {
-    let signed_in = app.signed_in();
-    let clicked = {
-        let App {
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            library,
-            ..
-        } = app;
-        track_rows(
-            ui,
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            &library.songs.items,
-            false,
-            None,
-            &library.playlists.items,
-            signed_in,
-            false,
-            false,
-        )
-    };
-    // Ask for the next page once the viewport reaches the end of what we have. Nothing loads that
-    // has not been scrolled to, so a 10,000-song library costs the same as a 25-song one until it
-    // is looked at.
-    if clicked.at_end {
+    let mut rows = std::mem::take(&mut app.library_source_rows);
+    rows.set_tracks(&app.library.songs.items, app.can_group_sources());
+    let at_end = super::source_rows::draw(
+        app,
+        ui,
+        &mut rows,
+        "library-songs",
+        super::source_rows::Playback::List,
+    );
+    app.library_source_rows = rows;
+    if at_end {
         app.load_more_library(LibrarySection::Songs);
-    }
-    match clicked.click {
-        Some(ListClick::Row(i)) => {
-            let songs = app.library.songs.items.clone();
-            app.start_from(songs, i);
-        }
-        Some(ListClick::Link(route)) => app.navigate(route),
-        None => {}
-    }
-    if let Some(action) = clicked.action {
-        app.row_action(action);
     }
 }
 
 fn artist_grid(app: &mut App, ui: &mut egui::Ui) {
-    let mut clicked = None;
-    let mut last_visible = false;
-    ui.horizontal_wrapped(|ui| {
-        let card_w = crate::ui::grid_card_w(ui);
-        let count = app.library.artists.len();
-        for (i, a) in app.library.artists.items.iter().enumerate() {
-            let visible = card_is_visible(ui, card_w, widgets::ArtShape::Circle);
-            // The last card being on screen is what "scrolled to the end" means for a grid.
-            if visible && i + 1 == count {
-                last_visible = true;
-            }
-            let art = visible
-                .then(|| {
-                    art_texture(
-                        &mut app.images,
-                        &app.backend,
-                        ui.ctx(),
-                        a.thumbnail.as_ref(),
-                        card_w - 16.0,
-                    )
-                })
-                .flatten();
-            if widgets::art_card(
-                ui,
-                &app.palette,
-                card_w,
-                art,
-                &a.name,
-                a.subscribers.as_deref().unwrap_or(""),
-                // Round here too, so an artist looks the same wherever it appears.
-                widgets::ArtShape::Circle,
-                None,
-                false,
-                false,
-            )
-            .response
-            .clicked()
-            {
-                clicked = Some(i);
-            }
-        }
-    });
-    if last_visible {
-        app.load_more_library(LibrarySection::Artists);
-    }
-    if let Some(i) = clicked
-        && let Some(artist) = app.library.artists.items.get(i)
-    {
-        let id = artist.id.clone();
-        app.navigate(Route::Artist(id));
-    }
+    let items = app
+        .library
+        .artists
+        .items
+        .iter()
+        .cloned()
+        .map(crate::model::Entry::Artist)
+        .collect();
+    library_entry_grid(app, ui, items, LibrarySection::Artists);
 }
 
 fn album_grid(app: &mut App, ui: &mut egui::Ui) {
-    let mut clicked = None;
-    let mut played = None;
-    let mut last_visible = false;
-    ui.horizontal_wrapped(|ui| {
-        let card_w = crate::ui::grid_card_w(ui);
-        let count = app.library.albums.len();
-        for (i, al) in app.library.albums.items.iter().enumerate() {
-            let visible = card_is_visible(ui, card_w, widgets::ArtShape::Square);
-            // The last card being on screen is what "scrolled to the end" means for a grid.
-            if visible && i + 1 == count {
-                last_visible = true;
-            }
-            let art = visible
-                .then(|| {
-                    art_texture(
-                        &mut app.images,
-                        &app.backend,
-                        ui.ctx(),
-                        al.thumbnail.as_ref(),
-                        card_w - 16.0,
-                    )
-                })
-                .flatten();
-            let mut sub = al.artist.clone();
-            if let Some(y) = &al.year {
-                sub.push_str(" • ");
-                sub.push_str(y);
-            }
-            let playing = app
-                .now
-                .track
-                .as_ref()
-                .is_some_and(|t| t.album_id.as_deref() == Some(al.id.as_str()))
-                && !app.now.paused;
-            let card = widgets::art_card(
-                ui,
-                &app.palette,
-                card_w,
-                art,
-                &al.title,
-                &sub,
-                widgets::ArtShape::Square,
-                None,
-                playing,
-                false,
-            );
-            // The corner button plays the album; a click anywhere else opens it.
-            if card.play {
-                played = Some(i);
-            } else if card.response.clicked() {
-                clicked = Some(i);
-            }
-        }
-    });
-    if last_visible {
-        app.load_more_library(LibrarySection::Albums);
+    let items = app
+        .library
+        .albums
+        .items
+        .iter()
+        .cloned()
+        .map(crate::model::Entry::Album)
+        .collect();
+    library_entry_grid(app, ui, items, LibrarySection::Albums);
+}
+
+fn library_entry_grid(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    items: Vec<crate::model::Entry>,
+    section: LibrarySection,
+) {
+    let signed_in = app.signed_in();
+    let preferred_provider = app.settings.preferred_provider;
+    let group_sources = app.can_group_sources();
+    let ctx = super::ReleaseCtx {
+        playlists: &app.library.playlists.items,
+        signed_in,
+        preferred_provider,
+        group_sources,
+        rail: &app.rail_cache,
+        albums: &app.album_cache,
+    };
+    let grid = super::entry_grid(
+        ui,
+        &app.palette,
+        &mut app.images,
+        &app.backend,
+        &app.now,
+        &items,
+        &ctx,
+    );
+    if grid.last_visible {
+        app.load_more_library(section);
     }
-    if let Some(i) = played
-        && let Some(album) = app.library.albums.items.get(i)
-    {
-        let id = album.id.clone();
-        app.play_album(id);
-    }
-    if let Some(i) = clicked
-        && let Some(album) = app.library.albums.items.get(i)
-    {
-        let id = album.id.clone();
-        app.navigate(Route::Album(id));
-    }
+    let shelf = crate::model::Shelf {
+        title: String::new(),
+        strapline: None,
+        items,
+        more_params: None,
+        more_browse_id: None,
+        expanded: false,
+    };
+    super::finish_grid(app, &shelf, grid);
 }
 
 /// The Local tab: a folder tree over `app.local_tracks`, browsed rather than paged — there's
 /// nothing to page, the whole scan already sits in memory.
 fn local_folder_browser(app: &mut App, ui: &mut egui::Ui) {
     if app.settings.local_folders.is_empty() {
-        centered(
-            app,
-            ui,
-            "No folders added yet. Add one in Settings to see your local music here.",
-        );
-        ui.add_space(8.0);
-        ui.vertical_centered(|ui| {
-            if widgets::pill_button(ui, &app.palette, "Open Settings").clicked() {
-                app.navigate(Route::Settings);
-            }
-        });
+        if app.local_tracks.is_empty() {
+            prompt(app, ui);
+        } else {
+            let tracks = app.local_tracks.clone();
+            local_track_list(app, ui, &tracks);
+        }
         return;
     }
     if app.local_scanning {

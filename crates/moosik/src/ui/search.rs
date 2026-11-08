@@ -12,26 +12,62 @@
 //! the top result is simply the first one — see [`crate::innertube::parse_search`] for why
 //! YouTube's own card is folded into the ranking rather than shown separately.
 
-use crate::app::{App, Route};
-use crate::model::{Entry, SearchScope};
-use crate::ui::{ListClick, centered, spec_rows};
+use crate::app::App;
+use crate::model::{Provider, SearchScope};
+use crate::ui::centered;
 use crate::widgets;
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    let available = app.available_providers();
     let heading = if app.searching {
         format!("Searching “{}”…", app.searched)
     } else if app.searched.is_empty() {
-        "Search YouTube Music".to_owned()
+        "Search".to_owned()
     } else {
         format!("Results for “{}”", app.searched)
     };
     crate::ui::page_title(ui, &app.palette, &heading);
 
-    if let Some(status) = app.status.clone() {
+    let mut picked = None;
+    if available.len() > 1 {
+        ui.horizontal_wrapped(|ui| {
+            if widgets::chip(ui, &app.palette, "All", app.search_provider.is_none()).clicked() {
+                picked = Some(None);
+            }
+            for &provider in &available {
+                if widgets::chip(
+                    ui,
+                    &app.palette,
+                    provider.name(),
+                    app.search_provider == Some(provider),
+                )
+                .clicked()
+                {
+                    picked = Some(Some(provider));
+                }
+            }
+        });
+        ui.add_space(8.0);
+    }
+    if let Some(provider) = picked {
+        app.select_search_provider(provider);
+        return;
+    }
+
+    scope_chips(app, ui, !app.searched.is_empty());
+    search_warnings(app, ui);
+
+    if let Some(status) = app
+        .status
+        .clone()
+        .filter(|_| app.search_scope == SearchScope::All)
+    {
         if app.search_failed {
             // The raw chain is in the log; the page says it plainly, and no connection reads
             // as the offline page.
-            let message = if crate::api::looks_offline(&status) {
+            let message = if app.search_provider != Some(Provider::YouTubeMusic)
+                || crate::api::looks_offline(&status)
+            {
                 status
             } else {
                 "Couldn't search right now.".to_owned()
@@ -45,19 +81,31 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         }
         return;
     }
-    if app.results.is_empty() {
+    if app.results.is_empty() && app.search_scope == SearchScope::All {
         if app.searching {
             // The chips are always these, so they show from the start and the rows below land
             // where the results will; a click waits for the results.
-            scope_chips(app, ui, false);
             widgets::skeleton_rows(ui, &app.palette, 12);
         } else {
-            centered(app, ui, "Type in the search box above. No sign-in needed.");
+            centered(
+                app,
+                ui,
+                if !app.searched.is_empty() && !app.search_warnings.is_empty() {
+                    "No matches from the sources that replied."
+                } else if app.search_provider == Some(Provider::Local) {
+                    "Search music from the folders added in Settings."
+                } else if app.search_provider == Some(Provider::Spotify) {
+                    "Type in the search box above."
+                } else if app.search_provider.is_none() {
+                    "Search your music above."
+                } else {
+                    "Type in the search box above. No sign-in needed."
+                },
+            );
         }
         return;
     }
 
-    scope_chips(app, ui, true);
     if app.search_scope == SearchScope::All {
         did_you_mean(app, ui);
     }
@@ -96,6 +144,32 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "search").show(ui, |ui| {
         results_list(app, ui);
     });
+}
+
+fn search_warnings(app: &mut App, ui: &mut egui::Ui) {
+    let warnings = if app.search_scope == SearchScope::All {
+        &app.search_warnings
+    } else {
+        &app.scoped_warnings
+    };
+    if warnings.is_empty() {
+        return;
+    }
+    for warning in warnings {
+        ui.label(
+            egui::RichText::new(warning)
+                .font(crate::theme::regular(12.0))
+                .color(app.palette.danger),
+        );
+    }
+    if widgets::outline_button(ui, &app.palette, "Try again").clicked() {
+        if app.search_scope == SearchScope::All {
+            app.search_again(app.searched.clone());
+        } else {
+            app.retry_scoped_search();
+        }
+    }
+    ui.add_space(8.0);
 }
 
 /// YouTube's empty answer, in its own words, with its "Did you mean" spelling under it.
@@ -176,9 +250,19 @@ fn did_you_mean_line(app: &mut App, ui: &mut egui::Ui) -> f32 {
 /// The scope chips. `live` is false while the first results are still coming: the chips show,
 /// but a scope cannot be picked until there is a search to scope.
 fn scope_chips(app: &mut App, ui: &mut egui::Ui, live: bool) {
+    let available = app.available_providers();
     let mut picked = None;
     ui.horizontal_wrapped(|ui| {
-        for scope in SearchScope::ALL {
+        for &scope in app
+            .search_provider
+            .map_or(SearchScope::ALL.as_slice(), Provider::search_scopes)
+        {
+            if !available
+                .iter()
+                .any(|provider| provider.search_scopes().contains(&scope))
+            {
+                continue;
+            }
             if widgets::chip(ui, &app.palette, scope.label(), app.search_scope == scope).clicked() {
                 picked = Some(scope);
             }
@@ -191,115 +275,29 @@ fn scope_chips(app: &mut App, ui: &mut egui::Ui, live: bool) {
     ui.add_space(4.0);
 }
 
-/// The list. Every kind renders through the same row, so art, hover, truncation and the
-/// active-track highlight are shared, and the list virtualises like every other.
-///
-/// `indices` is `All`'s scope filter: positions in `app.results.items` that match
-/// `app.search_scope`, in the same (already-correct) order YouTube ranked them — `i` below is
-/// always a position in `indices`, not in the underlying list itself. Every other scope has
-/// nothing to filter (the dedicated fetch already returns only that kind), so `indices` is just
-/// `0..app.scoped_results.len()`.
 fn results_list(app: &mut App, ui: &mut egui::Ui) {
-    let signed_in = app.signed_in();
-    let scope = app.search_scope;
-    let all = scope == SearchScope::All;
-    let indices: Vec<usize> = if all {
-        // Cached against `results_generation`: `results.items` doesn't change between one
-        // search landing and the next, so re-filtering it every frame is wasted work.
-        let generation = app.results_generation;
-        match &app.search_all_indices {
-            Some((cached_gen, indices)) if *cached_gen == generation => indices.clone(),
-            _ => {
-                let indices: Vec<usize> = app
-                    .results
-                    .items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| scope.matches(e))
-                    .map(|(i, _)| i)
-                    .collect();
-                app.search_all_indices = Some((generation, indices.clone()));
-                indices
-            }
-        }
+    let all = app.search_scope == SearchScope::All;
+    let revision = if all {
+        app.results_generation.wrapping_mul(2)
     } else {
-        (0..app.scoped_results.len()).collect()
+        app.scoped_results_generation
+            .wrapping_mul(2)
+            .wrapping_add(1)
     };
-    let clicked = {
-        let App {
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            now,
-            results,
-            scoped_results,
-            library,
-            ..
-        } = app;
-        let items: &[Entry] = if all { &results.items } else { scoped_results };
-        spec_rows(
-            ui,
-            palette,
-            images,
-            backend,
-            stats,
-            liked,
-            indices.len(),
-            |i| crate::ui::entry_row_spec(&items[indices[i]], now, library, signed_in),
-        )
-    };
-
-    // Forwarded before the click: a menu choice arrives with no row click, and the `None`
-    // arm below returns early.
-    if let Some(action) = clicked.action {
-        app.row_action(action);
-    }
-    let i = match clicked.click {
-        // Translated back to a real position in the source list — `i` from `spec_rows` is only
-        // ever a position in this frame's `indices`.
-        Some(ListClick::Row(i)) => indices[i],
-        Some(ListClick::Link(route)) => {
-            app.navigate(route);
-            return;
-        }
-        None => return,
-    };
-    let item = if all {
-        &app.results.items[i]
+    let enabled = app.search_provider.is_none() && app.can_group_sources();
+    let mut state = std::mem::take(&mut app.search_source_rows);
+    let entries = if all {
+        &app.results.items
     } else {
-        &app.scoped_results[i]
+        &app.scoped_results
     };
-    match item {
-        Entry::Song(_) | Entry::Video(_) => {
-            let (index, queue) = if all {
-                (app.results.playable_index(i), app.results.playable())
-            } else {
-                (
-                    crate::ui::playable_index(&app.scoped_results, i),
-                    crate::ui::playable_queue(&app.scoped_results),
-                )
-            };
-            if let Some(index) = index {
-                app.play_row(queue, index);
-            }
-        }
-        Entry::Artist(a) => {
-            let id = a.id.clone();
-            app.navigate(Route::Artist(id));
-        }
-        Entry::Album(a) => {
-            let id = a.id.clone();
-            app.navigate(Route::Album(id));
-        }
-        Entry::Playlist(p) => {
-            let id = p.id.clone();
-            app.navigate(Route::Playlist(id));
-        }
-        Entry::Mood(m) => {
-            let params = m.params.clone();
-            app.navigate(Route::Mood(params));
-        }
-    }
+    state.set_entries(entries, revision, enabled);
+    crate::ui::source_rows::draw(
+        app,
+        ui,
+        &mut state,
+        "search-sources",
+        crate::ui::source_rows::Playback::Single,
+    );
+    app.search_source_rows = state;
 }

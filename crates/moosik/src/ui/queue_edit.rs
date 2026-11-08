@@ -586,6 +586,7 @@ mod tests {
                                     rank: None,
                                     trend: track.trend,
                                     title: &track.title,
+                                    source: Some(track.source_name()),
                                     album_id: None,
                                     subtitle: widgets::plain_subtitle("Artist"),
                                     duration: track.duration,

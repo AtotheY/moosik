@@ -16,7 +16,7 @@ use crate::backend::{Backend, Event};
 use crate::chrome;
 use crate::images::Images;
 use crate::model::{Entry, LikeStatus, SearchResults, SearchScope, Track};
-use crate::player::{NowPlaying, Player};
+use crate::player::{NowPlaying, PlaybackHandle, Player};
 use crate::queue::{PlayQueue, Rewind, Slot};
 use crate::stats::Stats;
 use crate::theme::{self, Palette};
@@ -35,6 +35,16 @@ const PLAYING_FAST_REPAINT: Duration = Duration::from_millis(250);
 /// How long before a track's end the quick tick takes over, so the next song starts about as
 /// promptly as it did when every tick was quick.
 const TRACK_END_WINDOW: f64 = 3.0;
+
+const SPOTIFY_PAUSE_GRACE: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SpotifyPause {
+    #[default]
+    None,
+    Waiting(Instant),
+    Released,
+}
 
 /// What decides when the next frame is due while a song plays.
 #[derive(Clone, Copy, Debug)]
@@ -263,7 +273,7 @@ struct MediaKey {
 
 struct PresenceKey {
     listeners: usize,
-    id: Option<String>,
+    id: String,
     title: String,
     artists: Vec<crate::model::ArtistLink>,
     playing: bool,
@@ -297,6 +307,7 @@ pub enum ShotWhen {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Load {
     Search,
+    Profile,
     Artist,
     Album,
     Playlist,
@@ -517,8 +528,14 @@ pub enum Route {
     Listening,
     Queue,
     Library,
+    LikedMusic,
+    Profile,
     Settings,
     Artist(String),
+    ArtistGroup {
+        youtube: String,
+        spotify: String,
+    },
     /// The songs by one artist that are in the account's library — the "You Liked" page, from
     /// the artist page's own tile. Reads the already-loaded artist, so `ensure_route_loaded`
     /// only has to make sure that artist is the one being shown.
@@ -550,15 +567,28 @@ impl Route {
             "stats" => Some(Route::Listening),
             "queue" => Some(Route::Queue),
             "library" => Some(Route::Library),
+            "liked" => Some(Route::LikedMusic),
+            "profile" => Some(Route::Profile),
             "settings" => Some(Route::Settings),
             other => match other.split_once(':') {
                 Some(("artist", id)) => Some(Route::Artist(id.to_owned())),
                 Some(("artistliked", id)) => Some(Route::ArtistLiked(id.to_owned())),
                 Some(("album", id)) => Some(Route::Album(id.to_owned())),
-                Some(("playlist", id)) => Some(Route::Playlist(id.to_owned())),
+                Some(("playlist", id)) => Some(Route::Playlist(id.to_owned()).canonical()),
                 Some(("homeshelf", title)) => Some(Route::HomeShelf(title.to_owned())),
                 _ => None,
             },
+        }
+    }
+
+    fn canonical(self) -> Self {
+        match &self {
+            Self::Playlist(id)
+                if crate::model::is_liked_auto(id) || id == "spotify:collection:tracks" =>
+            {
+                Self::LikedMusic
+            }
+            _ => self,
         }
     }
 }
@@ -882,7 +912,7 @@ impl Radio {
 fn nearest_song_id(tracks: &[Track], from: usize) -> Option<String> {
     let candidates: Vec<&Track> = tracks[..=from]
         .iter()
-        .filter(|t| t.local_path.is_none())
+        .filter(|t| t.local_path.is_none() && !t.is_spotify())
         .collect();
     candidates
         .iter()
@@ -1455,12 +1485,21 @@ pub struct App {
     /// A search waiting for `poll_search` to fire it. Search is submit-driven — Enter, a chosen
     /// suggestion, or the `--search` CLI — never a keystroke.
     pending_search: bool,
+    pub(crate) search_provider: Option<crate::model::Provider>,
+    searched_provider: Option<crate::model::Provider>,
+    search_request: u64,
+    scoped_search_request: u64,
+    pub(crate) search_warnings: Vec<String>,
+    pub(crate) scoped_warnings: Vec<String>,
     pub(crate) searched: String,
     pub(crate) searching: bool,
     pub(crate) results: SearchResults,
-    /// Bumped every time `results` is replaced, so `ui::search`'s `All`-scope filtered index list
-    /// can cache itself against this instead of re-filtering `results.items` every frame.
     pub(crate) results_generation: u64,
+    pub(crate) scoped_results_generation: u64,
+    pub(crate) search_source_rows: ui::source_rows::State,
+    pub(crate) library_source_rows: ui::source_rows::State,
+    pub(crate) playlist_source_rows: ui::source_rows::State,
+    pub(crate) artist_sources: ui::artist_sources::State,
     pub(crate) status: Option<String>,
     /// A request failed for want of a connection, and none has got through since. Drives the
     /// offline banner and the quiet probe that notices the connection coming back.
@@ -1504,10 +1543,9 @@ pub struct App {
     pub(crate) scoped_error: Option<String>,
     /// `status` holds a failed search's error chain rather than a message for the page.
     pub(crate) search_failed: bool,
-    scoped_for: Option<(String, SearchScope)>,
+    scoped_for: Option<(Option<crate::model::Provider>, String, SearchScope)>,
     /// Cache for `ui::search`'s `All`-scope filtered index list: the `results_generation` it was
     /// computed for, and the indices themselves. Recomputed only when the generation moves on.
-    pub(crate) search_all_indices: Option<(u64, Vec<usize>)>,
 
     /// The artist page being shown, plus whether a fetch is outstanding / failed.
     ///
@@ -1530,6 +1568,7 @@ pub struct App {
     /// sent — is dropped instead of quietly repopulating freshly-cleared state with the
     /// previous account's data.
     pub(crate) account_epoch: u64,
+    browsing_epoch: u64,
     /// The id of the album/playlist card most recently asked to play — `Event::CardTracksReady`
     /// checks this before acting, the same "is this reply for what I most recently asked for"
     /// guard `album_for`/`playlist_for` already give the page loaders, since two cards' play
@@ -1551,6 +1590,7 @@ pub struct App {
     pub(crate) sign_in_busy: bool,
     /// Remembers which browser to open or retry if its login could not be used.
     pub(crate) login_browser: Option<crate::browser_cookies::Browser>,
+    pub(crate) spotify_signing_in: bool,
 
     /// What the Settings page shows about authentication.
     pub(crate) auth: crate::auth::AuthState,
@@ -1566,12 +1606,18 @@ pub struct App {
     pub(crate) library: crate::model::Library,
     pub(crate) library_loading: bool,
     pub(crate) library_error: Option<String>,
+    pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
+    library_songs_generation: u64,
+    pub(crate) library_failed_provider: Option<(crate::model::Provider, String)>,
+    pub(crate) library_source_retry: Option<(crate::model::Provider, u64)>,
+    library_source_retry_id: u64,
     pub(crate) library_loaded: bool,
     pub(crate) library_sort: LibrarySort,
     /// Every song the account has liked, built by a background page-through of Liked Music and
     /// cached to disk. There is no liked-by-artist endpoint — see `crate::liked`'s own doc — so
     /// this is what the artist page's "You Liked" section and the player bar's backfill read.
     pub(crate) liked: crate::liked::Index,
+    pub(crate) liked_music: ui::liked_music::State,
     /// A liked scan is in flight.
     pub(crate) liked_scanning: bool,
     /// The in-flight scan is a full one: its pages accumulate in `liked_buffer` and are swapped
@@ -1608,6 +1654,9 @@ pub struct App {
     pub(crate) playlist_suggestions_loading: bool,
     pub(crate) playlist_error: Option<String>,
     playlist_for: Option<String>,
+    playlist_revision: u64,
+    spotify_playlist_remove_pending: bool,
+    pub(crate) playlist_picker: ui::player_bar::PlaylistPicker,
     /// How the open playlist's track list is currently shown — client-side and session-only,
     /// reset whenever a different playlist opens (see [`PlaylistSort`]'s own doc comment for
     /// why this can't be a server order the way [`LibrarySort`] is).
@@ -1641,6 +1690,9 @@ pub struct App {
     /// goes through `Arc::make_mut`, which copies once and leaves the frame's snapshot alone.
     pub(crate) home: Option<Arc<Vec<crate::model::Shelf>>>,
     pub(crate) home_loading: bool,
+    home_request: u64,
+    home_requested_sources: (bool, bool),
+    pub(crate) home_warnings: Vec<String>,
     /// Where the feed continues past what is loaded; the next page is fetched as the listener
     /// scrolls toward the end. `None` once YouTube has sent it all.
     home_next: Option<String>,
@@ -1670,6 +1722,7 @@ pub struct App {
     pub(crate) q: PlayQueue,
     /// Set once we have asked mpv to play, so we can tell "not started yet" from "track ended".
     pub(crate) playback_started: bool,
+    spotify_pause: SpotifyPause,
     /// Distinguishes a finished track from an attempt that never produced audio; see [`StallGuard`].
     stall: StallGuard,
     /// The generation of the most recent `Backend::play`/`play_video` call — every
@@ -1737,6 +1790,7 @@ pub struct App {
     pub(crate) releases: Option<Arc<Vec<crate::model::Shelf>>>,
     pub(crate) releases_loading: bool,
     pub(crate) releases_error: Option<String>,
+    pub(crate) releases_warnings: Vec<String>,
     pub(crate) charts: Option<Arc<crate::model::ChartsFeed>>,
     pub(crate) charts_loading: bool,
     pub(crate) charts_error: Option<String>,
@@ -1778,6 +1832,7 @@ pub struct App {
     pub(crate) settings: crate::settings::Settings,
     /// The channels this account can browse as. Empty until Settings asks.
     pub(crate) accounts: Vec<crate::model::Account>,
+    pub(crate) profile: ui::profile::State,
     /// Channels opened from a link that names a person rather than an artist (a playlist's
     /// owner). The page cannot tell, before it loads, which kind of channel it is opening; this
     /// is how its skeleton takes the profile's shape instead of the artist's.
@@ -1818,6 +1873,7 @@ pub struct App {
     pub(crate) help_open: bool,
     /// The open tab of the Settings page. Kept for the session, not saved.
     pub(crate) settings_tab: ui::settings::SettingsTab,
+    pub(crate) settings_provider: crate::model::Provider,
     #[cfg(target_os = "macos")]
     pub(crate) media_fallback: crate::media_fallback::State,
     /// The "Order of homepage" window is open.
@@ -1962,6 +2018,22 @@ fn same_queue(a: &[Track], b: &[Track]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.video_id == y.video_id)
 }
 
+fn matched_artist_route(
+    id: &str,
+    pairs: impl IntoIterator<Item = (String, String)>,
+) -> Option<Route> {
+    let mut pairs = pairs
+        .into_iter()
+        .filter(|(youtube, spotify)| id == youtube.as_str() || id == spotify.as_str());
+    let (youtube, spotify) = pairs.next()?;
+    if pairs
+        .any(|(other_youtube, other_spotify)| other_youtube != youtube || other_spotify != spotify)
+    {
+        return None;
+    }
+    Some(Route::ArtistGroup { youtube, spotify })
+}
+
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How long "Later" on the update window keeps the launch check quiet about that release.
 const UPDATE_LATER_SECS: i64 = 24 * 60 * 60;
@@ -2074,7 +2146,14 @@ impl App {
         crate::tray::set_player_window(hwnd);
         let media = crate::media::Media::new(cc.egui_ctx.clone(), hwnd);
         // libmpv is initialised on the first play, not here — see `Player`.
-        let player = Some(Player::new());
+        let mut player = Player::new();
+        player.set_youtube_cache(
+            settings.youtube_cache_enabled,
+            settings.youtube_cache_limit_mb,
+        );
+        let player = Some(player);
+        crate::spotify_drm::set_cache_enabled(settings.spotify_cache_enabled);
+        crate::spotify_drm::set_cache_limit_mb(settings.spotify_cache_limit_mb);
         // A stored session is only a claim until YouTube confirms it — cookies expire between
         // runs, and asserting otherwise is what showed an empty library under a "Signed in" label.
         let checking = backend.is_signed_in_sync();
@@ -2126,10 +2205,21 @@ impl App {
             search_history: crate::search_history::load(),
             recent_dismissed: false,
             pending_search: search.is_some(),
+            search_provider: None,
+            searched_provider: None,
+            search_request: 0,
+            scoped_search_request: 0,
+            search_warnings: Vec::new(),
+            scoped_warnings: Vec::new(),
             searched: String::new(),
             searching: false,
             results: SearchResults::default(),
             results_generation: 0,
+            scoped_results_generation: 0,
+            search_source_rows: ui::source_rows::State::default(),
+            library_source_rows: ui::source_rows::State::default(),
+            playlist_source_rows: ui::source_rows::State::default(),
+            artist_sources: ui::artist_sources::State::default(),
             status: None,
             offline: false,
             premium: false,
@@ -2148,7 +2238,6 @@ impl App {
             scoped_error: None,
             search_failed: false,
             scoped_for: None,
-            search_all_indices: None,
             artist: None,
             artist_loading: false,
             artist_error: None,
@@ -2158,6 +2247,7 @@ impl App {
             album_error: None,
             album_for: None,
             account_epoch: 0,
+            browsing_epoch: 0,
             pending_card_play: None,
             smart_playlist_report: None,
             pending_page_action: None,
@@ -2165,15 +2255,22 @@ impl App {
             detected_browsers: None,
             sign_in_busy: false,
             login_browser: None,
+            spotify_signing_in: false,
             auth,
             startup_splash: checking,
             sign_in_error: None,
             library: crate::model::Library::default(),
             library_loading: false,
             library_error: None,
+            library_paging_errors: Vec::new(),
+            library_songs_generation: 0,
+            library_failed_provider: None,
+            library_source_retry: None,
+            library_source_retry_id: 0,
             library_loaded: false,
             library_sort: LibrarySort::Latest,
             liked: crate::liked::Index::default(),
+            liked_music: ui::liked_music::State::default(),
             liked_scanning: false,
             liked_full_scan: false,
             liked_buffer: Vec::new(),
@@ -2185,6 +2282,9 @@ impl App {
             playlist_suggestions_loading: false,
             playlist_error: None,
             playlist_for: None,
+            playlist_revision: 0,
+            spotify_playlist_remove_pending: false,
+            playlist_picker: ui::player_bar::PlaylistPicker::default(),
             playlist_sort: PlaylistSort::default(),
             playlist_sort_pending: false,
             playlist_original_order: None,
@@ -2194,6 +2294,9 @@ impl App {
             artist_liked_sort: PlaylistSort::default(),
             home: None,
             home_loading: false,
+            home_request: 0,
+            home_requested_sources: (false, false),
+            home_warnings: Vec::new(),
             home_next: None,
             home_more_loading: false,
             home_loaded_at: None,
@@ -2210,6 +2313,7 @@ impl App {
             now: NowPlaying::default(),
             q: PlayQueue::new(rng_seed()),
             playback_started: false,
+            spotify_pause: SpotifyPause::None,
             stall: StallGuard::default(),
             play_generation: 0,
             play_is_video: false,
@@ -2251,6 +2355,7 @@ impl App {
             releases: None,
             releases_loading: false,
             releases_error: None,
+            releases_warnings: Vec::new(),
             charts: None,
             charts_loading: false,
             charts_error: None,
@@ -2274,6 +2379,7 @@ impl App {
             images: Images::new(),
             settings,
             accounts: Vec::new(),
+            profile: ui::profile::State::default(),
             profile_ids: std::collections::HashSet::new(),
             autoscroll: autoscroll.then_some(0.0),
             autoscroll_max: autoscroll_max.unwrap_or(f32::INFINITY),
@@ -2284,6 +2390,7 @@ impl App {
             page_info: None,
             help_open: false,
             settings_tab: ui::settings::SettingsTab::default(),
+            settings_provider: crate::model::Provider::default(),
             #[cfg(target_os = "macos")]
             media_fallback: crate::media_fallback::State::default(),
             home_order_open: false,
@@ -2488,12 +2595,14 @@ impl App {
     pub(crate) fn forget_account_data(&mut self) {
         self.organizer = Default::default();
         self.account_epoch += 1;
+        self.invalidate_browsing();
         // Asked again for whichever channel comes next; until it answers, no downloads.
         self.premium = false;
         if self.signed_in() {
             self.backend.check_premium(self.account_epoch);
         }
         self.library = crate::model::Library::default();
+        self.library_paging_errors.clear();
         self.library_loaded = false;
         self.library_error = None;
         self.liked = crate::liked::Index::default();
@@ -2609,15 +2718,43 @@ impl App {
             self.backend
                 .set_audio_quality(self.settings.quality.format());
         }
-        // A new order re-arranges the feed already loaded. Settings is not Home, so nothing is
-        // being read while it moves, and late pages fold into their proper places too.
-        if self.settings.home_order != before.home_order
-            && self.home_filter.is_none()
-            && let Some(home) = &mut self.home
+        if (self.settings.youtube_cache_enabled != before.youtube_cache_enabled
+            || self.settings.youtube_cache_limit_mb != before.youtube_cache_limit_mb)
+            && let Some(player) = &mut self.player
         {
-            let order = crate::model::normalise_order(&self.settings.home_order);
-            let shelves: &mut Vec<crate::model::Shelf> = Arc::make_mut(home);
-            crate::model::order_home(shelves, &order);
+            player.set_youtube_cache(
+                self.settings.youtube_cache_enabled,
+                self.settings.youtube_cache_limit_mb,
+            );
+        }
+        if self.settings.spotify_cache_enabled != before.spotify_cache_enabled {
+            crate::spotify_drm::set_cache_enabled(self.settings.spotify_cache_enabled);
+        }
+        if self.settings.spotify_cache_limit_mb != before.spotify_cache_limit_mb {
+            crate::spotify_drm::set_cache_limit_mb(self.settings.spotify_cache_limit_mb);
+        }
+        if self.settings.home_source != before.home_source
+            || (self.settings.home_strict_order != before.home_strict_order
+                && self.home_filter.is_none())
+        {
+            self.home_filter = None;
+            self.clear_home();
+            self.scroll_to_top = true;
+            self.load_home();
+        } else if (self.settings.home_order != before.home_order
+            || self.settings.home_primary_provider != before.home_primary_provider)
+            && self.home_filter.is_none()
+        {
+            self.refresh_local_home();
+            self.scroll_to_top = true;
+        }
+        if self.settings.preferred_provider != before.preferred_provider
+            && let Some(shelves) = self.releases.as_mut()
+        {
+            ui::releases::order_releases(
+                Arc::make_mut(shelves).as_mut_slice(),
+                self.settings.preferred_provider,
+            );
         }
         if self.settings.account_page_id != before.account_page_id {
             self.backend
@@ -2963,22 +3100,19 @@ impl App {
                     if self.playback_started && !self.now.paused {
                         self.toggle_playback();
                     }
-                    if let Some(player) = self.player.as_ref() {
-                        player.seek(0.0);
-                    }
+                    self.seek_to(0.0);
                 }
                 playwire::Event::Next => self.skip(1),
                 playwire::Event::Previous => self.skip(-1),
                 playwire::Event::SeekTo(position) => {
-                    if let Some(player) = self.player.as_ref() {
-                        player.seek(position.as_secs_f64());
-                    }
+                    self.seek_to(position.as_secs_f64());
                 }
                 playwire::Event::SeekBy(offset) => {
-                    if let Some(player) = self.player.as_ref() {
-                        let to = (player.state().position + offset).max(0.0);
-                        player.seek(to);
-                    }
+                    let position = self
+                        .q
+                        .resume_here()
+                        .unwrap_or_else(|| self.read_player_state().position);
+                    self.seek_to((position + offset).max(0.0));
                 }
                 playwire::Event::SetVolume(v) => self.set_user_volume(v * 100.0),
                 playwire::Event::SetShuffle(on) => self.set_shuffle(on),
@@ -3094,7 +3228,6 @@ impl App {
             }
             return;
         };
-        let id = track.local_path.is_none().then(|| track.video_id.clone());
         let duration = if state.duration.is_finite() && state.duration > 0.0 {
             state.duration.round() as i64
         } else {
@@ -3109,7 +3242,7 @@ impl App {
                     0.0
                 };
             if last.listeners == listeners
-                && last.id == id
+                && last.id == track.video_id
                 && last.title == track.title
                 && last.artists == track.artists
                 && last.playing == playing
@@ -3123,8 +3256,13 @@ impl App {
             let start = unix_now() - (position as i64).clamp(0, duration);
             (start, start.saturating_add(duration))
         });
+        let provider = track.provider();
         discord.set(crate::discord::Presence {
-            youtube_id: id.clone(),
+            provider,
+            spotify_id: (provider == crate::model::Provider::Spotify)
+                .then(|| track.video_id.clone()),
+            youtube_id: (provider == crate::model::Provider::YouTubeMusic)
+                .then(|| track.video_id.clone()),
             room: self.room_id().map(str::to_owned),
             listeners,
             title: track.title.clone(),
@@ -3136,7 +3274,7 @@ impl App {
         });
         self.presence_key = Some(PresenceKey {
             listeners,
-            id,
+            id: track.video_id.clone(),
             playing,
             title: track.title.clone(),
             artists: track.artists.clone(),
@@ -3285,23 +3423,38 @@ impl App {
 
     /// The transport, once a pass: see [`eframe::App::logic`] for why it is not in `ui`.
     fn transport_step(&mut self, ctx: &egui::Context) {
+        if let Some(error) = self.player.as_mut().and_then(Player::take_error) {
+            self.play_generation = self.backend.cancel_play();
+            self.playback_started = false;
+            self.now.resolving = false;
+            self.now.error = Some(error.clone());
+            self.player_error = Some(error.clone());
+            self.listening.finish("failed");
+            self.stall.reset();
+            if let Some(player) = &self.player {
+                player.stop();
+            }
+            self.toast_error(&error);
+        }
         // Advance the queue when mpv runs out of file. A click in the last frame's panels that
         // loaded, paused or seeked is read here, a frame later.
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
-        if self.listening.due()
+        if self.spotify_pause != SpotifyPause::Released
+            && self.listening.due()
             && let Some(player) = &self.player
         {
             self.listening.observe(player.listening_sample());
         }
-        if self.listening.active() {
+        if self.spotify_pause != SpotifyPause::Released && self.listening.active() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         // Kept in sync here rather than at every `toggle_pause`/`set_paused` call site — mpv is
         // the single source of truth for this, and every row/card's play-vs-pause glyph reads
         // it off `now` rather than reaching for the player directly.
         self.now.paused = state.paused;
+        self.release_paused_spotify(ctx, state);
         // Restore the saved position once its track is loaded, and keep `playback.json` fresh.
         self.poll_playback(ctx, &state);
         if self.playback_started {
@@ -3364,7 +3517,8 @@ impl App {
             // Not before anything has played this session: a restored queue waits for play.
             let wants = self.settings.autoplay
                 && self.repeat != RepeatMode::All
-                && self.play_generation > 0;
+                && self.play_generation > 0
+                && !self.now.track.as_ref().is_some_and(Track::is_spotify);
             let remaining = self
                 .q
                 .remaining(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
@@ -3421,6 +3575,49 @@ impl App {
         }
     }
 
+    fn release_paused_spotify(&mut self, ctx: &egui::Context, state: crate::player::PlayerState) {
+        if self.spotify_pause == SpotifyPause::Released {
+            return;
+        }
+        let current = self
+            .q
+            .current()
+            .filter(|&index| self.q.get(index).is_some_and(Track::is_spotify));
+        let Some(index) = current
+            .filter(|_| self.playback_started && state.paused && !state.idle && !self.following())
+        else {
+            self.spotify_pause = SpotifyPause::None;
+            return;
+        };
+        let now = Instant::now();
+        let SpotifyPause::Waiting(since) = self.spotify_pause else {
+            self.spotify_pause = SpotifyPause::Waiting(now);
+            ctx.request_repaint_after(SPOTIFY_PAUSE_GRACE);
+            return;
+        };
+        if let Some(remaining) = SPOTIFY_PAUSE_GRACE.checked_sub(now.duration_since(since))
+            && !remaining.is_zero()
+        {
+            ctx.request_repaint_after(remaining);
+            return;
+        }
+        let Some(player) = self.player.as_ref() else {
+            return;
+        };
+        let sample = player.listening_sample();
+        if sample.seeking || sample.buffering || !sample.paused || sample.idle {
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return;
+        }
+        self.listening.observe(sample);
+        self.listening.suspend(sample.position, "paused");
+        self.q.set_resume(Some((index, sample.position)));
+        self.playback_started = false;
+        self.spotify_pause = SpotifyPause::Released;
+        player.suspend_spotify();
+        crate::spotify_drm::retire_idle_renderer();
+    }
+
     /// Act on a restored position once its track is actually playing, and save the transport
     /// every few seconds so a crash or a kill loses little.
     fn poll_playback(&mut self, ctx: &egui::Context, state: &crate::player::PlayerState) {
@@ -3473,6 +3670,10 @@ impl App {
     }
 
     fn start_download(&mut self, track: Track) {
+        if track.is_spotify() {
+            self.toast_error("Spotify downloads are unavailable");
+            return;
+        }
         if !self.can_download() {
             self.toast_error("Downloads need YouTube Premium");
             return;
@@ -3491,6 +3692,10 @@ impl App {
     }
 
     fn start_download_many(&mut self, tracks: Vec<Track>) {
+        if !tracks.is_empty() && tracks.iter().all(Track::is_spotify) {
+            self.toast_error("Spotify downloads are unavailable");
+            return;
+        }
         if !self.can_download() {
             self.toast_error("Downloads need YouTube Premium");
             return;
@@ -3498,7 +3703,8 @@ impl App {
         let pending: Vec<Track> = tracks
             .into_iter()
             .filter(|t| {
-                !self.downloads.entries.contains_key(&t.video_id)
+                !t.is_spotify()
+                    && !self.downloads.entries.contains_key(&t.video_id)
                     && !self.download_progress.contains_key(&t.video_id)
             })
             .collect();
@@ -3570,7 +3776,7 @@ impl App {
     fn start_track(
         &mut self,
         track: Track,
-        handle: Arc<libmpv2::Mpv>,
+        handle: PlaybackHandle,
         volume: f64,
         start_at: Option<f64>,
     ) -> u64 {
@@ -3582,9 +3788,15 @@ impl App {
             "starting track"
         );
         self.stall.on_load(&track.video_id, start_at);
-        if plays_as_video(self.video_open, track.wide) && self.ensure_video_surface() {
+        if let PlaybackHandle::Mpv(mpv) = &handle
+            && !track.is_spotify()
+            && plays_as_video(self.video_open, track.wide)
+            && self.ensure_video_surface()
+        {
             self.play_is_video = true;
-            return self.backend.play_video(track, handle, volume, start_at);
+            return self
+                .backend
+                .play_video(track, Arc::clone(mpv), volume, start_at);
         }
         // An audio-only track cannot stay in the video view.
         self.video_open = false;
@@ -3615,7 +3827,7 @@ impl App {
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        let Some(handle) = player.handle() else {
+        let Some(handle) = player.playback_handle(track.is_spotify(), self.ctx.clone()) else {
             return;
         };
         // The old file is still loaded for an instant; without clearing this, `poll_playback`
@@ -3635,7 +3847,10 @@ impl App {
     pub(crate) fn toggle_playback(&mut self) {
         self.note_playback_choice();
         match (&self.player, self.playback_started) {
-            (Some(pl), true) => pl.toggle_pause(),
+            (Some(pl), true) => {
+                self.spotify_pause = SpotifyPause::None;
+                pl.toggle_pause();
+            }
             (Some(_), false) if !self.q.is_empty() => {
                 self.play_index(self.q.current().unwrap_or_else(|| self.q.first()))
             }
@@ -3656,12 +3871,46 @@ impl App {
         self.history.current().clone()
     }
 
+    pub(crate) fn combined_artist_route(&self, id: &str) -> Option<Route> {
+        if !self.signed_in() || !crate::spotify::is_signed_in() {
+            return None;
+        }
+        let active = self
+            .artist_sources
+            .ids()
+            .map(|(youtube, spotify)| (youtube.to_owned(), spotify.to_owned()));
+        let history = self.history.entries.iter().filter_map(|route| {
+            if let Route::ArtistGroup { youtube, spotify } = route {
+                Some((youtube.clone(), spotify.clone()))
+            } else {
+                None
+            }
+        });
+        matched_artist_route(
+            id,
+            active
+                .into_iter()
+                .chain(self.search_source_rows.artist_profiles(id))
+                .chain(self.library_source_rows.artist_profiles(id))
+                .chain(self.playlist_source_rows.artist_profiles(id))
+                .chain(self.artist_sources.rows.artist_profiles(id))
+                .chain(history),
+        )
+    }
+
     pub(crate) fn navigate(&mut self, route: Route) {
-        if self.history.push(route) {
+        if self.history.push(route.canonical()) {
             self.scroll_to_top = true;
             self.note_route_entered();
             self.ensure_route_loaded();
         }
+    }
+
+    fn replace_route(&mut self, route: Route) {
+        self.history.entries[self.history.cursor] = route;
+        self.scroll_to_top = true;
+        self.note_route_entered();
+        self.ensure_route_loaded();
     }
 
     /// Mark the route now on screen as entered, for the pages that must refresh per visit.
@@ -3748,7 +3997,10 @@ impl App {
             return false;
         }
         let waiting = match self.auth {
-            crate::auth::AuthState::Checking => true,
+            crate::auth::AuthState::Checking => matches!(
+                self.effective_home_source(),
+                crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
+            ),
             // The shell paints before the landing feed is in — the rail, the chips, a grid of
             // skeletons — and that half-built frame is the same flash the splash exists to cover.
             // Hold until Home has something real to show, or has failed and has an error to show.
@@ -3769,13 +4021,42 @@ impl App {
     }
 
     pub(crate) fn ensure_route_loaded(&mut self) {
+        if self.update_search_providers() {
+            self.refresh_search_results();
+        }
+        let route = self.current_route();
+        let providers = self.available_providers();
+        if !providers.contains(&crate::model::Provider::YouTubeMusic)
+            && matches!(
+                route,
+                Route::Explore
+                    | Route::Charts(_)
+                    | Route::Moods
+                    | Route::Mood(_)
+                    | Route::HomeShelf(_)
+            )
+        {
+            let destination = if route == Route::Explore
+                && providers.contains(&crate::model::Provider::Spotify)
+            {
+                Route::NewReleases
+            } else {
+                Route::Home
+            };
+            self.replace_route(destination);
+            return;
+        }
+        self.load_spotify_profile();
         match self.current_route() {
+            Route::Profile => self.load_profile(),
             Route::Artist(id) => self.load_artist(id),
+            Route::ArtistGroup { youtube, spotify } => self.load_artist_group(youtube, spotify),
             // The liked page draws the artist's own `from_library`, so it only needs that
             // artist loaded — the same idempotent fetch, so Back/Forward and a cold entry work.
             Route::ArtistLiked(id) => self.load_artist(id),
             Route::Album(id) => self.load_album(id),
             Route::Playlist(id) => self.load_playlist(id),
+            Route::LikedMusic => self.load_liked_music(),
             Route::Mood(params) => self.load_mood_playlists(params),
             Route::Library => self.load_library(),
             Route::Home => self.load_home(),
@@ -3809,6 +4090,27 @@ impl App {
         self.backend.fetch_artist(id);
     }
 
+    fn load_artist_group(&mut self, youtube: String, spotify: String) {
+        if !self.signed_in() || !crate::spotify::is_signed_in() {
+            let route = if crate::spotify::is_signed_in() {
+                Route::Artist(spotify)
+            } else if self
+                .available_providers()
+                .contains(&crate::model::Provider::YouTubeMusic)
+            {
+                Route::Artist(youtube)
+            } else {
+                Route::Home
+            };
+            self.replace_route(route);
+            return;
+        }
+        if self.artist_sources.begin(&youtube, &spotify) {
+            self.backend.fetch_artist(youtube);
+            self.backend.fetch_artist(spotify);
+        }
+    }
+
     fn load_album(&mut self, id: String) {
         if self.album_for.as_deref() == Some(id.as_str()) {
             return;
@@ -3831,6 +4133,10 @@ impl App {
 
     /// [`Self::play_album`], for a playlist card.
     pub(crate) fn play_playlist(&mut self, id: String) {
+        if Route::Playlist(id.clone()).canonical() == Route::LikedMusic {
+            self.navigate(Route::LikedMusic);
+            return;
+        }
         self.choose_personal_playback();
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             if lp.rule.is_some() {
@@ -3853,6 +4159,7 @@ impl App {
             return;
         }
         self.playlist_for = Some(id.clone());
+        self.playlist_revision = self.playlist_revision.wrapping_add(1);
         self.smart_playlist_report = None;
         // A new playlist starts back at its own order, not whatever the last one was sorted
         // to, and cancels any load-the-rest-then-sort chain that was still in flight.
@@ -3918,6 +4225,25 @@ impl App {
             .fetch_liked(self.account_epoch, self.liked_full_scan);
     }
 
+    fn load_liked_music(&mut self) {
+        for provider in self.connected_providers() {
+            if ui::liked_music::SOURCES.contains(&provider) {
+                self.request_liked_music(provider, false);
+            }
+        }
+    }
+
+    pub(crate) fn request_liked_music(&mut self, provider: crate::model::Provider, more: bool) {
+        if let Some(token) = self.liked_music.request(provider, more) {
+            self.backend.fetch_liked_music(
+                provider,
+                token,
+                self.browsing_epoch,
+                self.liked_music.generation(provider),
+            );
+        }
+    }
+
     /// Write the liked index out when it has changed. Serialising a few thousand tracks is a
     /// handful of milliseconds, and this only runs after a scan completes or a rating changed —
     /// not per frame.
@@ -3933,17 +4259,28 @@ impl App {
     }
 
     /// The signed-in library, once per session. Signed out, the page shows a prompt instead.
-    fn load_library(&mut self) {
-        if !matches!(self.auth, crate::auth::AuthState::SignedIn { .. })
+    pub(crate) fn load_library(&mut self) {
+        if matches!(self.auth, crate::auth::AuthState::Checking)
+            || !self.has_library_account()
             || self.library_loaded
             || self.library_loading
             || self.library_error.is_some()
         {
             return;
         }
+        self.library_source_retry = None;
+        self.fetch_library();
+    }
+
+    fn fetch_library(&mut self) {
         self.library_loading = true;
-        self.backend
-            .fetch_library(self.library_sort.param(), self.account_epoch);
+        self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
+        self.backend.fetch_library(
+            self.library_sort.param(),
+            self.browsing_epoch,
+            self.library_songs_generation,
+            self.signed_in(),
+        );
     }
 
     /// The home feed loads once per filter and stays cached while it is selected.
@@ -3968,16 +4305,109 @@ impl App {
         }
     }
 
-    fn load_home(&mut self) {
-        if matches!(self.auth, crate::auth::AuthState::Checking) {
+    pub(crate) fn home_sources(&self) -> crate::providers::HomeSources {
+        use crate::settings::HomeSource;
+        let spotify = crate::spotify::is_signed_in();
+        let local = self.has_local_music();
+        match self.effective_home_source() {
+            HomeSource::Combined if self.home_filter.is_some() => crate::providers::HomeSources {
+                youtube: true,
+                spotify: false,
+            },
+            HomeSource::Combined => crate::providers::HomeSources {
+                youtube: self.signed_in() || (!spotify && !local),
+                spotify,
+            },
+            HomeSource::YouTubeMusic => crate::providers::HomeSources {
+                youtube: true,
+                spotify: false,
+            },
+            HomeSource::Spotify => crate::providers::HomeSources {
+                youtube: false,
+                spotify,
+            },
+            HomeSource::Local => crate::providers::HomeSources::default(),
+        }
+    }
+
+    pub(crate) fn home_includes_local(&self) -> bool {
+        if self.home_filter.is_some() {
+            return false;
+        }
+        match self.effective_home_source() {
+            crate::settings::HomeSource::Local => true,
+            crate::settings::HomeSource::Combined => self.has_local_music(),
+            _ => false,
+        }
+    }
+
+    fn prepare_home_shelves(
+        &self,
+        mut shelves: Vec<crate::model::Shelf>,
+    ) -> Vec<crate::model::Shelf> {
+        let sources = self.home_sources();
+        shelves.retain(|shelf| match crate::home_feed::shelf_provider(shelf) {
+            Some(crate::model::Provider::YouTubeMusic) => sources.youtube,
+            Some(crate::model::Provider::Spotify) => sources.spotify,
+            Some(crate::model::Provider::Local) => false,
+            None => sources.youtube || sources.spotify,
+        });
+        if self.home_includes_local() {
+            shelves.extend(crate::home_feed::local_shelves(
+                &self.local_tracks,
+                &self.library.playlists.items,
+            ));
+        }
+        self.order_home_shelves(&mut shelves);
+        shelves
+    }
+
+    fn refresh_local_home(&mut self) {
+        let sources = self.home_sources();
+        if (self.home.is_some() || self.home_loading)
+            && self.home_requested_sources != (sources.youtube, sources.spotify)
+        {
+            self.clear_home();
+            self.load_home();
             return;
         }
+        if let Some(home) = self.home.take() {
+            self.home = Some(Arc::new(
+                self.prepare_home_shelves(Arc::unwrap_or_clone(home)),
+            ));
+        }
+    }
+
+    fn load_home(&mut self) {
+        if matches!(self.auth, crate::auth::AuthState::Checking)
+            && matches!(
+                self.effective_home_source(),
+                crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
+            )
+        {
+            return;
+        }
+        let sources = self.home_sources();
+        let key = (sources.youtube, sources.spotify);
+        if (self.home.is_some() || self.home_loading) && self.home_requested_sources != key {
+            self.clear_home();
+        }
         if self.home.is_none() && self.home_error.is_none() && !self.home_loading {
+            self.home_requested_sources = key;
+            if !sources.youtube && !sources.spotify {
+                self.home = Some(Arc::new(self.prepare_home_shelves(Vec::new())));
+                self.home_chips.clear();
+                self.home_next = None;
+                self.home_loaded_at = Some(Instant::now());
+                return;
+            }
             self.home_loading = true;
             self.backend.fetch_home(
                 self.home_filter.clone(),
-                self.account_epoch,
+                self.browsing_epoch,
+                self.home_request,
                 self.home_fetch(),
+                sources,
             );
         }
     }
@@ -3985,7 +4415,11 @@ impl App {
     /// Empty the home feed and everything that hangs off it — for a sign-out, an account
     /// switch, a new filter.
     fn clear_home(&mut self) {
+        self.home_request = self.home_request.wrapping_add(1);
         self.home = None;
+        self.home_loading = false;
+        self.home_warnings.clear();
+        self.home_chips.clear();
         self.home_error = None;
         self.home_next = None;
         self.home_more_loading = false;
@@ -4005,8 +4439,12 @@ impl App {
         };
         self.home_more_loading = true;
         tracing::debug!("home: loading the next page of the feed");
-        self.backend
-            .fetch_home_more(token, self.home_filter.clone(), self.account_epoch);
+        self.backend.fetch_home_more(
+            token,
+            self.home_filter.clone(),
+            self.browsing_epoch,
+            self.home_request,
+        );
     }
 
     /// Whether the full list behind this shelf's "Show all" is on its way.
@@ -4030,12 +4468,25 @@ impl App {
             return;
         }
         tracing::info!("home feed is stale; refreshing it");
+        let sources = self.home_sources();
+        if !sources.youtube && !sources.spotify {
+            self.refresh_local_home();
+            self.home_loaded_at = Some(Instant::now());
+            return;
+        }
+        self.home_request = self.home_request.wrapping_add(1);
+        self.home_requested_sources = (sources.youtube, sources.spotify);
+        self.home_more_loading = false;
+        self.home_shelf_full = None;
+        self.home_shelf_loading = None;
         self.home_refreshing = true;
         self.home_loading = true;
         self.backend.fetch_home(
             self.home_filter.clone(),
-            self.account_epoch,
+            self.browsing_epoch,
+            self.home_request,
             self.home_fetch(),
+            sources,
         );
     }
 
@@ -4049,11 +4500,15 @@ impl App {
         {
             return;
         }
-        let Some(shelf) = self
-            .home
-            .as_ref()
-            .and_then(|h| h.iter().find(|s| s.title == title))
-        else {
+        let Some(shelf) = self.home.as_ref().and_then(|h| {
+            h.iter().find(|s| {
+                s.title == title
+                    && crate::home_feed::shelf_provider(s)
+                        == Some(crate::model::Provider::YouTubeMusic)
+                    && s.more_browse_id.is_some()
+                    && s.more_params.is_some()
+            })
+        }) else {
             return;
         };
         let (Some(browse_id), Some(params)) =
@@ -4064,7 +4519,7 @@ impl App {
         self.home_shelf_full = None;
         self.home_shelf_loading = Some(title.to_owned());
         self.backend
-            .fetch_home_shelf(browse_id, params, title.to_owned());
+            .fetch_home_shelf(browse_id, params, title.to_owned(), self.home_request);
     }
 
     /// Filter the home feed through a mood-bar chip. `None` clears back to the default feed,
@@ -4077,14 +4532,8 @@ impl App {
         }
         self.home_filter = params;
         self.clear_home();
-        self.home_error = None;
-        self.home_loading = true;
         self.scroll_to_top = true;
-        self.backend.fetch_home(
-            self.home_filter.clone(),
-            self.account_epoch,
-            self.home_fetch(),
-        );
+        self.load_home();
     }
 
     fn artist_is_for(&self, id: &str) -> bool {
@@ -4118,8 +4567,59 @@ impl App {
     pub(crate) fn own_channel_id(&self) -> Option<&str> {
         self.accounts
             .iter()
-            .find(|account| account.selected)
+            .find(|account| account.page_id == self.settings.account_page_id)
+            .or_else(|| self.accounts.iter().find(|account| account.selected))
+            .or(self.accounts.first())
             .and_then(|account| account.channel_id.as_deref())
+    }
+
+    fn load_spotify_profile(&mut self) {
+        if !crate::spotify::is_signed_in() {
+            self.profile.spotify = None;
+            self.profile.spotify_loading = false;
+            self.profile.spotify_error = None;
+            return;
+        }
+        if self.profile.spotify.is_none()
+            && !self.profile.spotify_loading
+            && self.profile.spotify_error.is_none()
+        {
+            self.profile.spotify_loading = true;
+            self.backend.fetch_spotify_profile();
+        }
+    }
+
+    pub(crate) fn load_profile(&mut self) {
+        self.load_spotify_profile();
+        self.load_library();
+        let youtube_id = self
+            .signed_in()
+            .then(|| self.own_channel_id())
+            .flatten()
+            .map(str::to_owned);
+        if self.profile.youtube_id != youtube_id {
+            self.profile.youtube_id = youtube_id;
+            self.profile.youtube = None;
+            self.profile.youtube_error = None;
+            self.profile.youtube_loading = false;
+        }
+        if self.profile.youtube.is_none()
+            && !self.profile.youtube_loading
+            && self.profile.youtube_error.is_none()
+            && let Some(id) = self.profile.youtube_id.clone()
+        {
+            self.profile.youtube_loading = true;
+            self.backend.fetch_artist(id);
+        }
+    }
+
+    pub(crate) fn retry_profile(&mut self) {
+        self.profile.spotify_error = None;
+        self.profile.youtube_error = None;
+        if self.library_error.take().is_some() {
+            self.library_loaded = false;
+        }
+        self.load_profile();
     }
 
     fn album_is_for(&self, id: &str) -> bool {
@@ -4130,6 +4630,24 @@ impl App {
         self.playlist_for.as_deref() == Some(id)
     }
 
+    pub(crate) fn playing_spotify_playlist_item(&self) -> Option<(&str, &str)> {
+        let track = self.now.track.as_ref()?;
+        let uid = track.set_video_id.as_deref()?;
+        let playlist = self.playlist.as_ref()?;
+        if !playlist.id.starts_with("spotify:playlist:")
+            || !matches!(self.history.current(), Route::Playlist(id) if id == &playlist.id)
+        {
+            return None;
+        }
+        playlist
+            .tracks
+            .iter()
+            .any(|item| {
+                item.video_id == track.video_id && item.set_video_id.as_deref() == Some(uid)
+            })
+            .then_some((playlist.id.as_str(), uid))
+    }
+
     /// Clear whatever latched the current route's failure and fetch it again. This is what the
     /// "Try again" buttons call: navigating to the route you are already on is a no-op, so a
     /// retry has to go through the state rather than through the history. A retry refetches
@@ -4137,6 +4655,12 @@ impl App {
     /// lands at the failed attempt's offset.
     pub(crate) fn retry_route(&mut self) {
         match self.current_route() {
+            Route::Profile => self.retry_profile(),
+            Route::ArtistGroup { .. } => {
+                for id in self.artist_sources.retry() {
+                    self.backend.fetch_artist(id);
+                }
+            }
             Route::Artist(_) | Route::ArtistLiked(_) => {
                 self.artist_for = None;
                 self.artist_error = None;
@@ -4149,6 +4673,7 @@ impl App {
                 self.playlist_for = None;
                 self.playlist_error = None;
             }
+            Route::LikedMusic => self.liked_music.clear_errors(),
             Route::Mood(_) => {
                 self.mood_playlists_params = None;
                 self.mood_playlists_error = None;
@@ -4170,6 +4695,7 @@ impl App {
             }
             Route::NewReleases => {
                 self.releases_error = None;
+                self.releases_warnings.clear();
                 self.releases = None;
             }
             Route::Charts(_) => {
@@ -4233,12 +4759,14 @@ impl App {
         }
         self.library_sort = sort;
         self.library = crate::model::Library::default();
+        self.library_paging_errors.clear();
+        self.library_failed_provider = None;
+        self.library_source_retry = None;
         self.library_loaded = false;
         self.library_error = None;
         self.resync_local_playlists();
-        if matches!(self.auth, crate::auth::AuthState::SignedIn { .. }) {
-            self.library_loading = true;
-            self.backend.fetch_library(sort.param(), self.account_epoch);
+        if self.has_library_account() {
+            self.fetch_library();
         }
     }
 
@@ -4637,11 +5165,20 @@ impl App {
         };
         playlist.tracks.loading = true;
         let id = playlist.id.clone();
-        self.backend.fetch_playlist_more(id, token);
+        self.backend
+            .fetch_playlist_more(id, token, self.playlist_revision);
     }
 
     /// Ask for the next page of one library section, if there is one and none is in flight.
     pub(crate) fn load_more_library(&mut self, section: crate::api::LibrarySection) {
+        if self.library_source_retry.is_some()
+            || self
+                .library_paging_errors
+                .iter()
+                .any(|(failed, _)| *failed == section)
+        {
+            return;
+        }
         let (can, token) = match section {
             crate::api::LibrarySection::Songs => (
                 self.library.songs.can_load_more(),
@@ -4669,8 +5206,67 @@ impl App {
             crate::api::LibrarySection::Albums => self.library.albums.loading = true,
             crate::api::LibrarySection::Playlists => self.library.playlists.loading = true,
         }
-        self.backend
-            .fetch_library_more(section, token, self.account_epoch);
+        self.backend.fetch_library_more(
+            section,
+            token,
+            self.browsing_epoch,
+            self.library_songs_generation,
+        );
+    }
+
+    pub(crate) fn retry_library_more(&mut self, section: crate::api::LibrarySection) {
+        self.library_paging_errors
+            .retain(|(failed, _)| *failed != section);
+        self.load_more_library(section);
+    }
+
+    fn remove_spotify_library_song(&mut self, video_id: &str) {
+        self.library
+            .songs
+            .items
+            .retain(|song| song.video_id != video_id);
+        if self.library_loading {
+            self.fetch_library();
+        } else if matches!(
+            self.library_source_retry,
+            Some((crate::model::Provider::Spotify, _))
+        ) {
+            self.library_source_retry = None;
+            self.retry_library_provider();
+        } else if crate::providers::restart_spotify_song_paging(&mut self.library.songs) {
+            self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
+            self.library_paging_errors
+                .retain(|(section, _)| *section != crate::api::LibrarySection::Songs);
+        }
+    }
+
+    pub(crate) fn can_retry_library_provider(&self) -> bool {
+        self.library_loaded
+            && !self.library_loading
+            && self.library_source_retry.is_none()
+            && !self.library.songs.loading
+            && !self.library.artists.loading
+            && !self.library.albums.loading
+            && !self.library.playlists.loading
+    }
+
+    pub(crate) fn retry_library_provider(&mut self) {
+        if !self.can_retry_library_provider() {
+            return;
+        }
+        let Some((provider, _)) = self.library_failed_provider.as_ref() else {
+            return;
+        };
+        let provider = *provider;
+        self.library_source_retry_id = self.library_source_retry_id.wrapping_add(1);
+        let request = self.library_source_retry_id;
+        self.library_source_retry = Some((provider, request));
+        self.backend.retry_library_provider(
+            provider,
+            self.library_sort.param(),
+            self.browsing_epoch,
+            request,
+        );
     }
 
     /// A load the page on screen is waiting for — what its skeletons stand in for. Not the song
@@ -4684,6 +5280,11 @@ impl App {
     fn loads(&self) -> impl Iterator<Item = Load> {
         [
             (self.searching, Load::Search),
+            (
+                matches!(self.current_route(), Route::Profile)
+                    && (self.profile.spotify_loading || self.profile.youtube_loading),
+                Load::Profile,
+            ),
             (self.artist_loading, Load::Artist),
             (self.album_loading, Load::Album),
             (self.playlist_loading, Load::Playlist),
@@ -4794,22 +5395,25 @@ impl App {
     /// A stored cookie counts: the fetch fires while the session is still `Checking`, and a
     /// refusal simply leaves the rail empty — the state that would have shown anyway.
     fn load_sidebar_playlists(&mut self) {
-        if !matches!(
+        let youtube = matches!(
             self.auth,
             crate::auth::AuthState::SignedIn { .. } | crate::auth::AuthState::Checking
-        ) || self.library_loaded
+        );
+        if (!youtube && !crate::spotify::is_signed_in())
+            || self.library_loaded
             || self
                 .library
                 .playlists
                 .items
                 .iter()
-                .any(|p| p.source == crate::model::PlaylistSource::YouTube)
+                .any(|p| p.source != crate::model::PlaylistSource::Local)
             || self.library.playlists.loading
         {
             return;
         }
         self.library.playlists.loading = true;
-        self.backend.fetch_library_playlists(self.account_epoch);
+        self.backend
+            .fetch_library_playlists(self.browsing_epoch, youtube);
     }
 
     /// Mirrors `local_playlists` into `library.playlists.items` as `PlaylistRef`s, so the
@@ -4826,7 +5430,29 @@ impl App {
             .playlists
             .items
             .extend(self.local_playlists.iter().map(local_playlist_ref));
+        if self.has_library_account()
+            && !self
+                .library
+                .playlists
+                .iter()
+                .any(|playlist| crate::model::is_liked_auto(&playlist.id))
+        {
+            self.library.playlists.items.insert(
+                0,
+                crate::model::PlaylistRef {
+                    id: "VLLM".to_owned(),
+                    title: ui::liked_music::TITLE.to_owned(),
+                    author: String::new(),
+                    author_id: None,
+                    track_count: None,
+                    thumbnail: None,
+                    editable: false,
+                    source: crate::model::PlaylistSource::YouTube,
+                },
+            );
+        }
         self.apply_playlist_order();
+        self.refresh_local_home();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -4877,23 +5503,81 @@ impl App {
         if query.is_empty() {
             return;
         }
+        self.update_search_providers();
         // Before the repeat check below: searching the same thing again still moves it up.
         self.search_history.record(&query);
         self.save_search_history();
-        if query == self.searched {
+        if query == "spotify:collection:tracks" {
+            self.navigate(Route::LikedMusic);
+            return;
+        }
+        if let Some(uri) = crate::spotify::resource_uri(&query) {
+            if !crate::spotify::is_signed_in() {
+                self.settings_tab = ui::settings::SettingsTab::Providers;
+                self.settings_provider = crate::model::Provider::Spotify;
+                self.navigate(Route::Settings);
+                return;
+            }
+            let route = if uri.starts_with("spotify:album:") {
+                Some(Route::Album(uri))
+            } else if uri.starts_with("spotify:artist:") {
+                Some(Route::Artist(uri))
+            } else if uri.starts_with("spotify:playlist:") {
+                Some(Route::Playlist(uri))
+            } else {
+                None
+            };
+            if let Some(route) = route {
+                self.navigate(route);
+                return;
+            }
+            self.search_provider = Some(crate::model::Provider::Spotify);
+            self.search_scope = SearchScope::All;
+        }
+        if query == self.searched && self.search_provider == self.searched_provider {
             return;
         }
 
-        self.searched = query.clone();
-        self.searching = true;
-        self.status = None;
-        // Drop the previous query's rows so the page shows its skeleton instead of results that
-        // no longer answer what was asked.
+        self.start_search(query);
+    }
+
+    fn clear_search_results(&mut self) {
+        self.search_request = self.search_request.wrapping_add(1);
+        self.scoped_search_request = self.scoped_search_request.wrapping_add(1);
         self.results = SearchResults::default();
         self.results_generation += 1;
-        self.backend.search(query);
+        self.scoped_results_generation = self.scoped_results_generation.wrapping_add(1);
+        self.scoped_for = None;
+        self.scoped_results.clear();
+        self.scoped_error = None;
+        self.scoped_loading = false;
+        self.search_warnings.clear();
+        self.scoped_warnings.clear();
+        self.status = None;
+        self.search_failed = false;
+        self.searching = false;
+    }
+
+    fn start_search(&mut self, query: String) {
+        self.update_search_providers();
+        self.clear_search_results();
+        self.searched_provider = self.search_provider;
+        self.searched = query.clone();
+        self.searching = true;
+        self.backend
+            .search(self.search_request, self.search_provider, query);
         if self.search_scope != SearchScope::All {
             self.fetch_scoped_search(self.search_scope);
+        }
+    }
+
+    fn refresh_search_results(&mut self) {
+        let query = self.searched.clone();
+        self.clear_suggestions();
+        if query.is_empty() {
+            self.clear_search_results();
+        } else {
+            self.start_search(query);
         }
     }
 
@@ -4919,7 +5603,8 @@ impl App {
             return Some(SUGGEST_DEBOUNCE - waited);
         }
         self.suggestions_for = Some(self.query.clone());
-        self.backend.fetch_suggestions(self.query.clone());
+        self.backend
+            .fetch_suggestions(self.search_provider, self.query.clone());
         None
     }
 
@@ -4931,23 +5616,28 @@ impl App {
         if scope == SearchScope::All || self.searched.is_empty() {
             return;
         }
-        if self
-            .scoped_for
-            .as_ref()
-            .is_some_and(|(q, s)| q == &self.searched && *s == scope)
-        {
+        if self.scoped_for.as_ref().is_some_and(|(p, q, s)| {
+            *p == self.search_provider && q == &self.searched && *s == scope
+        }) {
             return;
         }
-        self.scoped_for = Some((self.searched.clone(), scope));
+        self.scoped_for = Some((self.search_provider, self.searched.clone(), scope));
+        self.scoped_search_request = self.scoped_search_request.wrapping_add(1);
         self.scoped_loading = true;
         self.scoped_error = None;
         self.scoped_results.clear();
-        self.backend.search_scoped(self.searched.clone(), scope);
+        self.scoped_warnings.clear();
+        self.backend.search_scoped(
+            self.scoped_search_request,
+            self.search_provider,
+            self.searched.clone(),
+            scope,
+        );
     }
 
-    /// All sign-in entry points share the Account tab and its platform-aware choices.
     pub(crate) fn sign_in(&mut self) {
-        self.settings_tab = ui::settings::SettingsTab::Account;
+        self.settings_tab = ui::settings::SettingsTab::Providers;
+        self.settings_provider = crate::model::Provider::YouTubeMusic;
         self.detected_browsers = None;
         self.navigate(Route::Settings);
     }
@@ -4957,6 +5647,27 @@ impl App {
         self.sign_in_error = None;
         self.backend.sign_in_from_browser(browser.arg.clone());
         self.login_browser = Some(browser);
+    }
+
+    pub(crate) fn select_search_provider(&mut self, provider: Option<crate::model::Provider>) {
+        let available = self.available_providers();
+        let provider = if available.len() == 1 {
+            available.first().copied()
+        } else {
+            provider.filter(|provider| available.contains(provider))
+        };
+        if self.search_provider == provider {
+            return;
+        }
+        self.search_provider = provider;
+        self.search_scope = SearchScope::All;
+        self.clear_search_results();
+        self.clear_suggestions();
+        let query = self.query.clone();
+        self.searched.clear();
+        if !query.trim().is_empty() {
+            self.search_again(query);
+        }
     }
 
     /// Run `query` as a fresh search, even when it is the one on screen: Try again after a
@@ -4986,6 +5697,11 @@ impl App {
             self.forward();
         }
         for event in self.backend.drain() {
+            let event = match event {
+                Event::BrowseScoped { epoch, event } if epoch == self.browsing_epoch => *event,
+                Event::BrowseScoped { .. } => continue,
+                event => event,
+            };
             // A test aid for debug builds: pages never land, so each one stays on its skeleton
             // while the session and the sidebar load as usual — the only way to see a signed-in
             // page's placeholder for long enough to screenshot it.
@@ -4993,10 +5709,50 @@ impl App {
             if std::env::var_os("MOOSIK_HOLD_LOADING").is_some() && event.is_page_load() {
                 continue;
             }
+            match &event {
+                Event::ArtistLoaded { id, artist } => {
+                    if self.artist_sources.contains(id) {
+                        self.artist_sources.loaded(id, artist.clone());
+                    }
+                    if self.profile.youtube_id.as_deref() == Some(id.as_str()) {
+                        self.profile.youtube = Some(artist.clone());
+                        self.profile.youtube_loading = false;
+                        self.profile.youtube_error = None;
+                    }
+                }
+                Event::ArtistFailed { id, error } => {
+                    if self.artist_sources.contains(id) {
+                        self.artist_sources.failed(id, error.clone());
+                    }
+                    if self.profile.youtube_id.as_deref() == Some(id.as_str()) {
+                        self.profile.youtube_loading = false;
+                        self.profile.youtube_error = Some(error.clone());
+                    }
+                }
+                _ => {}
+            }
             if event.error().is_some_and(crate::api::looks_offline) {
                 self.note_offline();
             }
             match event {
+                Event::BrowseScoped { .. } => {}
+                Event::SpotifyProfileLoaded { profile } => {
+                    self.profile.spotify_loading = false;
+                    if crate::spotify::is_signed_in() {
+                        self.profile.spotify = Some(profile);
+                        self.profile.spotify_error = None;
+                    }
+                }
+                Event::SpotifyProfileFailed { error } => {
+                    self.profile.spotify_loading = false;
+                    if crate::spotify::is_signed_in() {
+                        self.profile.spotify_error = Some(error);
+                    }
+                }
+                Event::ProviderBrowseWarning { message, epoch } if epoch == self.browsing_epoch => {
+                    self.toast_error(&message);
+                }
+                Event::ProviderBrowseWarning { .. } => {}
                 Event::PremiumChecked { premium, epoch } if epoch == self.account_epoch => {
                     if let Some(premium) = premium {
                         tracing::info!(premium, "YouTube Premium checked");
@@ -5014,21 +5770,54 @@ impl App {
                 }
                 // A slow search that finished after the user typed something else must not
                 // replace fresher results.
-                Event::SearchDone { query, results } if query == self.searched => {
+                Event::SearchDone {
+                    request,
+                    provider,
+                    query,
+                    results,
+                    warnings,
+                } if request == self.search_request
+                    && query == self.searched
+                    && provider == self.search_provider
+                    && provider == self.searched_provider =>
+                {
                     self.searching = false;
                     self.search_failed = false;
-                    self.status = results
-                        .is_empty()
+                    self.search_warnings = warnings;
+                    self.status = (results.is_empty() && self.search_warnings.is_empty())
                         .then(|| format!("No results for “{query}”."));
                     self.results = results;
                     self.results_generation += 1;
-                    let playable = self.results.playable();
-                    if self.autoplay && !playable.is_empty() {
-                        self.autoplay = false;
-                        self.start_from(playable, 0);
+                    if self.autoplay {
+                        let groups = crate::source_groups::group_entries(
+                            &self.results.items,
+                            self.search_provider.is_none() && self.can_group_sources(),
+                        );
+                        let playable: Vec<_> = groups
+                            .iter()
+                            .filter_map(|group| {
+                                group
+                                    .preferred_entry(self.settings.preferred_provider, None)
+                                    .and_then(Entry::track)
+                                    .cloned()
+                            })
+                            .collect();
+                        if !playable.is_empty() {
+                            self.autoplay = false;
+                            self.start_from(playable, 0);
+                        }
                     }
                 }
-                Event::SearchFailed { query, error } if query == self.searched => {
+                Event::SearchFailed {
+                    request,
+                    provider,
+                    query,
+                    error,
+                } if request == self.search_request
+                    && query == self.searched
+                    && provider == self.search_provider
+                    && provider == self.searched_provider =>
+                {
                     tracing::warn!(error = %error, "search failed");
                     self.searching = false;
                     self.search_failed = true;
@@ -5040,25 +5829,38 @@ impl App {
                 // `searched` — a scope switch (or a fresh search) can outrun an earlier
                 // scoped fetch, and that reply must not overwrite a newer one.
                 Event::ScopedSearchDone {
+                    request,
+                    provider,
                     query,
                     scope,
                     results,
-                } if self
-                    .scoped_for
-                    .as_ref()
-                    .is_some_and(|(q, s)| q == &query && *s == scope) =>
+                    warnings,
+                } if request == self.scoped_search_request
+                    && self.scoped_for.as_ref().is_some_and(|(p, q, s)| {
+                        *p == provider
+                            && provider == self.search_provider
+                            && q == &query
+                            && *s == scope
+                    }) =>
                 {
                     self.scoped_loading = false;
                     self.scoped_results = results;
+                    self.scoped_results_generation = self.scoped_results_generation.wrapping_add(1);
+                    self.scoped_warnings = warnings;
                 }
                 Event::ScopedSearchFailed {
+                    request,
+                    provider,
                     query,
                     scope,
                     error,
-                } if self
-                    .scoped_for
-                    .as_ref()
-                    .is_some_and(|(q, s)| q == &query && *s == scope) =>
+                } if request == self.scoped_search_request
+                    && self.scoped_for.as_ref().is_some_and(|(p, q, s)| {
+                        *p == provider
+                            && provider == self.search_provider
+                            && q == &query
+                            && *s == scope
+                    }) =>
                 {
                     tracing::warn!(scope = scope.label(), error = %error, "scoped search failed");
                     self.scoped_loading = false;
@@ -5068,14 +5870,32 @@ impl App {
 
                 // A reply for a query no longer in the box is dropped, the same staleness guard
                 // `scoped_for` uses: typing on must not flash the previous suggestions back up.
-                Event::SuggestionsDone { query, items } => {
-                    if self.query == query {
+                Event::SuggestionsDone {
+                    provider,
+                    query,
+                    items,
+                    source_revision,
+                } => {
+                    if self.query == query
+                        && provider == self.search_provider
+                        && source_revision == self.backend.search_sources_revision()
+                    {
                         self.suggestions = items;
                         self.suggestions_for = Some(query);
                         self.suggestion_cursor = None;
                     }
                 }
-                Event::SuggestionsFailed { query, error } => {
+                Event::SuggestionsFailed {
+                    provider,
+                    query,
+                    error,
+                    source_revision,
+                } => {
+                    if provider != self.search_provider
+                        || source_revision != self.backend.search_sources_revision()
+                    {
+                        continue;
+                    }
                     tracing::debug!(%query, %error, "suggestions failed");
                 }
 
@@ -5112,6 +5932,15 @@ impl App {
                     self.local_scan_error = None;
                     self.local_tracks = tracks;
                     self.local_tracks_generation += 1;
+                    self.refresh_local_home();
+                    self.backend
+                        .set_local_search_tracks(self.local_tracks.clone());
+                    if self.update_search_providers()
+                        || self.search_provider.is_none()
+                        || self.search_provider == Some(crate::model::Provider::Local)
+                    {
+                        self.refresh_search_results();
+                    }
                 }
                 Event::LocalScanFailed { error } => {
                     self.local_scanning = false;
@@ -5292,7 +6121,7 @@ impl App {
                     tracks,
                     incomplete,
                 } => {
-                    if request == self.playback_choice && epoch == self.account_epoch {
+                    if request == self.playback_choice && epoch == self.browsing_epoch {
                         let empty = tracks.is_empty();
                         if !empty {
                             self.shuffle_play(tracks);
@@ -5328,7 +6157,9 @@ impl App {
                     }
                 }
                 // A further page of the open playlist, appended in order.
-                Event::PlaylistMore { id, page } if self.playlist_is_for(&id) => {
+                Event::PlaylistMore { id, revision, page }
+                    if self.playlist_is_for(&id) && revision == self.playlist_revision =>
+                {
                     if let Some(playlist) = self.playlist.as_mut() {
                         let next = page.next;
                         playlist.tracks.extend(
@@ -5361,7 +6192,11 @@ impl App {
                         }
                     }
                 }
-                Event::PlaylistMoreFailed { id, error } if self.playlist_is_for(&id) => {
+                Event::PlaylistMoreFailed {
+                    id,
+                    revision,
+                    error,
+                } if self.playlist_is_for(&id) && revision == self.playlist_revision => {
                     tracing::warn!(%id, %error, "could not load another playlist page");
                     if let Some(playlist) = self.playlist.as_mut() {
                         playlist.tracks.loading = false;
@@ -5404,10 +6239,19 @@ impl App {
 
                 // See `App::account_epoch`'s own doc comment: a reply for an account already
                 // switched away from is dropped rather than repopulating cleared state.
-                Event::LibraryLoaded { library, epoch } if epoch == self.account_epoch => {
+                Event::LibraryLoaded {
+                    library,
+                    failed_provider,
+                    epoch,
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && songs_generation == self.library_songs_generation =>
+                {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
                     self.library = library;
+                    self.library_paging_errors.clear();
+                    self.library_failed_provider = failed_provider;
                     self.library_loaded = true;
                     self.resync_local_playlists();
                     self.apply_playlist_order();
@@ -5422,6 +6266,37 @@ impl App {
                     }
                 }
                 Event::LibraryLoaded { .. } => {}
+                Event::LibraryProviderRetried {
+                    epoch,
+                    request,
+                    provider,
+                    result,
+                } if epoch == self.browsing_epoch
+                    && self.library_source_retry == Some((provider, request)) =>
+                {
+                    self.library_source_retry = None;
+                    match result {
+                        Ok(loaded) => {
+                            crate::providers::merge_recovered_library(
+                                &mut self.library,
+                                loaded.value,
+                                provider,
+                            );
+                            self.library_failed_provider = None;
+                            self.organizer.page_failed = false;
+                            self.resync_local_playlists();
+                            for warning in loaded.warnings {
+                                self.toast_error(&warning);
+                            }
+                            if let Some(mut track) = self.now.track.take() {
+                                self.reconcile_state(&mut track);
+                                self.now.track = Some(track);
+                            }
+                        }
+                        Err(error) => self.library_failed_provider = Some((provider, error)),
+                    }
+                }
+                Event::LibraryProviderRetried { .. } => {}
                 // The liked scan: pages accumulate, then a completed full scan swaps in (so an
                 // unlike made elsewhere is dropped, not merged back) and the index is written
                 // out. A quick refresh merges as pages arrive. Epoch-guarded like the library's.
@@ -5450,21 +6325,31 @@ impl App {
                     self.save_liked_if_dirty();
                 }
                 Event::LikedScanDone { .. } => {}
+                Event::LikedMusicPage {
+                    provider,
+                    epoch,
+                    generation,
+                    result,
+                } if epoch == self.browsing_epoch
+                    && generation == self.liked_music.generation(provider) =>
+                {
+                    self.liked_music.loaded(provider, result);
+                }
+                Event::LikedMusicPage { .. } => {}
                 // A further page of one section, appended in order.
                 Event::LibraryMore {
-                    epoch,
                     section,
                     page,
-                } if epoch == self.account_epoch => {
-                    let next = page.next;
+                    epoch,
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && (section != crate::api::LibrarySection::Songs
+                        || songs_generation == self.library_songs_generation) =>
+                {
                     match section {
-                        crate::api::LibrarySection::Songs => self.library.songs.extend(
-                            page.items
-                                .into_iter()
-                                .filter_map(|e| e.track().cloned())
-                                .collect(),
-                            next,
-                        ),
+                        crate::api::LibrarySection::Songs => {
+                            crate::providers::append_library_songs(&mut self.library.songs, page)
+                        }
                         crate::api::LibrarySection::Artists => self.library.artists.extend(
                             page.items
                                 .into_iter()
@@ -5473,7 +6358,7 @@ impl App {
                                     _ => None,
                                 })
                                 .collect(),
-                            next,
+                            page.next,
                         ),
                         crate::api::LibrarySection::Albums => self.library.albums.extend(
                             page.items
@@ -5483,7 +6368,7 @@ impl App {
                                     _ => None,
                                 })
                                 .collect(),
-                            next,
+                            page.next,
                         ),
                         crate::api::LibrarySection::Playlists => {
                             self.library.playlists.extend(
@@ -5494,7 +6379,7 @@ impl App {
                                         _ => None,
                                     })
                                     .collect(),
-                                next,
+                                page.next,
                             );
                             self.apply_playlist_order();
                         }
@@ -5503,7 +6388,8 @@ impl App {
                 // The sidebar's own prefetch. It *replaces* rather than appends, and yields
                 // entirely to a real library load: the two race, and appending after one had
                 // already landed listed every playlist twice.
-                Event::SidebarPlaylists { page, epoch } if epoch == self.account_epoch => {
+                Event::LibraryMore { .. } => {}
+                Event::SidebarPlaylists { page, epoch } if epoch == self.browsing_epoch => {
                     if self.library_loaded {
                         self.library.playlists.loading = false;
                     } else {
@@ -5522,17 +6408,24 @@ impl App {
                     }
                 }
                 Event::SidebarPlaylists { .. } => {}
-                Event::SidebarPlaylistsFailed { error, epoch } if epoch == self.account_epoch => {
+                Event::SidebarPlaylistsFailed { error, epoch } if epoch == self.browsing_epoch => {
                     tracing::warn!(%error, "could not load the sidebar's playlists");
                     self.library.playlists.loading = false;
                 }
                 Event::SidebarPlaylistsFailed { .. } => {}
                 Event::LibraryMoreFailed {
-                    epoch,
                     section,
                     error,
-                } if epoch == self.account_epoch => {
+                    epoch,
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && (section != crate::api::LibrarySection::Songs
+                        || songs_generation == self.library_songs_generation) =>
+                {
                     tracing::warn!(?section, %error, "could not load another library page");
+                    self.library_paging_errors
+                        .retain(|(failed, _)| *failed != section);
+                    self.library_paging_errors.push((section, error));
                     match section {
                         crate::api::LibrarySection::Songs => self.library.songs.loading = false,
                         crate::api::LibrarySection::Artists => self.library.artists.loading = false,
@@ -5543,8 +6436,14 @@ impl App {
                         }
                     }
                 }
-                Event::LibraryMore { .. } | Event::LibraryMoreFailed { .. } => {}
-                Event::LibraryFailed { error, epoch } if epoch == self.account_epoch => {
+                Event::LibraryMoreFailed { .. } => {}
+                Event::LibraryFailed {
+                    error,
+                    epoch,
+                    songs_generation,
+                } if epoch == self.browsing_epoch
+                    && songs_generation == self.library_songs_generation =>
+                {
                     self.library_loading = false;
                     self.library_error = Some(error);
                 }
@@ -5579,9 +6478,14 @@ impl App {
                     self.explore_loading = false;
                     self.explore_error = Some(error);
                 }
-                Event::ReleasesLoaded { shelves } => {
+                Event::ReleasesLoaded {
+                    mut shelves,
+                    warnings,
+                } => {
                     self.releases_loading = false;
+                    ui::releases::order_releases(&mut shelves, self.settings.preferred_provider);
                     self.releases = Some(Arc::new(shelves));
+                    self.releases_warnings = warnings;
                 }
                 Event::ReleasesFailed { error } => {
                     self.releases_loading = false;
@@ -5653,20 +6557,24 @@ impl App {
                     chips,
                     next,
                     epoch,
+                    request,
+                    warnings,
                 } => {
                     // A reply for a filter since changed, or an account since switched away
                     // from, is stale — drop it rather than showing one filter's shelves under
                     // another's chips, or one account's feed under another's.
-                    if self.home_filter == filter && epoch == self.account_epoch {
+                    if self.home_filter == filter
+                        && epoch == self.browsing_epoch
+                        && request == self.home_request
+                    {
                         self.home_loading = false;
                         self.home_refreshing = false;
-                        let mut shelves = shelves;
                         tracing::debug!(
                             shelves = ?shelves.iter().map(|s| (s.strapline.as_deref(), s.title.as_str())).collect::<Vec<_>>(),
                             "home: first page"
                         );
-                        self.order_home_shelves(&mut shelves);
-                        self.home = Some(Arc::new(shelves));
+                        self.home = Some(Arc::new(self.prepare_home_shelves(shelves)));
+                        self.home_warnings = warnings;
                         self.home_chips = chips;
                         self.home_next = next;
                         self.home_more_loading = false;
@@ -5677,15 +6585,29 @@ impl App {
                     filter,
                     error,
                     epoch,
+                    request,
                 } => {
-                    if self.home_filter == filter && epoch == self.account_epoch {
+                    if self.home_filter == filter
+                        && epoch == self.browsing_epoch
+                        && request == self.home_request
+                    {
                         self.home_loading = false;
                         if self.home_refreshing {
                             // A refresh that failed keeps the feed already on screen.
                             self.home_refreshing = false;
                             tracing::warn!(%error, "home refresh failed; keeping the old feed");
+                            self.home_warnings = vec![error];
                         } else {
-                            self.home_error = Some(error);
+                            let local = self.prepare_home_shelves(Vec::new());
+                            if local.is_empty() {
+                                self.home_error = Some(error);
+                            } else {
+                                self.home = Some(Arc::new(local));
+                                self.home_warnings = vec![error];
+                                self.home_next = None;
+                                self.home_chips.clear();
+                                self.home_loaded_at = Some(Instant::now());
+                            }
                         }
                     }
                 }
@@ -5694,8 +6616,12 @@ impl App {
                     shelves,
                     next,
                     epoch,
+                    request,
                 } => {
-                    if self.home_filter == filter && epoch == self.account_epoch {
+                    if self.home_filter == filter
+                        && epoch == self.browsing_epoch
+                        && request == self.home_request
+                    {
                         self.home_more_loading = false;
                         tracing::debug!(
                             shelves = shelves.len(),
@@ -5720,21 +6646,38 @@ impl App {
                     filter,
                     error,
                     epoch,
+                    request,
                 } => {
-                    if self.home_filter == filter && epoch == self.account_epoch {
+                    if self.home_filter == filter
+                        && epoch == self.browsing_epoch
+                        && request == self.home_request
+                    {
                         self.home_more_loading = false;
                         // The end of what can be loaded, rather than asking again every frame.
                         self.home_next = None;
                         tracing::warn!(%error, "could not load more of the home feed");
                     }
                 }
-                Event::HomeShelfLoaded { title, items } => {
-                    if self.home_shelf_loading.as_deref() == Some(title.as_str()) {
+                Event::HomeShelfLoaded {
+                    title,
+                    items,
+                    request,
+                } => {
+                    if self.home_shelf_loading.as_deref() == Some(title.as_str())
+                        && request == self.home_request
+                    {
                         self.home_shelf_loading = None;
-                        let base = self
-                            .home
-                            .as_ref()
-                            .and_then(|h| h.iter().find(|s| s.title == title).cloned());
+                        let base = self.home.as_ref().and_then(|h| {
+                            h.iter()
+                                .find(|s| {
+                                    s.title == title
+                                        && crate::home_feed::shelf_provider(s)
+                                            == Some(crate::model::Provider::YouTubeMusic)
+                                        && s.more_browse_id.is_some()
+                                        && s.more_params.is_some()
+                                })
+                                .cloned()
+                        });
                         if let Some(mut shelf) = base
                             && !items.is_empty()
                         {
@@ -5744,8 +6687,14 @@ impl App {
                         }
                     }
                 }
-                Event::HomeShelfFailed { title, error } => {
-                    if self.home_shelf_loading.as_deref() == Some(title.as_str()) {
+                Event::HomeShelfFailed {
+                    title,
+                    error,
+                    request,
+                } => {
+                    if self.home_shelf_loading.as_deref() == Some(title.as_str())
+                        && request == self.home_request
+                    {
                         self.home_shelf_loading = None;
                         tracing::warn!(%title, %error, "could not load a home shelf in full");
                     }
@@ -5776,7 +6725,40 @@ impl App {
                     self.sign_in_busy = false;
                     self.sign_in_error = Some(error);
                     // The reason is shown on the Account tab, so that is where Settings opens.
-                    self.settings_tab = ui::settings::SettingsTab::Account;
+                    self.settings_tab = ui::settings::SettingsTab::Providers;
+                    self.settings_provider = crate::model::Provider::YouTubeMusic;
+                }
+
+                Event::SpotifySignOutFinished(result) => match result {
+                    Ok(()) => {
+                        if self.now.track.as_ref().is_some_and(Track::is_spotify) {
+                            self.play_generation = self.backend.cancel_play();
+                            self.playback_started = false;
+                            self.spotify_pause = SpotifyPause::None;
+                            self.listening.finish("stopped");
+                            self.stall.reset();
+                            if let Some(player) = &self.player {
+                                player.stop();
+                            }
+                            self.q.set_resume(None);
+                            self.now = NowPlaying::default();
+                            self.player_error = None;
+                        }
+                        self.reset_provider_browsing();
+                        self.toast("Signed out of Spotify");
+                    }
+                    Err(error) => self.toast_error(&error),
+                },
+
+                Event::SpotifySignInFinished(result) => {
+                    self.spotify_signing_in = false;
+                    match result {
+                        Ok(()) => {
+                            self.reset_provider_browsing();
+                            self.toast("Signed in to Spotify");
+                        }
+                        Err(error) => self.toast_error(&error),
+                    }
                 }
 
                 // Told rather than shown a login window: the user did not ask to sign in, and
@@ -5786,7 +6768,8 @@ impl App {
                         "Your sign-in expired. Sign in again to see your library.";
                     self.toast_error(EXPIRED);
                     self.sign_in_error = Some(EXPIRED.to_owned());
-                    self.settings_tab = ui::settings::SettingsTab::Account;
+                    self.settings_tab = ui::settings::SettingsTab::Providers;
+                    self.settings_provider = crate::model::Provider::YouTubeMusic;
                 }
 
                 Event::AuthChanged(state) => {
@@ -5823,6 +6806,7 @@ impl App {
                             // user can see, the same content.
                             if !was_checking {
                                 self.account_epoch += 1;
+                                self.invalidate_browsing();
                                 self.clear_home();
                                 self.home_error = None;
                                 self.history_shelves = None;
@@ -5845,6 +6829,7 @@ impl App {
                         }
                         crate::auth::AuthState::SignedOut => {
                             self.account_epoch += 1;
+                            self.invalidate_browsing();
                             self.premium = false;
                             // Session data, all of it: the channels belong to the account that
                             // just left, and the signed-out menu on Windows would otherwise
@@ -5893,6 +6878,12 @@ impl App {
                 }
                 Event::Resolving(..) => {}
                 Event::Playing(mut track, generation) if generation == self.play_generation => {
+                    if self.spotify_pause == SpotifyPause::Released {
+                        self.spotify_pause = SpotifyPause::None;
+                        if self.q.resume_here() == self.stall.start_position() {
+                            self.q.set_resume(None);
+                        }
+                    }
                     self.reconcile_state(&mut track);
                     let video_id = track.video_id.clone();
                     let wide = track.wide;
@@ -6091,6 +7082,46 @@ impl App {
                     self.set_library_state(&video_id, previous);
                     self.toast_error(&failure_text("Could not update your library", &error));
                 }
+                Event::SpotifyTrackLiked {
+                    track,
+                    liked,
+                    result,
+                } => {
+                    self.liked_music.spotify_pending.remove(&track.video_id);
+                    if let Err(error) = result {
+                        self.toast_error(&failure_text(
+                            "Could not update Spotify Liked Songs",
+                            &error,
+                        ));
+                        continue;
+                    }
+                    self.playlist_picker.note_liked(&track.video_id, liked);
+                    self.set_library_state(&track.video_id, liked);
+                    if liked {
+                        self.liked_music.save_spotify_track(track);
+                        self.toast("Added to Spotify Liked Songs");
+                    } else {
+                        self.liked_music.remove_spotify_track(&track.video_id);
+                        self.remove_spotify_library_song(&track.video_id);
+                        if self.history.current() == &Route::LikedMusic {
+                            self.request_liked_music(crate::model::Provider::Spotify, false);
+                        }
+                        self.toast("Removed from Spotify Liked Songs");
+                    }
+                }
+                Event::EditablePlaylists { video_id, result } => {
+                    self.playlist_picker.loaded(&video_id, result);
+                    if let Some(playlist) = &self.playlist
+                        && playlist.source == crate::model::PlaylistSource::YouTube
+                        && playlist.editable
+                        && playlist
+                            .tracks
+                            .iter()
+                            .any(|track| track.video_id == video_id)
+                    {
+                        self.playlist_picker.note_saved(&video_id, &playlist.id);
+                    }
+                }
                 Event::PageLibraryToggled { in_library, .. } => {
                     tracing::debug!(in_library, "page library toggle confirmed");
                     // Already painted optimistically; this is the confirmation. The rail was
@@ -6182,7 +7213,15 @@ impl App {
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "saved to playlist");
                     self.toast("Saved to playlist");
-                    self.note_saved_to_playlist(&playlist_id, &video_id);
+                    self.playlist_picker.note_saved(&video_id, &playlist_id);
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        if self.playlist_is_for(&playlist_id) {
+                            self.playlist_for = None;
+                            self.load_playlist(playlist_id);
+                        }
+                    } else {
+                        self.note_saved_to_playlist(&playlist_id, &video_id);
+                    }
                 }
                 Event::PlaylistDuplicate {
                     playlist_id,
@@ -6190,6 +7229,7 @@ impl App {
                     message,
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "already in the playlist; asking");
+                    self.playlist_picker.note_saved(&video_id, &playlist_id);
                     // Not added (yet): "Add anyway" asks again, and counts it again.
                     self.bump_playlist_counts(&playlist_id, -1);
                     self.playlist_duplicate = Some(DuplicatePrompt {
@@ -6204,6 +7244,13 @@ impl App {
                     error,
                 } => {
                     tracing::warn!(%playlist_id, %video_id, %error, "save to playlist refused");
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.toast_error(&failure_text(
+                            "Could not save to Spotify playlist",
+                            &error,
+                        ));
+                        continue;
+                    }
                     self.bump_playlist_counts(&playlist_id, -1);
                     // YouTube says why it refused an edit, in the account's language; a request
                     // that failed outright gets the reason the error text gives, if any.
@@ -6220,6 +7267,15 @@ impl App {
                     video_id,
                 } => {
                     tracing::debug!(%playlist_id, %video_id, "removed from playlist");
+                    self.playlist_picker.invalidate(&video_id);
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.spotify_playlist_remove_pending = false;
+                        self.bump_playlist_counts(&playlist_id, -1);
+                        if self.playlist_is_for(&playlist_id) {
+                            self.playlist_for = None;
+                            self.load_playlist(playlist_id);
+                        }
+                    }
                     // The count went down when the removal was asked for.
                     self.toast("Removed from playlist");
                 }
@@ -6228,6 +7284,14 @@ impl App {
                     video_id,
                     error,
                 } => {
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        self.spotify_playlist_remove_pending = false;
+                        self.toast_error(&failure_text(
+                            "Could not remove that song from Spotify",
+                            &error,
+                        ));
+                        continue;
+                    }
                     // The row is already gone and cannot be reconstructed — reload the page.
                     // `playlist_for` is cleared first: `load_playlist` treats a matching id
                     // as already loading and would no-op.
@@ -6369,6 +7433,26 @@ impl App {
         }
     }
 
+    pub(crate) fn play_source(&mut self, tracks: Vec<Track>, index: usize) {
+        let Some(track) = tracks.get(index) else {
+            return;
+        };
+        if (self.playback_started || self.spotify_pause == SpotifyPause::Released)
+            && self
+                .now
+                .track
+                .as_ref()
+                .is_some_and(|current| current.video_id == track.video_id)
+        {
+            if self.now.paused {
+                self.toggle_playback();
+            }
+            return;
+        }
+        let radio = Radio::pending(&tracks);
+        self.start_queue(tracks, index, radio);
+    }
+
     /// Start the queue item at `index`, remembering the track we are leaving for `Previous`.
     pub(crate) fn play_index(&mut self, index: usize) {
         // Already the loaded track: pause/resume it rather than restarting from the top — the
@@ -6377,6 +7461,10 @@ impl App {
         // fall through and actually load the track rather than toggle (which would recurse).
         if self.q.current() == Some(index) && self.playback_started {
             self.toggle_playback();
+            return;
+        }
+        if self.q.current() == Some(index) && self.spotify_pause == SpotifyPause::Released {
+            self.play_index_restore(index);
             return;
         }
         self.q.remember_current();
@@ -6419,10 +7507,11 @@ impl App {
         let Some(track) = self.q.get(index).cloned() else {
             return;
         };
+        let outgoing = self.player.as_ref().map(Player::listening_sample);
         let Some(player) = self.player.as_mut() else {
             return;
         };
-        let handle = player.handle();
+        let handle = player.playback_handle(track.is_spotify(), self.ctx.clone());
         // The user's volume, not `player.volume()`: the Audio normaliser folds each track's gain
         // into the live value, and the next track must not inherit this one's.
         let volume = if self.muted { 0.0 } else { self.last_volume };
@@ -6440,16 +7529,28 @@ impl App {
         // A restored queue — or a scrub before play — carries a position for this very track;
         // it rides the load as a per-file `start`, and is consumed here so a later frame does
         // not seek the newly opened file a second time.
-        let start_at = self.q.take_resume_for(index);
-        if retry {
+        let resuming_spotify = self.spotify_pause == SpotifyPause::Released
+            && track.is_spotify()
+            && self.q.resume_here().is_some();
+        let start_at = if resuming_spotify {
+            self.q.resume_here()
+        } else {
+            self.spotify_pause = SpotifyPause::None;
+            self.q.take_resume_for(index)
+        };
+        if resuming_spotify && self.listening.active() {
+            self.listening.suspend(start_at.unwrap_or(0.0), "resume");
+        } else if retry {
             self.listening.suspend(start_at.unwrap_or(0.0), "retry");
         } else {
             if self.listening.active()
-                && let Some(player) = &self.player
+                && let Some(sample) = outgoing
             {
-                self.listening.observe(player.listening_sample());
+                self.listening.observe(sample);
             }
-            let source = if track.local_path.is_some() {
+            let source = if track.is_spotify() {
+                "spotify"
+            } else if track.local_path.is_some() {
                 "local"
             } else if self
                 .downloads
@@ -6516,11 +7617,19 @@ impl App {
             // Next landing on the track already playing — a one-track queue under Repeat All, or
             // a shuffle with nothing else left — replays it. `play_index` would take that for a
             // click on the loaded track and pause it.
-            Some(next) if self.q.current() == Some(next) => self.play_index_restore(next),
+            Some(next) if self.q.current() == Some(next) => {
+                if self.spotify_pause == SpotifyPause::Released {
+                    self.q.set_resume(None);
+                }
+                self.play_index_restore(next);
+            }
             Some(next) => self.play_index(next),
             // At the end with Repeat One, "next" replays the current track.
             None if self.repeat == RepeatMode::One => {
                 if let Some(current) = self.q.current() {
+                    if self.spotify_pause == SpotifyPause::Released {
+                        self.q.set_resume(None);
+                    }
                     self.play_index_restore(current);
                 }
             }
@@ -6641,9 +7750,7 @@ impl App {
             return false;
         }
         if self.playback_started && !self.play_is_video {
-            if let Some(player) = self.player.as_ref() {
-                player.seek(0.0);
-            }
+            self.seek_to(0.0);
         } else {
             // A video carries its audio as a separately attached stream, and a post-load seek
             // moves only the video (see `player::set_start`), so restarting one means loading it
@@ -6660,11 +7767,19 @@ impl App {
     /// restored position instead.
     pub(crate) fn seek_to(&mut self, seconds: f64) {
         if self.playback_started {
+            if matches!(self.spotify_pause, SpotifyPause::Waiting(_)) {
+                self.spotify_pause = SpotifyPause::Waiting(Instant::now());
+            }
             if let Some(pl) = &self.player {
                 pl.seek(seconds);
             }
         } else if let Some(index) = self.q.current() {
             self.q.set_resume(Some((index, seconds)));
+            if self.spotify_pause == SpotifyPause::Released
+                && let Some(player) = &self.player
+            {
+                player.seek(seconds);
+            }
         }
     }
 
@@ -6700,11 +7815,13 @@ impl App {
 
     /// Arrange shelves by the listener's Home order — for the default feed only: with a mood chip
     /// selected the shelves are that mood's own and keep the order they came in.
-    fn order_home_shelves(&self, shelves: &mut [crate::model::Shelf]) {
+    fn order_home_shelves(&self, shelves: &mut Vec<crate::model::Shelf>) {
         if self.home_filter.is_none() {
-            crate::model::order_home(
+            crate::home_feed::arrange(
                 shelves,
                 &crate::model::normalise_order(&self.settings.home_order),
+                self.effective_home_source() == crate::settings::HomeSource::Combined,
+                self.settings.home_primary_provider,
             );
         }
     }
@@ -6836,6 +7953,153 @@ impl App {
         matches!(self.auth, crate::auth::AuthState::SignedIn { .. })
     }
 
+    pub(crate) fn has_library_account(&self) -> bool {
+        self.signed_in() || crate::spotify::is_signed_in()
+    }
+
+    pub(crate) fn can_group_sources(&self) -> bool {
+        self.connected_providers().len() > 1
+    }
+
+    pub(crate) fn has_local_music(&self) -> bool {
+        !self.local_tracks.is_empty()
+            || !self.settings.local_folders.is_empty()
+            || self
+                .local_playlists
+                .iter()
+                .any(|playlist| !playlist.track_paths.is_empty())
+    }
+
+    pub(crate) fn connected_providers(&self) -> Vec<crate::model::Provider> {
+        use crate::model::Provider;
+        Provider::ALL
+            .into_iter()
+            .filter(|provider| match provider {
+                Provider::YouTubeMusic => self.signed_in(),
+                Provider::Spotify => crate::spotify::is_signed_in(),
+                Provider::Local => self.has_local_music(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn available_providers(&self) -> Vec<crate::model::Provider> {
+        let mut providers = self.connected_providers();
+        if providers.is_empty() {
+            providers.push(crate::model::Provider::YouTubeMusic);
+        }
+        providers
+    }
+
+    pub(crate) fn effective_home_source(&self) -> crate::settings::HomeSource {
+        use crate::{model::Provider, settings::HomeSource};
+        let available = self.available_providers();
+        let preferred = match self.settings.home_source {
+            HomeSource::Combined => None,
+            HomeSource::YouTubeMusic => Some(Provider::YouTubeMusic),
+            HomeSource::Spotify => Some(Provider::Spotify),
+            HomeSource::Local => Some(Provider::Local),
+        };
+        if preferred.is_some_and(|provider| available.contains(&provider)) {
+            return self.settings.home_source;
+        }
+        if available.len() > 1 {
+            HomeSource::Combined
+        } else {
+            match available[0] {
+                Provider::YouTubeMusic => HomeSource::YouTubeMusic,
+                Provider::Spotify => HomeSource::Spotify,
+                Provider::Local => HomeSource::Local,
+            }
+        }
+    }
+
+    fn update_search_providers(&mut self) -> bool {
+        let available = self.available_providers();
+        let sources_changed = self.backend.set_search_providers(available.clone());
+        let selected = if available.len() == 1 {
+            available.first().copied()
+        } else if sources_changed {
+            None
+        } else {
+            self.search_provider
+                .filter(|provider| available.contains(provider))
+        };
+        let selection_changed = self.search_provider != selected;
+        self.search_provider = selected;
+        let supported = selected.map_or_else(
+            || {
+                available
+                    .iter()
+                    .any(|provider| provider.search_scopes().contains(&self.search_scope))
+            },
+            |provider| provider.search_scopes().contains(&self.search_scope),
+        );
+        if !supported {
+            self.search_scope = SearchScope::All;
+        }
+        if !available.contains(&crate::model::Provider::YouTubeMusic) && self.home_filter.is_some()
+        {
+            self.home_filter = None;
+            self.clear_home();
+        }
+        sources_changed || selection_changed || !supported
+    }
+
+    fn reset_provider_browsing(&mut self) {
+        self.invalidate_browsing();
+        self.cancel_account_fetches();
+        self.clear_home();
+        self.home_filter = None;
+        self.library = crate::model::Library::default();
+        self.library_paging_errors.clear();
+        self.library_loaded = false;
+        self.library_error = None;
+        self.resync_local_playlists();
+        self.load_sidebar_playlists();
+        self.load_library();
+    }
+
+    fn invalidate_browsing(&mut self) {
+        self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
+        self.backend.set_browsing_epoch(self.browsing_epoch);
+        self.artist_sources.clear();
+        self.releases = None;
+        self.releases_loading = false;
+        self.releases_error = None;
+        self.releases_warnings.clear();
+        self.library_failed_provider = None;
+        self.library_source_retry = None;
+        self.liked_music = ui::liked_music::State::default();
+        self.spotify_playlist_remove_pending = false;
+        self.playlist_picker = ui::player_bar::PlaylistPicker::default();
+        self.profile.clear();
+        self.search_source_rows = ui::source_rows::State::default();
+        self.library_source_rows = ui::source_rows::State::default();
+        self.playlist_source_rows = ui::source_rows::State::default();
+        self.update_search_providers();
+        self.refresh_search_results();
+        self.library_paging_errors.clear();
+        self.artist = None;
+        self.artist_for = None;
+        self.artist_loading = false;
+        self.artist_error = None;
+        self.artist_expand = None;
+        self.artist_expand_loading = false;
+        self.artist_expand_error = None;
+        self.album = None;
+        self.album_for = None;
+        self.album_loading = false;
+        self.album_error = None;
+        self.playlist = None;
+        self.playlist_for = None;
+        self.playlist_loading = false;
+        self.playlist_error = None;
+        self.pending_card_play = None;
+        self.pending_page_action = None;
+        self.rail_cache.clear();
+        self.album_cache.clear();
+    }
+
     /// Whether the track currently loaded — playing, paused, or stopped — is one of `tracks`.
     /// An album/playlist header's own Play button reads this to decide what clicking it means:
     /// resume or pause what is already loaded (see [`Self::is_playing_any`] and
@@ -6884,6 +8148,10 @@ impl App {
                 self.toast(&format!("Won't recommend {name}"));
             }
             RowAction::StartMix(id) => {
+                if crate::model::is_spotify_id(&id) {
+                    self.toast_error("Spotify radio is unavailable");
+                    return;
+                }
                 self.choose_personal_playback();
                 // Show what it did: a mix replaces the queue with fifty tracks you have not
                 // seen, and leaving the panel shut makes that invisible.
@@ -6914,6 +8182,10 @@ impl App {
                 self.toast("Link copied");
             }
             RowAction::Rate { video_id, status } => {
+                if crate::model::is_spotify_id(&video_id) {
+                    self.toast_error("Spotify ratings are unavailable");
+                    return;
+                }
                 if !self.signed_in() {
                     // No optimistic update and no request: without a session the write is
                     // impossible, and painting it first would flicker.
@@ -6927,6 +8199,10 @@ impl App {
                 self.backend.rate(video_id, status, previous);
             }
             RowAction::ToggleLibrary(track) => {
+                if track.is_spotify() {
+                    self.toast_error("Spotify library changes are unavailable");
+                    return;
+                }
                 if !self.signed_in() {
                     self.toast_error("Sign in to save songs");
                     return;
@@ -6946,6 +8222,19 @@ impl App {
                 self.backend
                     .toggle_library(token.to_owned(), track.video_id, saving);
             }
+            RowAction::SetSpotifyLiked { track, liked } => {
+                if crate::spotify::is_signed_in() {
+                    if self
+                        .liked_music
+                        .spotify_pending
+                        .insert(track.video_id.clone())
+                    {
+                        self.backend.set_spotify_liked(track, liked);
+                    }
+                } else {
+                    self.toast_error("Sign in to Spotify to update Liked Songs");
+                }
+            }
             RowAction::SavePrivate {
                 playlist_id,
                 tracks,
@@ -6955,6 +8244,34 @@ impl App {
                 playlist_id,
                 video_id,
             } => {
+                if crate::model::is_spotify_id(&video_id) {
+                    if playlist_id.starts_with("spotify:playlist:") {
+                        if crate::spotify::is_signed_in()
+                            && self.playlist_picker.can_add(&video_id, &playlist_id)
+                        {
+                            self.backend.add_spotify_to_playlist(playlist_id, video_id);
+                        } else {
+                            self.toast_error("This Spotify playlist can’t be edited");
+                        }
+                        return;
+                    }
+                    if playlist_id.starts_with("private:") {
+                        let mut found = None;
+                        self.for_each_track(|track| {
+                            if track.video_id == video_id {
+                                found = Some(track.clone());
+                            }
+                        });
+                        if let Some(track) = found {
+                            self.add_private_tracks(&playlist_id, &[track]);
+                        } else {
+                            self.toast_error("Track metadata is unavailable");
+                        }
+                        return;
+                    }
+                    self.toast_error("Use a private playlist for Spotify tracks");
+                    return;
+                }
                 // A local playlist's own target list (`widgets::row_menu`) only ever offers
                 // other local playlists, so this id names one — `video_id` is that track's
                 // canonical path, per `Track.local_path`'s own doc comment.
@@ -6974,6 +8291,27 @@ impl App {
                 video_id,
                 set_video_id,
             } => {
+                if playlist_id.starts_with("spotify:playlist:") {
+                    if !crate::spotify::is_signed_in() {
+                        self.toast_error("Sign in to Spotify to edit playlists");
+                        return;
+                    }
+                    if self.spotify_playlist_remove_pending {
+                        return;
+                    }
+                    if self.playlist.as_ref().is_some_and(|playlist| {
+                        playlist.id == playlist_id
+                            && playlist.tracks.iter().any(|track| {
+                                track.video_id == video_id
+                                    && track.set_video_id.as_deref() == Some(set_video_id.as_str())
+                            })
+                    }) {
+                        self.spotify_playlist_remove_pending = true;
+                        self.backend
+                            .remove_from_playlist(playlist_id, video_id, set_video_id);
+                    }
+                    return;
+                }
                 if playlist_id.starts_with("private:") {
                     let mut lists = self.local_playlists.clone();
                     if let Some(lp) = lists.iter_mut().find(|p| p.id == playlist_id) {
@@ -7248,6 +8586,7 @@ impl App {
         let mut local = Vec::new();
         let mut rules = Vec::new();
         let mut remote = Vec::new();
+        let providers = self.connected_providers();
         for id in ids {
             if let Some(lp) = self.local_playlists.iter().find(|lp| lp.id == *id) {
                 if let Some(rule) = lp.rule {
@@ -7255,7 +8594,14 @@ impl App {
                 } else {
                     local.extend(self.local_playlist_as_playlist(lp).tracks.items);
                 }
-            } else if self.signed_in() && !id.starts_with("private:") && !id.starts_with("local:") {
+            } else if !id.starts_with("private:")
+                && !id.starts_with("local:")
+                && providers.contains(&if id.starts_with("spotify:playlist:") {
+                    crate::model::Provider::Spotify
+                } else {
+                    crate::model::Provider::YouTubeMusic
+                })
+            {
                 let title = self
                     .library
                     .playlists
@@ -7272,7 +8618,7 @@ impl App {
             local,
             rules,
             self.playback_choice,
-            self.account_epoch,
+            self.browsing_epoch,
         );
         self.toast("Preparing folder shuffle…");
     }
@@ -7338,6 +8684,10 @@ impl App {
     /// anything new stays after them in YouTube's own order (a stable sort by rank). Ids the
     /// saved list does not know about rank last, so a new playlist appears at the end.
     fn apply_playlist_order(&mut self) {
+        let mut has_liked = false;
+        self.library.playlists.items.retain(|playlist| {
+            !crate::model::is_liked_auto(&playlist.id) || !std::mem::replace(&mut has_liked, true)
+        });
         order_by_saved(
             &mut self.library.playlists.items,
             &self.settings.playlist_order,
@@ -7422,13 +8772,18 @@ impl App {
         self.backend.fetch_explore();
     }
 
-    /// Fetch New releases once. Works signed out, so no auth gate.
     fn load_new_releases(&mut self) {
-        if self.releases.is_some() || self.releases_loading || self.releases_error.is_some() {
+        if self.releases.is_some()
+            || self.releases_loading
+            || self.releases_error.is_some()
+            || matches!(self.auth, crate::auth::AuthState::Checking)
+        {
             return;
         }
         self.releases_loading = true;
-        self.backend.fetch_new_releases();
+        let spotify = crate::spotify::is_signed_in();
+        self.backend
+            .fetch_new_releases(self.signed_in() || !spotify, spotify);
     }
 
     /// Fetch Charts once per params. Works signed out, so no auth gate.
@@ -7636,7 +8991,14 @@ impl App {
             let mut playlist = build_local_playlist(&resolved, &self.local_tracks);
             playlist.editable = false;
             let play = self.pending_card_play.as_deref() == Some(id.as_str());
-            let tracks = play.then(|| playlist.tracks.items.clone());
+            self.playlist_source_rows
+                .set_tracks(&playlist.tracks.items, self.can_group_sources());
+            let tracks = play.then(|| {
+                self.playlist_source_rows
+                    .playback_queue(0, self.settings.preferred_provider, None)
+                    .map(|(tracks, _)| tracks)
+                    .unwrap_or_default()
+            });
             self.playlist = Some(playlist);
             self.playlist_original_order = None;
             self.sort_playlist(self.playlist_sort);
@@ -8000,6 +9362,32 @@ impl App {
         }
     }
 
+    fn search_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.results
+            .items
+            .iter()
+            .chain(&self.scoped_results)
+            .filter_map(Entry::track)
+    }
+
+    fn update_search_tracks(&mut self, mut update: impl FnMut(&mut Track) -> bool) {
+        for (entries, generation) in [
+            (&mut self.results.items, &mut self.results_generation),
+            (
+                &mut self.scoped_results,
+                &mut self.scoped_results_generation,
+            ),
+        ] {
+            let mut changed = false;
+            for track in entries.iter_mut().filter_map(Entry::track_mut) {
+                changed |= update(track);
+            }
+            if changed {
+                *generation = generation.wrapping_add(1);
+            }
+        }
+    }
+
     /// Visit every `Track` the app holds — what is playing, the queue, and each loaded page.
     /// The read-only twin of the fan-out in [`Self::set_like`], and it must stay in step with
     /// it: a list one of them knows about and the other does not is a copy that goes stale.
@@ -8010,12 +9398,7 @@ impl App {
         for t in self.q.tracks() {
             f(t);
         }
-        for t in self
-            .results
-            .items
-            .iter()
-            .filter_map(crate::model::Entry::track)
-        {
+        for t in self.search_tracks() {
             f(t);
         }
         if let Some(artist) = self.artist.as_ref() {
@@ -8064,6 +9447,17 @@ impl App {
     /// index knows every song the account has liked, which is the one list that outlives the
     /// page it was read on.
     fn reconcile_state(&self, track: &mut Track) {
+        if track.is_spotify()
+            && let Some(liked) = self.liked_music.spotify_liked(&track.video_id)
+        {
+            track.in_library = liked;
+            track.like = if liked {
+                LikeStatus::Like
+            } else {
+                LikeStatus::Indifferent
+            };
+            return;
+        }
         let mut like = None;
         let mut library = None;
         self.for_each_track(|t| {
@@ -8102,28 +9496,42 @@ impl App {
     /// A track's rating, from the first copy that holds it. Everything is kept in sync by
     /// [`Self::set_like`], so any copy answers for all of them.
     fn like_of(&self, video_id: &str) -> LikeStatus {
-        self.q
-            .tracks()
-            .iter()
-            .find(|t| t.video_id == video_id)
+        self.liked_music
+            .youtube_track(video_id)
             .map(|t| t.like)
             .or_else(|| {
-                self.now
-                    .track
-                    .as_ref()
-                    .filter(|t| t.video_id == video_id)
+                self.q
+                    .tracks()
+                    .iter()
+                    .chain(&self.now.track)
+                    .chain(self.search_tracks())
+                    .find(|t| t.video_id == video_id && t.like != LikeStatus::Indifferent)
                     .map(|t| t.like)
             })
+            .or_else(|| self.liked.like_of(video_id))
             .unwrap_or(LikeStatus::Indifferent)
     }
 
     /// Set a track's library membership everywhere it appears. Same lists as
     /// [`Self::set_like`]: the toggle arrives optimistically and reverts on failure.
     fn set_library_state(&mut self, video_id: &str, in_library: bool) {
+        self.liked_music.set_library_state(video_id, in_library);
         let set = |t: &mut Track| {
-            if t.video_id == video_id {
-                t.in_library = in_library;
+            if t.video_id != video_id {
+                return false;
             }
+            let mut changed = t.in_library != in_library;
+            t.in_library = in_library;
+            if t.is_spotify() {
+                let like = if in_library {
+                    LikeStatus::Like
+                } else {
+                    LikeStatus::Indifferent
+                };
+                changed |= t.like != like;
+                t.like = like;
+            }
+            changed
         };
         if let Some(t) = self.now.track.as_mut() {
             set(t);
@@ -8131,14 +9539,8 @@ impl App {
         for t in self.q.tracks_mut() {
             set(t);
         }
-        for t in self
-            .results
-            .items
-            .iter_mut()
-            .filter_map(crate::model::Entry::track_mut)
-        {
-            set(t);
-        }
+        self.update_search_tracks(set);
+        self.artist_sources.update_library_tracks(video_id, set);
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
                 set(t);
@@ -8268,14 +9670,19 @@ impl App {
     /// The liked index moves with them: an artist page must count a song the moment it is liked,
     /// not at the next scan.
     fn set_like(&mut self, video_id: &str, like: LikeStatus) {
+        self.playlist_picker
+            .note_liked(video_id, like == LikeStatus::Like);
         let mut copy: Option<Track> = None;
         let mut set = |t: &mut Track| {
-            if t.video_id == video_id {
-                t.like = like;
-                if copy.is_none() {
-                    copy = Some(t.clone());
-                }
+            if t.video_id != video_id {
+                return false;
             }
+            let changed = t.like != like;
+            t.like = like;
+            if copy.is_none() {
+                copy = Some(t.clone());
+            }
+            changed
         };
         if let Some(t) = self.now.track.as_mut() {
             set(t);
@@ -8283,14 +9690,7 @@ impl App {
         for t in self.q.tracks_mut() {
             set(t);
         }
-        for t in self
-            .results
-            .items
-            .iter_mut()
-            .filter_map(crate::model::Entry::track_mut)
-        {
-            set(t);
-        }
+        self.update_search_tracks(&mut set);
         if let Some(artist) = self.artist.as_mut() {
             for t in &mut artist.top_songs {
                 set(t);
@@ -8329,15 +9729,28 @@ impl App {
                 }
             }
         }
+        let copy = copy.or_else(|| {
+            self.liked_music
+                .youtube_track(video_id)
+                .cloned()
+                .map(|mut track| {
+                    track.like = like;
+                    track
+                })
+        });
         match like {
             LikeStatus::Like => {
                 if let Some(track) = copy {
+                    self.liked_music.set_youtube_rating(track.clone(), like);
                     self.liked.set_liked(track);
                     self.liked_dirty = true;
                 }
             }
             // Dislike is not liked: the index is the liked set and nothing else.
             LikeStatus::Indifferent | LikeStatus::Dislike => {
+                if let Some(track) = copy {
+                    self.liked_music.set_youtube_rating(track, like);
+                }
                 self.liked.set_unliked(video_id);
                 self.liked_dirty = true;
             }
@@ -8956,10 +10369,13 @@ impl eframe::App for App {
                             Route::Home => ui::home::page(self, ui),
                             Route::Library => ui::library::page(self, ui),
                             Route::Settings => ui::settings::page(self, ui),
+                            Route::Profile => ui::profile::page(self, ui),
                             Route::Artist(_) => ui::artist::page(self, ui),
+                            Route::ArtistGroup { .. } => ui::artist_sources::page(self, ui),
                             Route::ArtistLiked(_) => ui::artist_liked::page(self, ui),
                             Route::Album(_) => ui::album::page(self, ui),
                             Route::Playlist(_) => ui::playlist::page(self, ui),
+                            Route::LikedMusic => ui::liked_music::page(self, ui),
                             Route::Mood(_) => ui::mood::page(self, ui),
                         }
                     });
@@ -8977,7 +10393,7 @@ impl eframe::App for App {
         ui::sidebar::new_playlist_popup(self, &ctx);
         ui::organizer::dialog(self, &ctx);
         ui::help::modal(self, ui);
-        ui::home_order::modal(self, ui);
+        ui::home_order::window(self, ui);
         ui::paste_cookies::modal(self, ui);
         ui::crash::modal(self, ui);
         ui::update::modal(self, ui);
@@ -9678,6 +11094,8 @@ mod tests {
             id: "a".to_owned(),
             title: "A".to_owned(),
             artist: "A".to_owned(),
+            artists: Vec::new(),
+            explicit: None,
             year: None,
             kind: None,
             thumbnail: None,
@@ -10051,6 +11469,47 @@ mod tests {
         ));
         assert!(!same_queue(&[track("x")], &[track("x"), track("y")]));
         assert!(!same_queue(&[], &playing));
+    }
+
+    #[test]
+    fn artist_route_accepts_either_native_id_and_agreeing_pairs() {
+        let youtube = "UCartist";
+        let spotify = "spotify:artist:74ASZWbe4lXaubB36ztrGX";
+        let expected = Some(Route::ArtistGroup {
+            youtube: youtube.to_owned(),
+            spotify: spotify.to_owned(),
+        });
+        for id in [youtube, spotify] {
+            let pairs = [
+                (youtube.to_owned(), spotify.to_owned()),
+                ("UCother".to_owned(), "spotify:artist:other".to_owned()),
+                (youtube.to_owned(), spotify.to_owned()),
+            ];
+            assert_eq!(matched_artist_route(id, pairs), expected);
+        }
+    }
+
+    #[test]
+    fn artist_route_does_not_guess_unknown_or_unrelated_ids() {
+        for id in ["missing", "Artist", ""] {
+            let pairs = [("UCartist".to_owned(), "spotify:artist:known".to_owned())];
+            assert!(matched_artist_route(id, pairs).is_none());
+        }
+        assert!(matched_artist_route("UCartist", []).is_none());
+    }
+
+    #[test]
+    fn artist_route_rejects_conflicting_pairs_in_either_direction() {
+        let pairs = [
+            ("UCartist".to_owned(), "spotify:artist:first".to_owned()),
+            ("UCartist".to_owned(), "spotify:artist:second".to_owned()),
+        ];
+        assert!(matched_artist_route("UCartist", pairs).is_none());
+        let pairs = [
+            ("UCfirst".to_owned(), "spotify:artist:shared".to_owned()),
+            ("UCsecond".to_owned(), "spotify:artist:shared".to_owned()),
+        ];
+        assert!(matched_artist_route("spotify:artist:shared", pairs).is_none());
     }
 
     /// A failure toast says why when the error tells, and nothing technical ever reaches it.

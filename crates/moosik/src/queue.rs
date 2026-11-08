@@ -883,6 +883,19 @@ mod tests {
         ids.iter().map(|s| track(s)).collect()
     }
 
+    fn mixed_tracks() -> Vec<Track> {
+        let mut local = track("music/local-track.flac");
+        local.local_path = Some(std::sync::Arc::from(std::path::Path::new(
+            "music/local-track.flac",
+        )));
+        vec![
+            track("ytm00000001"),
+            track("spotify:track:4uLU6hMCjMI75M1A2tKUQC"),
+            local,
+            track("ytm00000002"),
+        ]
+    }
+
     fn ids(q: &PlayQueue, idx: &[usize]) -> Vec<String> {
         idx.iter().map(|&i| q.tracks[i].video_id.clone()).collect()
     }
@@ -917,6 +930,130 @@ mod tests {
             played.push(q.tracks[next].video_id.clone());
         }
         played
+    }
+
+    #[test]
+    fn mixed_sources_keep_list_order_and_previous_history() {
+        let original = mixed_tracks();
+        let mut q = PlayQueue::new(7);
+        q.restore_session(original.clone(), Some(0), None, false, None);
+        assert_eq!(
+            q.tracks().iter().map(Track::provider).collect::<Vec<_>>(),
+            [
+                crate::model::Provider::YouTubeMusic,
+                crate::model::Provider::Spotify,
+                crate::model::Provider::Local,
+                crate::model::Provider::YouTubeMusic
+            ]
+        );
+        assert_eq!(
+            play_out(&mut q, RepeatMode::Off, None, 10),
+            original[1..]
+                .iter()
+                .map(|track| track.video_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(q.next(RepeatMode::All, None), Some(0));
+        for expected in original[..original.len() - 1].iter().rev() {
+            let Some(Rewind::WithinQueue { index, queue_len }) = q.rewind() else {
+                panic!("Previous must reach the earlier source");
+            };
+            q.truncate(queue_len);
+            q.set_current(index);
+            assert_eq!(q.current_track(), Some(expected));
+        }
+        assert!(q.rewind().is_none());
+        assert_eq!(q.tracks(), original);
+    }
+
+    #[test]
+    fn mixed_sources_shuffle_and_repeat_without_losing_tracks() {
+        let original = mixed_tracks();
+        let mut q = PlayQueue::new(7);
+        q.restore_session(original.clone(), Some(0), None, true, None);
+        let mut played = vec![q.current_track().unwrap().clone()];
+        for _ in 0..11 {
+            let next = q.next(RepeatMode::All, None).unwrap();
+            q.remember_current();
+            q.set_current(next);
+            played.push(q.current_track().unwrap().clone());
+        }
+        let expected: HashSet<_> = original
+            .iter()
+            .map(|track| track.video_id.as_str())
+            .collect();
+        for round in played.chunks(original.len()) {
+            assert_eq!(
+                round
+                    .iter()
+                    .map(|track| track.video_id.as_str())
+                    .collect::<HashSet<_>>(),
+                expected
+            );
+            for track in round {
+                assert_eq!(
+                    Some(track),
+                    original
+                        .iter()
+                        .find(|source| source.video_id == track.video_id)
+                );
+            }
+        }
+        for pair in played.windows(2) {
+            assert_ne!(pair[0].video_id, pair[1].video_id);
+        }
+        let previous = q.previous_in_order().unwrap();
+        q.set_current(previous);
+        assert_eq!(q.current_track(), played.get(played.len() - 2));
+        assert_eq!(q.tracks(), original);
+    }
+
+    #[test]
+    fn mixed_source_queue_edits_preserve_sources_and_resume() {
+        for shuffle in [false, true] {
+            let original = mixed_tracks();
+            let mut q = PlayQueue::new(7);
+            q.restore_session(original.clone(), Some(0), Some(17.0), shuffle, None);
+            let before = q.upcoming(RepeatMode::Off, None);
+            let snapshot = q.edit_snapshot();
+            let last = *before.last().unwrap();
+            let mut expected = vec![q.get(last).unwrap().clone()];
+            expected.extend(
+                before[..before.len() - 1]
+                    .iter()
+                    .map(|index| q.get(*index).unwrap().clone()),
+            );
+            assert!(q.move_upcoming(&[last], 0, RepeatMode::Off, None));
+            let inserted = track("spotify:track:0000000000000000000001");
+            q.insert_upcoming(vec![inserted.clone()], 1, RepeatMode::Off, None);
+            expected.insert(1, inserted);
+            let actual: Vec<_> = q
+                .upcoming(RepeatMode::Off, None)
+                .into_iter()
+                .map(|index| q.get(index).unwrap().clone())
+                .collect();
+            assert_eq!(actual, expected);
+            let local = q
+                .tracks()
+                .iter()
+                .position(|track| track.local_path.is_some())
+                .unwrap();
+            assert!(q.remove(local));
+            expected.retain(|track| track.local_path.is_none());
+            let actual: Vec<_> = q
+                .upcoming(RepeatMode::Off, None)
+                .into_iter()
+                .map(|index| q.get(index).unwrap().clone())
+                .collect();
+            assert_eq!(actual, expected);
+            assert_eq!(q.current_track(), original.first());
+            assert_eq!(q.resume_here(), Some(17.0));
+            q.set_resume(Some((q.current().unwrap(), 19.0)));
+            q.undo_edit(snapshot);
+            assert_eq!(q.tracks(), original);
+            assert_eq!(q.upcoming(RepeatMode::Off, None), before);
+            assert_eq!(q.resume_here(), Some(19.0));
+        }
     }
 
     /// The listener jumps to a song further down: it plays next, and the songs they jumped over

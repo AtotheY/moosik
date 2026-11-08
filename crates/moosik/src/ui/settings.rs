@@ -13,8 +13,9 @@ use egui::RichText;
 use crate::app::App;
 use crate::auth::AuthState;
 use crate::browser_cookies;
+use crate::model::Provider;
 use crate::settings::Opacity;
-use crate::settings::{Quality, Theme};
+use crate::settings::{HomeSource, Quality, Theme};
 use crate::theme;
 use crate::widgets;
 
@@ -24,21 +25,19 @@ pub enum SettingsTab {
     #[default]
     Appearance,
     Playback,
-    Library,
+    Providers,
     System,
     Discord,
-    Account,
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 7] = [
+    pub const ALL: [SettingsTab; 6] = [
         SettingsTab::Appearance,
         SettingsTab::Playback,
-        SettingsTab::Library,
+        SettingsTab::Providers,
         SettingsTab::System,
         SettingsTab::Discord,
-        SettingsTab::Account,
         SettingsTab::About,
     ];
 
@@ -46,10 +45,9 @@ impl SettingsTab {
         match self {
             SettingsTab::Appearance => "Appearance",
             SettingsTab::Playback => "Playback",
-            SettingsTab::Library => "Library",
+            SettingsTab::Providers => "Providers",
             SettingsTab::System => "System",
             SettingsTab::Discord => "Discord",
-            SettingsTab::Account => "Account",
             SettingsTab::About => "About",
         }
     }
@@ -58,32 +56,88 @@ impl SettingsTab {
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     // The title scrolls away with the page rather than staying pinned over it.
     crate::ui::page_scroll(app, "settings").show(ui, |ui| {
-        crate::ui::page_title(ui, &app.palette, "Settings");
-        // Capped, and held clear of the card's right edge: with the queue or lyrics open the
-        // card is narrower than the cap, and the switches sat on its edge, against the panel.
-        ui.set_max_width(COLUMN_MAX_W.min(ui.available_width() - RIGHT_GUTTER));
+        let mut column = ui.available_rect_before_wrap();
+        let width = column.width().min(COLUMN_MAX_W);
+        column.min.x += (column.width() - width) / 2.0;
+        column.max.x = column.min.x + width;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+            ui.set_width(width);
+            crate::ui::page_title(ui, &app.palette, "Settings");
 
-        let labels = SettingsTab::ALL.map(SettingsTab::label);
-        let current = SettingsTab::ALL
-            .iter()
-            .position(|t| *t == app.settings_tab)
-            .unwrap_or(0);
-        if let Some(i) = widgets::tab_strip(ui, &app.palette, &labels, current) {
-            app.settings_tab = SettingsTab::ALL[i];
-        }
-        ui.add_space(20.0);
+            ui.horizontal_wrapped(|ui| {
+                for tab in SettingsTab::ALL {
+                    if widgets::chip(ui, &app.palette, tab.label(), app.settings_tab == tab)
+                        .clicked()
+                    {
+                        app.settings_tab = tab;
+                    }
+                }
+            });
+            ui.add_space(20.0);
 
-        match app.settings_tab {
-            SettingsTab::Appearance => appearance(app, ui),
-            SettingsTab::Playback => playback(app, ui),
-            SettingsTab::Library => library(app, ui),
-            SettingsTab::System => system(app, ui),
-            SettingsTab::Discord => discord(app, ui),
-            SettingsTab::Account => account(app, ui),
-            SettingsTab::About => about(app, ui),
-        }
-        ui.add_space(16.0);
+            match app.settings_tab {
+                SettingsTab::Appearance => appearance(app, ui),
+                SettingsTab::Playback => playback(app, ui),
+                SettingsTab::Providers => providers(app, ui),
+                SettingsTab::System => system(app, ui),
+                SettingsTab::Discord => discord(app, ui),
+                SettingsTab::About => about(app, ui),
+            }
+            ui.add_space(16.0);
+        });
     });
+}
+
+fn providers(app: &mut App, ui: &mut egui::Ui) {
+    ui.horizontal_wrapped(|ui| {
+        for provider in Provider::ALL {
+            if widgets::chip(
+                ui,
+                &app.palette,
+                provider.name(),
+                app.settings_provider == provider,
+            )
+            .clicked()
+            {
+                app.settings_provider = provider;
+            }
+        }
+    });
+    ui.add_space(20.0);
+    let available = app.available_providers();
+    if available.len() > 1 {
+        let p = app.palette;
+        let mut preferred = if available.contains(&app.settings.preferred_provider) {
+            app.settings.preferred_provider
+        } else {
+            available[0]
+        };
+        let mut changed = false;
+        widgets::setting_group(ui, &p, None, |ui, g| {
+            g.wide_row(
+                ui,
+                "Preferred source",
+                "Priority for combined lists and matching items.",
+                |ui| {
+                    for &provider in &available {
+                        if widgets::chip(ui, &p, provider.name(), preferred == provider).clicked() {
+                            preferred = provider;
+                            changed = true;
+                        }
+                    }
+                },
+            );
+        });
+        if changed {
+            let ctx = ui.ctx().clone();
+            app.update_settings(&ctx, |s| s.preferred_provider = preferred);
+        }
+    }
+    match app.settings_provider {
+        Provider::YouTubeMusic => account(app, ui),
+        Provider::Spotify => spotify(app, ui),
+        Provider::Local => library(app, ui),
+    }
 }
 
 /// The About tab: the shortcuts window, then the app's own name, version and licence.
@@ -267,10 +321,7 @@ fn note(app: &App, ui: &mut egui::Ui, text: &str) {
 
 /// How wide the settings column gets. Past this the switches, right-aligned, drifted a window's
 /// width away from the words that name them.
-const COLUMN_MAX_W: f32 = 760.0;
-/// Room kept between the settings column and the card's right edge when the card is narrower
-/// than [`COLUMN_MAX_W`].
-const RIGHT_GUTTER: f32 = 40.0;
+const COLUMN_MAX_W: f32 = 1040.0;
 
 /// A titled row with a persisted on/off switch.
 fn toggle_row(
@@ -290,6 +341,7 @@ fn toggle_row(
 fn appearance(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     app_icon_picker(app, ui);
+    home_settings(app, ui);
 
     let mut theme_choice = app.settings.theme;
     // The mode on screen decides which themes are offered: a theme file says whether it is
@@ -483,79 +535,11 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
 
 fn playback(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
-    let mut quality = app.settings.quality;
-    let mut autoplay = app.settings.autoplay;
     let mut keep_order = app.settings.queue_click_keeps_order;
-    let mut normalise = app.settings.normalise_volume;
-    let mut scrobble = app.settings.scrobble;
-
-    widgets::setting_group(ui, &p, Some("Sound"), |ui, g| {
-        g.row(ui, "Audio quality", quality.detail(), |ui| {
-            for option in Quality::ALL.into_iter().rev() {
-                if widgets::chip(ui, &p, option.label(), quality == option).clicked() {
-                    quality = option;
-                }
-            }
-        });
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-normalise",
-            "Audio normaliser",
-            "Keeps the volume consistent between tracks.",
-            &mut normalise,
-        );
-    });
-
-    widgets::setting_group(ui, &p, Some("Queue and history"), |ui, g| {
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-autoplay",
-            "Autoplay",
-            "Plays similar songs when your queue ends.",
-            &mut autoplay,
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-queue-keep-order",
-            "Keep the songs you jump over",
-            "Playing a song further down Up next plays it now and keeps the songs before it.",
-            &mut keep_order,
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-scrobble",
-            "Save listening history",
-            "Adds what you play to your YouTube history.",
-            &mut scrobble,
-        );
-    });
-
-    let ctx = ui.ctx().clone();
-    app.update_settings(&ctx, |s| {
-        s.quality = quality;
-        s.autoplay = autoplay;
-        s.queue_click_keeps_order = keep_order;
-        s.normalise_volume = normalise;
-        s.scrobble = scrobble;
-    });
-}
-
-/// How songs, playlists and Home behave, and where local music is read from.
-fn library(app: &mut App, ui: &mut egui::Ui) {
-    let p = app.palette;
     let mut double_click = app.settings.double_click_to_play;
-    let mut playlist_sort = app.settings.playlist_default_sort;
-    let mut open_order = false;
+    let mut fullscreen_lyrics = app.settings.fullscreen_lyrics;
 
-    widgets::setting_group(ui, &p, Some("Songs and playlists"), |ui, g| {
+    widgets::setting_group(ui, &p, Some("Player"), |ui, g| {
         toggle_row(
             g,
             ui,
@@ -565,6 +549,42 @@ fn library(app: &mut App, ui: &mut egui::Ui) {
             "One click selects, two clicks play.",
             &mut double_click,
         );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-fullscreen-lyrics",
+            "Lyrics in fullscreen",
+            "Shows lyrics beside the cover when available.",
+            &mut fullscreen_lyrics,
+        );
+    });
+
+    widgets::setting_group(ui, &p, Some("Queue"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-queue-keep-order",
+            "Keep the songs you jump over",
+            "Playing a song further down Up next plays it now and keeps the songs before it.",
+            &mut keep_order,
+        );
+    });
+
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.queue_click_keeps_order = keep_order;
+        s.double_click_to_play = double_click;
+        s.fullscreen_lyrics = fullscreen_lyrics;
+    });
+}
+
+fn library(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut playlist_sort = app.settings.playlist_default_sort;
+
+    widgets::setting_group(ui, &p, Some("Songs and playlists"), |ui, g| {
         g.wide_row(
             ui,
             "Playlist order",
@@ -586,36 +606,9 @@ fn library(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
-    // Which sections come first on Home: a window of its own, since it is a list to drag about.
-    let mut strict = app.settings.home_strict_order;
-    widgets::setting_group(ui, &p, Some("Home"), |ui, g| {
-        g.row(
-            ui,
-            "Order of homepage",
-            "Choose which sections come first on Home.",
-            |ui| {
-                open_order = widgets::outline_button(ui, &p, "Change…").clicked();
-            },
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-home-strict",
-            "Strict Home order",
-            "Waits longer for Home so your top sections come first. Gives up after a few seconds.",
-            &mut strict,
-        );
-    });
-    if open_order {
-        app.home_order_open = true;
-    }
-
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
-        s.double_click_to_play = double_click;
         s.playlist_default_sort = playlist_sort;
-        s.home_strict_order = strict;
     });
 
     local_music(app, ui);
@@ -719,6 +712,33 @@ fn system(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+const SETTINGS_INPUT_HEIGHT: f32 = 32.0;
+
+fn settings_input_pill(
+    p: &theme::Palette,
+    rect: egui::Rect,
+    hover: f32,
+    focused: bool,
+    invalid: bool,
+) -> egui::epaint::RectShape {
+    egui::epaint::RectShape::new(
+        rect,
+        egui::CornerRadius::same(16),
+        p.glass(widgets::mix(p.surface, p.surface_hover, hover)),
+        egui::Stroke::new(
+            1.0,
+            if invalid {
+                p.danger
+            } else if focused {
+                p.text
+            } else {
+                p.outline
+            },
+        ),
+        egui::StrokeKind::Inside,
+    )
+}
+
 fn discord(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut presence = app.settings.discord_rich_presence;
@@ -749,11 +769,31 @@ fn discord(app: &mut App, ui: &mut egui::Ui) {
             "Session name",
             "Shown with your Discord picture in the listening session.",
             |ui| {
-                ui.add(
+                let available = ui.available_width();
+                let width = if available < 600.0 { available } else { 232.0 };
+                let background = ui.painter().add(egui::Shape::Noop);
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut name)
-                        .hint_text("Discord display name")
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 0)))
+                        .font(theme::semibold(13.0))
+                        .text_color(p.text)
+                        .hint_text(
+                            RichText::new("Discord display name").font(theme::semibold(13.0)),
+                        )
                         .char_limit(32)
-                        .desired_width(150.0),
+                        .min_size(egui::vec2(0.0, SETTINGS_INPUT_HEIGHT))
+                        .vertical_align(egui::Align::Center)
+                        .desired_width(width),
+                );
+                ui.painter().set(
+                    background,
+                    settings_input_pill(
+                        &p,
+                        field.rect,
+                        widgets::lit(ui, &field),
+                        field.has_focus(),
+                        false,
+                    ),
                 );
             },
         );
@@ -843,6 +883,424 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
         }
         _ => sign_in(app, ui),
     }
+    youtube_playback(app, ui);
+    youtube_cache(app, ui);
+}
+
+fn youtube_playback(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut quality = app.settings.quality;
+    let mut autoplay = app.settings.autoplay;
+    let mut normalise = app.settings.normalise_volume;
+    let mut scrobble = app.settings.scrobble;
+
+    widgets::setting_group(ui, &p, Some("Playback"), |ui, g| {
+        g.wide_row(ui, "Audio quality", quality.detail(), |ui| {
+            for option in Quality::ALL {
+                if widgets::chip(ui, &p, option.label(), quality == option).clicked() {
+                    quality = option;
+                }
+            }
+        });
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-normalise",
+            "Audio normaliser",
+            "Keeps the volume consistent between tracks.",
+            &mut normalise,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-autoplay",
+            "Autoplay",
+            "Plays similar songs when your queue ends.",
+            &mut autoplay,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-scrobble",
+            "Save listening history",
+            "Adds what you play to your YouTube history.",
+            &mut scrobble,
+        );
+    });
+
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.quality = quality;
+        s.autoplay = autoplay;
+        s.normalise_volume = normalise;
+        s.scrobble = scrobble;
+    });
+}
+
+fn home_settings(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut strict = app.settings.home_strict_order;
+    let mut open_order = false;
+    let available = app.available_providers();
+    widgets::setting_group(ui, &p, Some("Home"), |ui, g| {
+        g.row(
+            ui,
+            "Customize Home",
+            if available.len() > 1 {
+                "Choose sources, priority and section order."
+            } else {
+                "Choose which sections come first on Home."
+            },
+            |ui| {
+                open_order = widgets::outline_button(ui, &p, "Customize").clicked();
+            },
+        );
+        if available.contains(&Provider::YouTubeMusic)
+            && matches!(
+                app.effective_home_source(),
+                HomeSource::Combined | HomeSource::YouTubeMusic
+            )
+        {
+            toggle_row(
+                g,
+                ui,
+                &p,
+                "setting-home-strict",
+                "Strict YouTube Music order",
+                "Waits for more YouTube Music sections before showing Home.",
+                &mut strict,
+            );
+        }
+    });
+    if open_order {
+        app.set_home_filter(None);
+        app.navigate(crate::app::Route::Home);
+        app.home_order_open = true;
+    }
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| s.home_strict_order = strict);
+}
+
+#[derive(Clone)]
+struct CacheLimitDraft {
+    text: String,
+    applied: u64,
+    error: Option<String>,
+}
+
+impl CacheLimitDraft {
+    fn new(limit: u64) -> Self {
+        Self {
+            text: limit.to_string(),
+            applied: limit,
+            error: None,
+        }
+    }
+
+    fn update(&mut self, limit: &mut u64, range: &std::ops::RangeInclusive<u64>) {
+        if let Some(value) = self
+            .text
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|value| range.contains(value))
+        {
+            *limit = value;
+            self.applied = value;
+            self.error = None;
+        } else {
+            self.error = Some(format!(
+                "Enter a whole number from {} to {} MiB.",
+                range.start(),
+                range.end()
+            ));
+        }
+    }
+}
+
+fn cache_limit(
+    g: &mut widgets::Group,
+    ui: &mut egui::Ui,
+    p: &theme::Palette,
+    enabled: bool,
+    limit: &mut u64,
+    provider: Provider,
+) {
+    use crate::settings::{
+        SPOTIFY_CACHE_MAX_MIB, SPOTIFY_CACHE_MIN_MIB, YOUTUBE_CACHE_MAX_MIB, YOUTUBE_CACHE_MIN_MIB,
+    };
+    let (options, range): (&[u64], _) = match provider {
+        Provider::YouTubeMusic => (
+            &[16, 32, 64, 128],
+            YOUTUBE_CACHE_MIN_MIB..=YOUTUBE_CACHE_MAX_MIB,
+        ),
+        Provider::Spotify => (
+            &[128, 512, 1024, 2048],
+            SPOTIFY_CACHE_MIN_MIB..=SPOTIFY_CACHE_MAX_MIB,
+        ),
+        Provider::Local => return,
+    };
+    let draft_id = ui.id().with(("cache-limit-draft", provider));
+    let editor_id = draft_id.with("input");
+    let mut draft = ui
+        .data_mut(|data| data.get_temp::<CacheLimitDraft>(draft_id))
+        .unwrap_or_else(|| CacheLimitDraft::new(*limit));
+    if draft.applied != *limit {
+        draft = CacheLimitDraft::new(*limit);
+    }
+    g.wide_row(
+        ui,
+        "Cache size",
+        "Maximum space used for song audio.",
+        |ui| {
+            ui.add_enabled_ui(enabled, |ui| {
+                for &size in options {
+                    if widgets::chip(ui, p, &format!("{size} MiB"), *limit == size).clicked() {
+                        *limit = size;
+                        draft = CacheLimitDraft::new(size);
+                    }
+                }
+                let (rect, field) = ui.allocate_exact_size(
+                    egui::vec2(132.0, SETTINGS_INPUT_HEIGHT),
+                    egui::Sense::click(),
+                );
+                let focused = ui.memory(|memory| memory.has_focus(editor_id));
+                let t = widgets::lit(ui, &field);
+                ui.painter().add(settings_input_pill(
+                    p,
+                    rect,
+                    t,
+                    focused,
+                    draft.error.is_some(),
+                ));
+                let unit_font = theme::semibold(13.0);
+                let unit_width = widgets::text_width(ui, "MiB", &unit_font);
+                let inner = egui::Rect::from_min_max(
+                    rect.min + egui::vec2(14.0, 0.0),
+                    rect.max - egui::vec2(14.0 + unit_width + 8.0, 0.0),
+                );
+                let mut field_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(inner)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                let response = field_ui.add(
+                    egui::TextEdit::singleline(&mut draft.text)
+                        .id(editor_id)
+                        .frame(egui::Frame::NONE)
+                        .margin(egui::Margin::ZERO)
+                        .font(theme::semibold(13.0))
+                        .text_color(p.text)
+                        .hint_text("Custom")
+                        .desired_width(inner.width())
+                        .char_limit(20),
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, enabled, "Custom limit")
+                });
+                if field.clicked() {
+                    response.request_focus();
+                }
+                if field.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                }
+                ui.painter().text(
+                    rect.right_center() - egui::vec2(14.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    "MiB",
+                    unit_font,
+                    p.secondary,
+                );
+                if response.changed() {
+                    draft.update(limit, &range);
+                }
+                response.on_hover_text(format!(
+                    "Custom limit: {} to {} MiB. Saves automatically.",
+                    range.start(),
+                    range.end()
+                ));
+            });
+        },
+    );
+    if let Some(error) = &draft.error {
+        g.free(ui, |ui| {
+            ui.label(
+                RichText::new(error)
+                    .font(theme::regular(12.0))
+                    .color(p.danger),
+            );
+        });
+    }
+    ui.data_mut(|data| data.insert_temp(draft_id, draft));
+}
+
+fn youtube_cache(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut enabled = app.settings.youtube_cache_enabled;
+    let mut limit = app.settings.youtube_cache_limit_mb;
+    widgets::setting_group(ui, &p, Some("Song cache"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "youtube-song-cache",
+            "Buffer songs",
+            "Keeps streamed audio in memory while listening.",
+            &mut enabled,
+        );
+        cache_limit(g, ui, &p, enabled, &mut limit, Provider::YouTubeMusic);
+    });
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.youtube_cache_enabled = enabled;
+        s.youtube_cache_limit_mb = limit;
+    });
+}
+
+fn spotify(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let signed_in = crate::spotify::is_signed_in();
+    let mut clicked = false;
+    let mut disconnect = false;
+    widgets::setting_group(ui, &p, Some("Account"), |ui, g| {
+        g.free(ui, |ui| {
+            ui.label(
+                RichText::new("Spotify Premium recommended")
+                    .font(theme::medium(13.0))
+                    .color(p.text),
+            );
+            for text in [
+                "Use an active Spotify Premium subscription to support Spotify and music rights holders. Premium does not guarantee playback or make this integration Spotify-approved.",
+                "Moosik is an unofficial client. You are responsible for following Spotify’s terms and for how you use your account. Spotify may suspend or terminate accounts that violate its rules. Use this integration at your own risk.",
+            ] {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text)
+                            .font(theme::regular(12.0))
+                            .color(p.secondary),
+                    )
+                    .wrap(),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                for (label, url) in [
+                    ("Spotify Premium", "https://www.spotify.com/premium/"),
+                    ("Spotify terms", "https://www.spotify.com/legal/end-user-agreement/"),
+                    ("User guidelines", "https://www.spotify.com/legal/user-guidelines/"),
+                ] {
+                    if widgets::outline_button(ui, &p, label).clicked() {
+                        crate::open_url(url);
+                    }
+                }
+            });
+        });
+        g.wide_row(
+            ui,
+            "Spotify account",
+            if signed_in {
+                "Saved account. Search Spotify or browse your library."
+            } else {
+                "Sign in to search and play Spotify."
+            },
+            |ui| {
+                ui.add_enabled_ui(!app.spotify_signing_in, |ui| {
+                    clicked = widgets::outline_button(
+                        ui,
+                        &p,
+                        if app.spotify_signing_in {
+                            "Signing in…"
+                        } else if signed_in {
+                            "Sign in again"
+                        } else {
+                            "Sign in"
+                        },
+                    )
+                    .clicked();
+                    if signed_in {
+                        disconnect = widgets::outline_button(ui, &p, "Sign out").clicked();
+                    }
+                });
+            },
+        );
+    });
+    if clicked {
+        app.spotify_signing_in = true;
+        app.backend.sign_in_spotify();
+    }
+    if disconnect {
+        app.backend.sign_out_spotify();
+    }
+
+    widgets::setting_group(ui, &p, Some("Playback"), |ui, g| {
+        g.row(
+            ui,
+            "Audio format",
+            "Protected AAC audio from Spotify.",
+            |_| {},
+        );
+        g.free(ui, |ui| {
+            ui.label(
+                RichText::new(
+                    "Playback needs a connection and a supported protected-audio runtime.",
+                )
+                .font(theme::regular(11.0))
+                .color(p.dim),
+            );
+        });
+    });
+    spotify_cache(app, ui);
+}
+
+fn spotify_cache(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
+    let mut enabled = app.settings.spotify_cache_enabled;
+    let mut limit = app.settings.spotify_cache_limit_mb;
+    let mut clear = false;
+    let usage = crate::spotify_drm::cache_usage_bytes();
+    let usage_label = format!(
+        "{:.1} MiB stored on this device.",
+        usage as f64 / 1_048_576.0
+    );
+    let feedback_id = ui.id().with("spotify-cache-feedback");
+    widgets::setting_group(ui, &p, Some("Song cache"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "spotify-song-cache",
+            "Cache songs",
+            "Keeps encrypted audio on this device. Playback still needs a connection.",
+            &mut enabled,
+        );
+        cache_limit(g, ui, &p, enabled, &mut limit, Provider::Spotify);
+        g.row(ui, "Stored audio", &usage_label, |ui| {
+            clear = widgets::outline_button(ui, &p, "Clear cache").clicked()
+        });
+    });
+    if clear {
+        let result = match crate::spotify_drm::clear_cache() {
+            Ok(()) => (false, "Song cache cleared.".to_owned()),
+            Err(error) => (true, format!("Could not clear song cache: {error}")),
+        };
+        ui.data_mut(|data| data.insert_temp(feedback_id, result));
+    }
+    if let Some((failed, message)) = ui.data(|data| data.get_temp::<(bool, String)>(feedback_id)) {
+        if failed {
+            problem(app, ui, &message);
+        } else {
+            note(app, ui, &message);
+        }
+    }
+    let ctx = ui.ctx().clone();
+    app.update_settings(&ctx, |s| {
+        s.spotify_cache_enabled = enabled;
+        s.spotify_cache_limit_mb = limit;
+    });
 }
 
 fn sign_in(app: &mut App, ui: &mut egui::Ui) {
@@ -1104,6 +1562,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn custom_cache_limit_saves_valid_edits_without_normalizing_the_input() {
+        let mut limit = 2048;
+        let mut draft = CacheLimitDraft::new(limit);
+        draft.text = "004096".to_owned();
+        draft.update(&mut limit, &(1..=1_048_576));
+        assert_eq!(limit, 4096);
+        assert_eq!(draft.applied, limit);
+        assert_eq!(draft.text, "004096");
+        assert!(draft.error.is_none());
+    }
+
+    #[test]
+    fn custom_cache_limit_keeps_the_saved_value_while_an_edit_is_invalid() {
+        let mut limit = 64;
+        let mut draft = CacheLimitDraft::new(limit);
+        for text in ["", "1", "12", "129", "18446744073709551616", "abc"] {
+            draft.text = text.to_owned();
+            draft.update(&mut limit, &(16..=128));
+            assert_eq!(limit, 64);
+            assert_eq!(draft.applied, 64);
+            assert_eq!(draft.text, text);
+            assert!(draft.error.is_some());
+        }
+        draft.text = "128".to_owned();
+        draft.update(&mut limit, &(16..=128));
+        assert_eq!(limit, 128);
+        assert_eq!(draft.applied, 128);
+        assert!(draft.error.is_none());
+    }
+
+    #[test]
     fn every_tab_has_its_own_label_and_the_first_is_the_default() {
         let labels: Vec<&str> = SettingsTab::ALL.iter().map(|t| t.label()).collect();
         let mut unique = labels.clone();
@@ -1111,5 +1600,16 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), SettingsTab::ALL.len());
         assert_eq!(SettingsTab::default(), SettingsTab::ALL[0]);
+        assert_eq!(
+            labels,
+            [
+                "Appearance",
+                "Playback",
+                "Providers",
+                "System",
+                "Discord",
+                "About"
+            ]
+        );
     }
 }
