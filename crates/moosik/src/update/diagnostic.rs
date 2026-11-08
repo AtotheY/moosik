@@ -38,7 +38,6 @@ impl eframe::App for Probe {
                 Event::ShowOffer => {}
                 Event::Current => self.status = "Up to date".into(),
                 Event::Failed(error) => self.status = error,
-                Event::Skipped => self.available = None,
                 Event::Finished => {}
                 Event::Relaunch => {
                     // Exercise the same checkpoint-before-relaunch contract with dummy data.
@@ -110,7 +109,7 @@ pub fn run() -> eframe::Result {
         },
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);
-            macos::start(&cc.egui_ctx, true).expect("configured Sparkle fixture");
+            macos::start(&cc.egui_ctx).expect("configured Sparkle fixture");
             Ok(Box::new(Probe {
                 version,
                 available: None,

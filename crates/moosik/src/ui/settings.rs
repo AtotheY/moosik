@@ -158,13 +158,6 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         app.help_open = true;
     }
 
-    // Updates: the launch check's switch, and what the last check found.
-    let mut check = app.settings.check_for_updates;
-    #[cfg(target_os = "macos")]
-    if let Some(native_check) = crate::update::macos::automatic_checks() {
-        check = native_check;
-    }
-    let before_check = check;
     let (mut check_now, mut show) = (false, false);
     let (title, detail) = match &app.update.available {
         Some(release) => (
@@ -196,15 +189,6 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         ),
     };
     widgets::setting_group(ui, &p, Some("Updates"), |ui, g| {
-        toggle_row(
-            g,
-            ui,
-            &p,
-            "setting-check-updates",
-            "Check for updates",
-            "Shows a small update icon when a new Moosik release is available.",
-            &mut check,
-        );
         g.row(ui, &title, &detail, |ui| {
             if app.update.available.is_some() {
                 show = widgets::outline_button(ui, &p, "Update").clicked();
@@ -213,12 +197,6 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
-    let ctx = ui.ctx().clone();
-    if check != before_check {
-        #[cfg(target_os = "macos")]
-        crate::update::macos::set_automatic_checks(check);
-        app.update_settings(&ctx, |s| s.check_for_updates = check);
-    }
     if check_now {
         app.check_for_update(true);
     }
