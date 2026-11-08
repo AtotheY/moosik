@@ -8,6 +8,8 @@
 //! `ytmapi-rs` accepts and YouTube ignores. The `Cookie` *request header* from the Network tab
 //! does carry them, and that is what the Paste cookies window asks for (`ui::paste_cookies`).
 
+use std::time::{Duration, Instant};
+
 use egui::RichText;
 
 use crate::app::App;
@@ -984,11 +986,18 @@ fn home_settings(app: &mut App, ui: &mut egui::Ui) {
     app.update_settings(&ctx, |s| s.home_strict_order = strict);
 }
 
+const CACHE_LIMIT_DEBOUNCE: Duration = Duration::from_secs(10);
+
+fn cache_limit_draft_id(provider: Provider) -> egui::Id {
+    egui::Id::new(("cache-limit-draft", provider))
+}
+
 #[derive(Clone)]
 struct CacheLimitDraft {
     text: String,
     applied: u64,
     error: Option<String>,
+    pending: Option<(u64, Instant)>,
 }
 
 impl CacheLimitDraft {
@@ -997,10 +1006,11 @@ impl CacheLimitDraft {
             text: limit.to_string(),
             applied: limit,
             error: None,
+            pending: None,
         }
     }
 
-    fn update(&mut self, limit: &mut u64, range: &std::ops::RangeInclusive<u64>) {
+    fn edit(&mut self, range: &std::ops::RangeInclusive<u64>, now: Instant) {
         if let Some(value) = self
             .text
             .trim()
@@ -1008,16 +1018,66 @@ impl CacheLimitDraft {
             .ok()
             .filter(|value| range.contains(value))
         {
-            *limit = value;
-            self.applied = value;
             self.error = None;
+            self.pending = (value != self.applied).then_some((value, now + CACHE_LIMIT_DEBOUNCE));
         } else {
+            self.pending = None;
             self.error = Some(format!(
                 "Enter a whole number from {} to {} MiB.",
                 range.start(),
                 range.end()
             ));
         }
+    }
+
+    fn apply_if_due(&mut self, now: Instant) -> Option<u64> {
+        let (value, deadline) = self.pending?;
+        if now < deadline {
+            return None;
+        }
+        self.pending = None;
+        self.applied = value;
+        Some(value)
+    }
+}
+
+pub(crate) fn apply_pending_cache_limits(app: &mut App, ctx: &egui::Context) {
+    let now = Instant::now();
+    let ready = |provider: Provider, enabled: bool, applied: u64| {
+        let id = cache_limit_draft_id(provider);
+        let mut draft = ctx.data(|data| data.get_temp::<CacheLimitDraft>(id))?;
+        let (_, deadline) = draft.pending?;
+        if !enabled || draft.applied != applied {
+            ctx.data_mut(|data| data.insert_temp(id, CacheLimitDraft::new(applied)));
+            return None;
+        }
+        if let Some(value) = draft.apply_if_due(now) {
+            ctx.data_mut(|data| data.insert_temp(id, draft));
+            Some(value)
+        } else {
+            ctx.request_repaint_after(deadline.saturating_duration_since(now));
+            None
+        }
+    };
+    let youtube = ready(
+        Provider::YouTubeMusic,
+        app.settings.youtube_cache_enabled,
+        app.settings.youtube_cache_limit_mb,
+    );
+    let spotify = ready(
+        Provider::Spotify,
+        app.settings.spotify_cache_enabled,
+        app.settings.spotify_cache_limit_mb,
+    );
+    if youtube.is_some() || spotify.is_some() {
+        app.update_settings(ctx, |settings| {
+            if let Some(limit) = youtube {
+                settings.youtube_cache_limit_mb = limit;
+            }
+            if let Some(limit) = spotify {
+                settings.spotify_cache_limit_mb = limit;
+            }
+        });
     }
 }
 
@@ -1043,7 +1103,7 @@ fn cache_limit(
         ),
         Provider::Local => return,
     };
-    let draft_id = ui.id().with(("cache-limit-draft", provider));
+    let draft_id = cache_limit_draft_id(provider);
     let editor_id = draft_id.with("input");
     let mut draft = ui
         .data_mut(|data| data.get_temp::<CacheLimitDraft>(draft_id))
@@ -1115,7 +1175,10 @@ fn cache_limit(
                     p.secondary,
                 );
                 if response.changed() {
-                    draft.update(limit, &range);
+                    draft.edit(&range, Instant::now());
+                    if draft.pending.is_some() {
+                        ui.ctx().request_repaint_after(CACHE_LIMIT_DEBOUNCE);
+                    }
                 }
                 response.on_hover_text(format!(
                     "Custom limit: {} to {} MiB. Saves automatically.",
@@ -1562,34 +1625,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_cache_limit_saves_valid_edits_without_normalizing_the_input() {
-        let mut limit = 2048;
-        let mut draft = CacheLimitDraft::new(limit);
+    fn custom_cache_limit_waits_ten_seconds_after_the_last_edit() {
+        let start = Instant::now();
+        let range = 1..=1_048_576;
+        let mut draft = CacheLimitDraft::new(2048);
+        draft.text = "4".to_owned();
+        draft.edit(&range, start);
+        let corrected = start + Duration::from_secs(9);
+        assert_eq!(draft.apply_if_due(corrected), None);
+        assert_eq!(draft.applied, 2048);
+
         draft.text = "004096".to_owned();
-        draft.update(&mut limit, &(1..=1_048_576));
-        assert_eq!(limit, 4096);
-        assert_eq!(draft.applied, limit);
+        draft.edit(&range, corrected);
+        assert_eq!(draft.apply_if_due(start + Duration::from_secs(10)), None);
+        assert_eq!(
+            draft.apply_if_due(corrected + Duration::from_millis(9999)),
+            None
+        );
+        assert_eq!(
+            draft.apply_if_due(corrected + Duration::from_secs(10)),
+            Some(4096)
+        );
+        assert_eq!(draft.applied, 4096);
         assert_eq!(draft.text, "004096");
         assert!(draft.error.is_none());
+        assert_eq!(
+            draft.apply_if_due(corrected + Duration::from_secs(11)),
+            None
+        );
     }
 
     #[test]
     fn custom_cache_limit_keeps_the_saved_value_while_an_edit_is_invalid() {
-        let mut limit = 64;
-        let mut draft = CacheLimitDraft::new(limit);
+        let start = Instant::now();
+        let range = 16..=128;
+        let mut draft = CacheLimitDraft::new(64);
         for text in ["", "1", "12", "129", "18446744073709551616", "abc"] {
+            draft.text = "16".to_owned();
+            draft.edit(&range, start);
             draft.text = text.to_owned();
-            draft.update(&mut limit, &(16..=128));
-            assert_eq!(limit, 64);
+            draft.edit(&range, start + Duration::from_secs(1));
+            assert_eq!(draft.apply_if_due(start + Duration::from_secs(11)), None);
             assert_eq!(draft.applied, 64);
             assert_eq!(draft.text, text);
             assert!(draft.error.is_some());
         }
-        draft.text = "128".to_owned();
-        draft.update(&mut limit, &(16..=128));
-        assert_eq!(limit, 128);
-        assert_eq!(draft.applied, 128);
-        assert!(draft.error.is_none());
     }
 
     #[test]
