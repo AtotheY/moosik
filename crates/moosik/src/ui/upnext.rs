@@ -432,42 +432,11 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
         .queue_undo
         .as_ref()
         .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
-    let compact = ui.available_width() < 400.0;
     crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), &upcoming);
     let show_section = has_current || in_room || !upcoming.is_empty() || undo;
     if show_section {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 30.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                let heading = if compact {
-                    theme::semibold(16.0)
-                } else {
-                    theme::bold(theme::SECTION_PT)
-                };
-                let title = if in_room { "Personal queue" } else { "Next up" };
-                ui.label(
-                    egui::RichText::new(title)
-                        .font(heading)
-                        .color(app.palette.text),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    crate::ui::queue_edit::queue_actions(ui, &app.palette, undo);
-                    if !upcoming.is_empty() {
-                        let count = upcoming.len();
-                        let label = if count == 1 { "song" } else { "songs" };
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("{count} {label}"))
-                                    .font(theme::regular(12.0))
-                                    .color(app.palette.secondary),
-                            )
-                            .truncate(),
-                        );
-                    }
-                });
-            },
-        );
+        let title = if in_room { "Personal queue" } else { "Next up" };
+        crate::ui::queue_edit::toolbar(ui, &app.palette, title, undo);
         ui.add_space(4.0);
     }
 
@@ -477,7 +446,6 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
             app.edit_queue(action);
         }
     } else {
-        crate::ui::queue_edit::selection_controls(ui, &app.palette, compact);
         next_up(app, ui, &upcoming);
     }
 }
