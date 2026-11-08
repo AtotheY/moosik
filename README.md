@@ -4,13 +4,11 @@
 
 # Moosik
 
-A YouTube Music desktop player for macOS, Windows, and Linux, with an editable queue and local listening stats.
+Moosik is an open-source desktop player for YouTube Music and local audio. Reorder a queue, find a song in your listening history, or host a listening party with friends. Windows also has an optional [Spotify provider](#spotify-on-windows) starting with the 0.1.35 source tag.
 
-[Download for Apple Silicon Mac](https://moosik.dev/?platform=mac#download) · [Windows x64 and all downloads](https://github.com/AtotheY/moosik/releases/latest)
+[Download for Apple Silicon Mac](https://moosik.dev/?platform=mac#download) · [Windows x64 and Ubuntu 24.04 x86-64 packages](https://github.com/AtotheY/moosik/releases/latest)
 
 [Install](#install) · [Listening stats](docs/listening-stats.md) · [Queue](docs/queue.md) · [Contribute](CONTRIBUTING.md) · [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml)
-
-> Early release. Windows x64 and Ubuntu 24.04 x86-64 are experimental. Interactive sign-in and playback still need testing on real hardware.
 
 ## Screenshots
 
@@ -35,7 +33,14 @@ macOS screenshots with signed-out browsing and synthetic listening stats. Click 
 - Edit YouTube playlists or save songs and local files in private playlists on your computer. Save the current queue with **Queue → Save as private playlist**.
 - Pin favorite playlists or drag them into nested folders. **Shuffle folder** mixes songs from every playlist and subfolder into one queue, skipping duplicates.
 - Choose themes, resize sidebars, and adjust transparency. On macOS, pick from ten Eclipse app icons.
-- Show your song with Discord Rich Presence and [invite friends to listen along](https://moosik.dev/blog/youtube-music-discord/).
+
+### Listen along with friends
+
+To host a YouTube Music listening party, open Discord desktop and enable **Discord Rich Presence** and **Host Listen along** in **Settings → Discord**. Play a YouTube Music track. Friends can choose **Listen along** on your Discord profile and open the invite in Moosik. Each guest plays their own stream, follows the host’s pauses and skips, and can add a song to the shared queue. [Discord setup guide](https://moosik.dev/blog/youtube-music-discord/)
+
+### Spotify on Windows
+
+The [0.1.35 source tag](https://github.com/AtotheY/moosik/tree/moosik-v0.1.35) adds Spotify search, your Spotify library, and protected audio playback. Check the [release packages](https://github.com/AtotheY/moosik/releases/latest) for a Windows build at 0.1.35 or later. Choose **Settings → Providers → Spotify → Sign in**. Sign-in and playback require Windows WebView2. Playback also requires an internet connection. Moosik recommends Spotify Premium, and playback availability depends on your account and runtime.
 
 ## Listening history
 
@@ -57,7 +62,7 @@ Download a package from the [latest release](https://github.com/AtotheY/moosik/r
 
 On macOS, open the DMG and drag Moosik to Applications. First launch may require approval in **System Settings → Privacy & Security**. See [in-app updates](docs/client-updates.md) for signing and update details.
 
-Use Moosik with a YouTube Premium or YouTube Music Premium account. The download feature checks for Premium; content availability depends on YouTube and your account.
+You can browse YouTube Music while signed out. Sign in for your account library and playlists. YouTube Music downloads require a verified YouTube Premium or YouTube Music Premium membership. Interactive sign-in and playback on the experimental packages still need testing on real hardware.
 
 ### Build from source
 
@@ -101,4 +106,4 @@ Keep session files, cookies, and raw account diagnostics private. Review logs an
 
 Maintained by [AtotheY](https://github.com/AtotheY). Licensed under [GPL-3.0-or-later](LICENSE), including this fork's changes. Existing copyright notices and dependency licenses apply.
 
-Moosik is an unofficial client. YouTube and YouTube Music are trademarks of Google LLC. It uses undocumented YouTube interfaces, so service changes can affect browsing and playback. Use is subject to the applicable service terms.
+Moosik is an unofficial client, independent of Google and Spotify. YouTube and YouTube Music are trademarks of Google LLC. Changes to either service can affect browsing and playback. Use is subject to the applicable service terms.
