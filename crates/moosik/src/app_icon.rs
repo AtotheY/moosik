@@ -90,7 +90,16 @@ impl AppIcon {
         Self::ALL[CURRENT.load(Ordering::Relaxed)]
     }
     pub fn image(self) -> anyhow::Result<image::RgbaImage> {
-        Ok(image::load_from_memory(self.png())?.to_rgba8())
+        Ok(image::load_from_memory(self.png())?.into_rgba8())
+    }
+    pub fn window_data(self) -> anyhow::Result<Arc<egui::IconData>> {
+        let image = self.image()?;
+        let (width, height) = image.dimensions();
+        Ok(Arc::new(egui::IconData {
+            width,
+            height,
+            rgba: image.into_raw(),
+        }))
     }
     pub fn texture(self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         let id = egui::Id::new(("moosik-icon", self.label()));
@@ -113,10 +122,17 @@ impl AppIcon {
     /// Called on the UI thread at launch and when the user chooses a finish.
     pub fn apply(
         self,
-        ctx: &egui::Context,
+        #[cfg(not(target_os = "macos"))] ctx: &egui::Context,
+        #[cfg(not(target_os = "macos"))] initial_icon: Option<Arc<egui::IconData>>,
         #[cfg(target_os = "windows")] window: Option<&winit::window::Window>,
     ) -> anyhow::Result<()> {
-        let img = self.image()?;
+        #[cfg(not(target_os = "macos"))]
+        let update_viewport = initial_icon.is_none();
+        #[cfg(not(target_os = "macos"))]
+        let icon = match initial_icon {
+            Some(icon) => icon,
+            None => self.window_data()?,
+        };
         #[cfg(target_os = "macos")]
         {
             use objc2::{AnyThread, MainThreadMarker};
@@ -135,6 +151,12 @@ impl AppIcon {
         #[cfg(target_os = "windows")]
         if let Some(window) = window {
             use winit::platform::windows::WindowExtWindows;
+            let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                icon.width,
+                icon.height,
+                icon.rgba.as_slice(),
+            )
+            .ok_or_else(|| anyhow::anyhow!("invalid window icon dimensions"))?;
             let large =
                 image::imageops::resize(&img, 64, 64, image::imageops::FilterType::Lanczos3);
             window.set_taskbar_icon(Some(winit::window::Icon::from_rgba(
@@ -147,13 +169,10 @@ impl AppIcon {
             }
             self.refresh_pin();
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(
-            egui::IconData {
-                width: img.width(),
-                height: img.height(),
-                rgba: img.into_raw(),
-            },
-        ))));
+        #[cfg(not(target_os = "macos"))]
+        if update_viewport {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(icon)));
+        }
         CURRENT.store(
             Self::ALL.iter().position(|v| *v == self).unwrap_or(0),
             Ordering::Relaxed,

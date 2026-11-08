@@ -267,24 +267,14 @@ pub fn open_url(url: &str) {
 /// `just install` places into hicolor. `None` when the bytes cannot be decoded — the app still
 /// runs, just without an icon.
 pub fn window_icon() -> Option<Arc<egui::IconData>> {
-    let img = image::load_from_memory(app_icon::AppIcon::current().png())
-        .ok()?
-        .to_rgba8();
-    let (width, height) = img.dimensions();
-    Some(Arc::new(egui::IconData {
-        rgba: img.into_raw(),
-        width,
-        height,
-    }))
+    app_icon::AppIcon::current().window_data().ok()
 }
 
 /// The same artwork as a texture, for the app's own UI (currently just the Settings page)
 /// rather than the OS chrome `window_icon` is for. Loaded once and cached by the caller — a
 /// fresh `egui::Context::load_texture` call is cheap to repeat, but there is no reason to.
 pub fn logo_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let img = image::load_from_memory(app_icon::AppIcon::current().png())
-        .ok()?
-        .to_rgba8();
+    let img = app_icon::AppIcon::current().image().ok()?;
     let (width, height) = img.dimensions();
     let image =
         egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], img.as_raw());

@@ -5,7 +5,7 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui;
-use moosik::{app, mark_start, window_icon};
+use moosik::{app, mark_start};
 
 fn main() -> eframe::Result {
     let early_args: Vec<String> = std::env::args().collect();
@@ -254,14 +254,19 @@ fn main() -> eframe::Result {
     if args.iter().any(|a| a == "--maximized") {
         viewport = viewport.with_maximized(true);
     }
-    if in_app_bundle() {
+    let settings = moosik::settings::load();
+    let startup_icon = if in_app_bundle() {
         // macOS: the bundle has its own icon, built for the Dock's light, dark, clear and tinted
         // looks (`scripts/build-macos.sh`). An icon set at runtime replaces it with the flat logo
         // for as long as the app runs, so a bundle sets none. An empty one is how eframe is told
         // that; leaving it out gets egui's own.
         viewport = viewport.with_icon(egui::IconData::default());
-    } else if let Some(icon) = window_icon() {
-        viewport = viewport.with_icon(icon);
+        None
+    } else {
+        settings.app_icon.window_data().ok()
+    };
+    if let Some(icon) = &startup_icon {
+        viewport = viewport.with_icon(std::sync::Arc::clone(icon));
     }
 
     if let Some((x, y)) = position {
@@ -311,35 +316,71 @@ fn main() -> eframe::Result {
             }),
         ..Default::default()
     };
-    // Windows: DX12 with a DirectComposition swapchain, the one presentation path there that
-    // carries per-pixel alpha. An HWND swapchain — DX12's default, and Vulkan's only one — is
-    // opaque to DWM. Always on, not only when the slider is up, so moving it needs no restart;
-    // an opaque shell looks the same through either. What sits under the shell is `blur.rs`'s
-    // business: the window's redirection surface, painted black so it reads as glass.
-    // `WGPU_BACKEND` and `WGPU_DX12_PRESENTATION_SYSTEM` still override both, for A/B-ing a driver
-    // problem.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         use eframe::egui_wgpu::{WgpuSetup, WgpuSetupCreateNew, wgpu};
         let mut setup = WgpuSetupCreateNew::without_display_handle();
-        setup.instance_descriptor.backends =
-            wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12);
-        setup
-            .instance_descriptor
-            .backend_options
-            .dx12
-            .presentation_system =
-            wgpu::Dx12SwapchainKind::from_env().unwrap_or(wgpu::Dx12SwapchainKind::DxgiFromVisual);
-        let device_descriptor = setup.device_descriptor;
-        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
-            let mut descriptor = device_descriptor(adapter);
-            if adapter.get_info().backend == wgpu::Backend::Dx12 {
-                descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
-                let limits = &mut descriptor.required_limits;
-                limits.max_non_sampler_bindings = limits.max_non_sampler_bindings.min(8192);
+        let (native_backend, no_adapter) = if cfg!(target_os = "macos") {
+            (wgpu::Backends::METAL, "No compatible Metal adapter found")
+        } else {
+            (
+                wgpu::Backends::DX12,
+                "No compatible Direct3D 12 adapter found",
+            )
+        };
+        setup.instance_descriptor.backends = wgpu::Backends::from_env().unwrap_or(native_backend);
+        if setup.instance_descriptor.backends == native_backend {
+            use wgpu::{DeviceType, PowerPreference};
+            if std::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_none() {
+                // Moosik and egui issue direct draws, so these compute pipelines go unused.
+                setup
+                    .instance_descriptor
+                    .flags
+                    .remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
             }
-            descriptor
-        });
+            let preference = setup.power_preference;
+            setup.native_adapter_selector = Some(std::sync::Arc::new(move |adapters, surface| {
+                adapters
+                    .iter()
+                    .filter(|adapter| {
+                        surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+                    })
+                    .min_by_key(
+                        |adapter| match (preference, adapter.get_info().device_type) {
+                            (PowerPreference::None, _) => 0,
+                            (PowerPreference::LowPower, DeviceType::IntegratedGpu)
+                            | (PowerPreference::HighPerformance, DeviceType::DiscreteGpu) => 1,
+                            (_, DeviceType::IntegratedGpu | DeviceType::DiscreteGpu) => 2,
+                            (_, DeviceType::Other) => 3,
+                            (_, DeviceType::VirtualGpu) => 4,
+                            (_, DeviceType::Cpu) => 5,
+                        },
+                    )
+                    .cloned()
+                    .ok_or_else(|| no_adapter.to_owned())
+            }));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // DX12's DirectComposition swapchain carries per-pixel alpha; its HWND swapchain
+            // is opaque to DWM. Keeping it active allows opacity changes without a restart.
+            setup
+                .instance_descriptor
+                .backend_options
+                .dx12
+                .presentation_system = wgpu::Dx12SwapchainKind::from_env()
+                .unwrap_or(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+            let device_descriptor = setup.device_descriptor;
+            setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+                let mut descriptor = device_descriptor(adapter);
+                if adapter.get_info().backend == wgpu::Backend::Dx12 {
+                    descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+                    let limits = &mut descriptor.required_limits;
+                    limits.max_non_sampler_bindings = limits.max_non_sampler_bindings.min(8192);
+                }
+                descriptor
+            });
+        }
         native_options.wgpu_options.wgpu_setup = WgpuSetup::CreateNew(setup);
     }
     // A test aid for debug builds: `MOOSIK_NO_VSYNC=1` stops the swap from waiting for the screen,
@@ -375,6 +416,9 @@ fn main() -> eframe::Result {
                     tray_test,
                     autostart,
                 },
+                settings,
+                #[cfg(not(target_os = "macos"))]
+                startup_icon,
             )
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
             if primary {

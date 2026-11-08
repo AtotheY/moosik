@@ -1657,15 +1657,15 @@ impl Backend {
         self.search_cache.invalidate();
     }
 
-    pub fn set_local_search_tracks(&self, tracks: Vec<Track>) {
+    pub fn set_local_search_tracks(&self, tracks: Arc<Vec<Track>>) {
         let mut current = self
             .local_search_tracks
             .write()
             .unwrap_or_else(|error| error.into_inner());
-        if current.as_ref() != &tracks {
-            *current = Arc::new(tracks);
+        if !Arc::ptr_eq(&current, &tracks) && current.as_ref() != tracks.as_ref() {
             self.search_cache.invalidate_local();
         }
+        *current = tracks;
     }
 
     pub fn set_search_providers(&self, providers: Vec<Provider>) -> bool {

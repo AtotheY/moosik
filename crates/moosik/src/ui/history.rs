@@ -188,9 +188,10 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         .filter(|r| {
             r.listen_ms > 0.0
                 && r.at >= cutoff
-                && format!("{} {}", r.title, r.artist)
-                    .to_lowercase()
-                    .contains(&needle)
+                && (needle.is_empty()
+                    || format!("{} {}", r.title, r.artist)
+                        .to_lowercase()
+                        .contains(&needle))
         })
         .collect();
     ui.label(

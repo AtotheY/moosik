@@ -13,6 +13,7 @@
 //! The radio stays in `App`. Where its rules matter (the songs the listener chose before the
 //! radio's, Repeat All looping only those), the caller passes the chosen set as [`Chosen`].
 
+use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 
 use crate::app::{Radio, RepeatMode};
@@ -164,6 +165,7 @@ struct Order {
 pub(crate) struct PlayQueue {
     tracks: Vec<Track>,
     current: Option<usize>,
+    edit_stamp: Cell<Option<u64>>,
     /// A restored position to start at once its track loads: `(index, seconds)`.
     resume: Option<(usize, f64)>,
     /// The play order while shuffle is on.
@@ -192,6 +194,7 @@ impl PlayQueue {
         Self {
             tracks: Vec::new(),
             current: None,
+            edit_stamp: Cell::new(None),
             resume: None,
             shuffle: None,
             history: PlayHistory::default(),
@@ -207,6 +210,7 @@ impl PlayQueue {
 
     /// The tracks themselves, to update a rating in place; the length cannot change through it.
     pub(crate) fn tracks_mut(&mut self) -> &mut [Track] {
+        *self.edit_stamp.get_mut() = None;
         &mut self.tracks
     }
 
@@ -273,6 +277,7 @@ impl PlayQueue {
             return;
         }
         if let Some(shuffle) = &mut self.shuffle {
+            *self.edit_stamp.get_mut() = None;
             shuffle.pos = self
                 .current
                 .and_then(|i| order.iter().position(|x| *x == i));
@@ -330,18 +335,12 @@ impl PlayQueue {
         }
     }
 
-    /// How many tracks [`Self::upcoming`] lists, without building the list: what autoplay's
-    /// low-water mark counts, since under shuffle the playing track's place in the list says
-    /// nothing about how much is left.
-    pub(crate) fn remaining(&self, repeat: RepeatMode, chosen: Chosen) -> usize {
+    /// The number of tracks left in the current order before Repeat All filtering.
+    pub(crate) fn remaining(&self) -> usize {
         match &self.shuffle {
             Some(o) => {
-                let skip = self.round_skips(repeat, chosen);
                 let from = o.pos.map_or(0, |p| p + 1);
-                o.order[from.min(o.order.len())..]
-                    .iter()
-                    .filter(|&&i| !skip(i))
-                    .count()
+                o.order.len().saturating_sub(from)
             }
             None => self.tracks.len() - self.current.map_or(0, |i| i + 1).min(self.tracks.len()),
         }
@@ -372,6 +371,7 @@ impl PlayQueue {
         }
         let order = self.new_round(current, repeat, chosen);
         let first = order.order.first().copied().unwrap_or(current);
+        *self.edit_stamp.get_mut() = None;
         self.shuffle = Some(order);
         Some(first)
     }
@@ -414,16 +414,20 @@ impl PlayQueue {
 
     /// Which tracks a shuffled round passes over: under Repeat All the loop is the listener's own
     /// songs, so a radio tail appended before it went on is not played; otherwise none.
-    fn round_skips(&self, repeat: RepeatMode, chosen: Chosen) -> impl Fn(usize) -> bool + '_ {
-        let loops_chosen =
-            repeat == RepeatMode::All && self.tracks.iter().any(|t| is_chosen(chosen, t));
-        let chosen: Option<HashSet<String>> = chosen.cloned();
+    fn round_skips<'a>(
+        &'a self,
+        repeat: RepeatMode,
+        chosen: Chosen<'a>,
+    ) -> impl Fn(usize) -> bool + 'a {
+        let chosen = chosen.filter(|chosen| {
+            repeat == RepeatMode::All && self.tracks.iter().any(|t| chosen.contains(&t.video_id))
+        });
         move |i| {
-            loops_chosen
-                && self
-                    .tracks
+            chosen.is_some_and(|chosen| {
+                self.tracks
                     .get(i)
-                    .is_some_and(|t| !is_chosen(chosen.as_ref(), t))
+                    .is_some_and(|t| !chosen.contains(&t.video_id))
+            })
         }
     }
 
@@ -432,6 +436,7 @@ impl PlayQueue {
     /// Make `index` the playing track. Under shuffle the order moves to it: jumping ahead passes
     /// over the songs in between, stepping back makes them upcoming again.
     pub(crate) fn set_current(&mut self, index: usize) {
+        *self.edit_stamp.get_mut() = None;
         self.current = Some(index);
         if let Some(o) = &mut self.shuffle {
             o.pos = o.order.iter().position(|&i| i == index);
@@ -452,6 +457,7 @@ impl PlayQueue {
         if let Some(o) = &mut self.shuffle {
             let from = o.order.iter().position(|&i| i == index)?;
             let at = o.pos.map_or(0, |p| p + 1);
+            *self.edit_stamp.get_mut() = None;
             if from >= at {
                 let entry = o.order.remove(from);
                 o.order.insert(at, entry);
@@ -535,6 +541,7 @@ impl PlayQueue {
     }
 
     fn load(&mut self, tracks: Vec<Track>, start: usize, chosen: Chosen) {
+        *self.edit_stamp.get_mut() = None;
         self.tracks = tracks;
         self.current = None;
         // Keyed by index: the new queue's song at that index would open where the old one left off.
@@ -553,6 +560,7 @@ impl PlayQueue {
         shuffle: bool,
         chosen: Chosen,
     ) {
+        *self.edit_stamp.get_mut() = None;
         self.tracks = tracks;
         self.current = current.filter(|&i| i < self.tracks.len());
         self.resume = self.current.zip(resume);
@@ -573,6 +581,7 @@ impl PlayQueue {
         if on == self.shuffle.is_some() {
             return;
         }
+        *self.edit_stamp.get_mut() = None;
         self.shuffle = on.then(|| {
             let mut order = self.draw(self.current, chosen);
             if let Some(current) = self.current {
@@ -693,6 +702,9 @@ impl PlayQueue {
     /// Identifies occurrences and their playback order; invalidates stale drags and Undo.
     pub(crate) fn edit_stamp(&self) -> u64 {
         use std::hash::{Hash, Hasher};
+        if let Some(stamp) = self.edit_stamp.get() {
+            return stamp;
+        }
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         for t in &self.tracks {
             t.video_id.hash(&mut hash);
@@ -702,7 +714,9 @@ impl PlayQueue {
             .as_ref()
             .map(|o| (&o.order, o.pos))
             .hash(&mut hash);
-        hash.finish()
+        let stamp = hash.finish();
+        self.edit_stamp.set(Some(stamp));
+        stamp
     }
 
     pub(crate) fn edit_snapshot(&self) -> EditSnapshot {
@@ -714,6 +728,7 @@ impl PlayQueue {
     }
 
     pub(crate) fn undo_edit(&mut self, snapshot: EditSnapshot) {
+        *self.edit_stamp.get_mut() = None;
         let resume = self
             .resume
             .and_then(|(_, seconds)| snapshot.current.map(|i| (i, seconds)));
@@ -789,6 +804,7 @@ impl PlayQueue {
             return false;
         }
         if let Some(order) = &mut self.shuffle {
+            *self.edit_stamp.get_mut() = None;
             let positions: Vec<_> = order
                 .order
                 .iter()
@@ -872,6 +888,7 @@ impl PlayQueue {
     /// Carry every index through `map` (`None`: the track is gone): the playing track, the
     /// restored position, and the shuffle order, whose place stays on the same entry.
     fn reindex(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        *self.edit_stamp.get_mut() = None;
         self.current = self.current.and_then(&map);
         self.resume = self.resume.and_then(|(i, p)| map(i).map(|i| (i, p)));
         if let Some(o) = &mut self.shuffle {
@@ -1180,6 +1197,28 @@ mod tests {
         assert_eq!(ids(&q, &q.upcoming(RepeatMode::Off, None)), ["a", "b", "c"]);
         assert_eq!(q.resume_here(), Some(47.0));
         assert_eq!(q.edit_stamp(), stamp);
+    }
+
+    #[test]
+    fn edit_stamp_changes_after_current_order_and_track_edits() {
+        let mut q = queue(&["a", "b", "c"], 0);
+        let initial = q.edit_stamp();
+        q.set_current(1);
+        assert_ne!(q.edit_stamp(), initial);
+
+        let sequential = q.edit_stamp();
+        q.set_shuffle(true, None);
+        let shuffled = q.edit_stamp();
+        assert_ne!(shuffled, sequential);
+
+        let mut order = q.saved_shuffle_order().unwrap();
+        order.swap(0, 2);
+        q.restore_shuffle_order(Some(order));
+        let reordered = q.edit_stamp();
+        assert_ne!(reordered, shuffled);
+
+        q.tracks_mut()[0].video_id = "changed".into();
+        assert_ne!(q.edit_stamp(), reordered);
     }
 
     #[test]
