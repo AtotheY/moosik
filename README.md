@@ -4,7 +4,7 @@
 
 # Moosik
 
-Moosik is an open-source desktop player for YouTube Music and local audio. Reorder a queue, find a song in your listening history, or host a listening party with friends. Windows also has an optional [Spotify provider](#spotify-on-windows) starting with the 0.1.35 source tag.
+Moosik is an open-source desktop player for YouTube Music and local files, with Spotify on Windows. Host a YouTube Music listening party over Discord, share the queue with friends, and explore your listening history.
 
 [Download for Apple Silicon Mac](https://moosik.dev/?platform=mac#download) · [Windows x64 and Ubuntu 24.04 x86-64 packages](https://github.com/AtotheY/moosik/releases/latest)
 
@@ -12,7 +12,7 @@ Moosik is an open-source desktop player for YouTube Music and local audio. Reord
 
 ## Screenshots
 
-macOS screenshots with signed-out browsing and synthetic listening stats. Click an image to open it at full size. [Screenshot details](assets/screenshots/moosik/README.md).
+These macOS screenshots show signed-out browsing and synthetic listening stats. [Screenshot details](assets/screenshots/moosik/README.md)
 
 <table>
   <tr>
@@ -27,26 +27,14 @@ macOS screenshots with signed-out browsing and synthetic listening stats. Click 
 
 ## Player
 
-- Browse Home, Explore, albums, artists, search, and your YouTube Music library.
-- Use keyboard shortcuts, synced lyrics, and the fullscreen player.
-- Select and drag several songs in the [queue](docs/queue.md), remove upcoming tracks, and undo edits.
-- Edit YouTube playlists or save songs and local files in private playlists on your computer. Save the current queue with **Queue → Save as private playlist**.
-- Pin favorite playlists or drag them into nested folders. **Shuffle folder** mixes songs from every playlist and subfolder into one queue, skipping duplicates.
-- Choose themes, resize sidebars, and adjust transparency. On macOS, pick from ten Eclipse app icons.
-
-### Listen along with friends
-
-To host a YouTube Music listening party, open Discord desktop and enable **Discord Rich Presence** and **Host Listen along** in **Settings → Discord**. Play a YouTube Music track. Friends can choose **Listen along** on your Discord profile and open the invite in Moosik. Each guest plays their own stream, follows the host’s pauses and skips, and can add a song to the shared queue. [Discord setup guide](https://moosik.dev/blog/youtube-music-discord/)
-
-### Spotify on Windows
-
-The [0.1.35 source tag](https://github.com/AtotheY/moosik/tree/moosik-v0.1.35) adds Spotify search, your Spotify library, and protected audio playback. Check the [release packages](https://github.com/AtotheY/moosik/releases/latest) for a Windows build at 0.1.35 or later. Choose **Settings → Providers → Spotify → Sign in**. Sign-in and playback require Windows WebView2. Playback also requires an internet connection. Moosik recommends Spotify Premium, and playback availability depends on your account and runtime.
+- **Spotify on Windows.** Sign in under **Settings → Providers → Spotify** to search Spotify and browse your library. Connect both accounts to see their songs together in **Liked Music**. Sign-in and playback require Windows WebView2. Playback requires an internet connection. Moosik recommends Spotify Premium.
+- **Listen along on Discord.** Open Discord desktop and enable **Discord Rich Presence** and **Host Listen along** in **Settings → Discord**. Play a YouTube Music track. Friends can join from your profile, follow your playback in Moosik, and add songs to the shared queue. [Setup guide](https://moosik.dev/blog/youtube-music-discord/)
+- **Queue and playlists.** Move several upcoming tracks together, undo edits, or save the queue as a private playlist. Organize playlists in nested folders and shuffle an entire folder. [Queue controls](docs/queue.md)
+- Follow synced lyrics, use keyboard shortcuts, and customize the player’s theme, sidebars, and fullscreen view.
 
 ## Listening history
 
-Moosik records playback from this installation in a local SQLite database. Search past listens by title or artist, filter by date, and see listening time by song, artist, album, or your own genre tags. Stats include skips, completed listens, streaks, and listening patterns. Paused and buffering time are excluded.
-
-Add personal ratings and mood tags. Pick a date range and share your recap as an image or copy links to your top songs. Export song stats as CSV, listening history as JSON, a database backup, or a recap as Markdown. These records, labels, and ratings stay on your computer unless you share them.
+Search local listening history by title, artist, or date. See listening time, skips and completed plays, add mood tags and ratings, or share a recap for a date range you choose. Export song stats as CSV, history as JSON, or back up the SQLite database.
 
 [Listening history guide](https://moosik.dev/guides/listening-history/) · [Stat definitions and limitations](docs/listening-stats.md)
 
@@ -62,7 +50,7 @@ Download a package from the [latest release](https://github.com/AtotheY/moosik/r
 
 On macOS, open the DMG and drag Moosik to Applications. First launch may require approval in **System Settings → Privacy & Security**. See [in-app updates](docs/client-updates.md) for signing and update details.
 
-You can browse YouTube Music while signed out. Sign in for your account library and playlists. YouTube Music downloads require a verified YouTube Premium or YouTube Music Premium membership. Interactive sign-in and playback on the experimental packages still need testing on real hardware.
+Interactive sign-in and playback on the experimental packages still need testing on real hardware.
 
 ### Build from source
 
@@ -76,11 +64,9 @@ cargo run --locked --release -p moosik --bin moosik
 
 ## Account and playlists
 
-Choose **Sign in**, then **Use my [browser] login** to use an existing YouTube Music session. If you need to sign in again, open that browser from Moosik, sign in to YouTube Music, and choose the same login again. **Open sign-in window** works independently of browser import, including in Flatpak and on Windows with protected Chrome or Edge profiles. On macOS, Moosik stores the saved YouTube session in Keychain. Windows and Linux use session files.
+Browse YouTube Music signed out, or choose **Sign in → Use my [browser] login** for your library and playlists. **Open sign-in window** also works with protected browser profiles. YouTube Music downloads require a verified YouTube Premium or YouTube Music Premium membership.
 
-YouTube playlist edits sync to your account and follow each playlist's visibility settings. Choose **Save privately** to keep a playlist on this computer.
-
-Keep session files, cookies, and raw account diagnostics private. Review logs and exports before sharing them in an issue.
+YouTube playlist edits follow the playlist’s visibility settings. **Save privately** keeps songs and local files in a playlist on this computer. Keep session files and cookies private when sharing diagnostics.
 
 ## Contribute
 
