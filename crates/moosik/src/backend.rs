@@ -444,6 +444,10 @@ pub enum Event {
         seed: String,
         error: String,
     },
+    SpotifyAutoplay {
+        generation: u64,
+        result: Result<Option<Track>, String>,
+    },
     /// Lyrics for the now-playing track: synced from LRCLIB when it had them, else plain text
     /// from InnerTube.
     LyricsLoaded {
@@ -1863,6 +1867,20 @@ impl Backend {
                 },
             };
             Self::emit_browse(&tx, &ctx, epoch, event);
+        });
+    }
+
+    pub fn spotify_autoplay(&self, generation: u64, seed: String, recent: Vec<String>) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                crate::spotify::autoplay_next(&seed, &recent),
+            )
+            .await
+            .map_err(|_| "Spotify autoplay timed out".to_owned())
+            .and_then(|result| result.map_err(|error| error.to_string()));
+            Self::emit(&tx, &ctx, Event::SpotifyAutoplay { generation, result });
         });
     }
 

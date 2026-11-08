@@ -349,6 +349,7 @@ pub struct Settings {
     /// Keep playing related songs when a hand-picked queue nears its end. YouTube's own radio,
     /// fetched for the queue's last track. On by default, as on the site.
     pub autoplay: bool,
+    pub spotify_autoplay: bool,
     /// Clicking a song further down Up next plays it straight away and keeps the songs before it
     /// still to come, after it, instead of passing over them. Off by default: the click jumps to
     /// that place in the queue.
@@ -435,6 +436,7 @@ impl Default for Settings {
             spotify_cache_enabled: true,
             spotify_cache_limit_mb: 512,
             autoplay: true,
+            spotify_autoplay: true,
             queue_click_keeps_order: false,
             fullscreen_lyrics: true,
             home_order: crate::model::default_order_keys(),
@@ -693,6 +695,10 @@ mod tests {
             partial.autoplay,
             "an older settings file without the toggle must still autoplay"
         );
+        assert!(partial.spotify_autoplay);
+        let spotify_off: Settings = serde_json::from_str(r#"{"spotify_autoplay":false}"#).unwrap();
+        assert!(!spotify_off.spotify_autoplay);
+        assert!(spotify_off.autoplay);
     }
 
     /// The literal shape of every file on disk before this milestone: a theme and the tint

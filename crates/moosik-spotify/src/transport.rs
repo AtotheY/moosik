@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::{
 use url::Url;
 
 use crate::{
-    AccountProfile, Error, Result, WebSession, http_client, now_ms,
+    AccountProfile, ArtistCredit, CatalogTrack, Error, Result, WebSession, http_client, now_ms,
     web_auth::{cookie_header, validate_web_session},
 };
 
@@ -490,6 +490,35 @@ impl Transport {
                 .map(|id| format!("https://i.scdn.co/image/{id}"));
         }
         Ok(metadata)
+    }
+
+    pub async fn autoplay_next(
+        &self,
+        seed: &str,
+        recent: &[String],
+    ) -> Result<Option<CatalogTrack>> {
+        const STAGE: &str = "Spotify autoplay";
+        track_id(seed)?;
+        if self.inner.expires_at <= now_ms()? {
+            return Err(Error::AuthorizationExpired);
+        }
+        let previous = recent
+            .iter()
+            .filter(|uri| track_id(uri).is_ok())
+            .filter_map(|uri| uri.strip_prefix("spotify:track:"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let response = self
+            .api(
+                Method::GET,
+                &format!(
+                    "/radio-apollo/v3/tracks/{seed}?autoplay=true&count=12&prev_tracks={previous}"
+                ),
+                None,
+                STAGE,
+            )
+            .await?;
+        autoplay_track(&response, seed, recent)
     }
 
     pub(crate) async fn canonical_track_uri(&self, uri: &str) -> Option<String> {
@@ -1236,6 +1265,60 @@ fn track_id(uri: &str) -> Result<u128> {
     Ok(value)
 }
 
+fn autoplay_track(value: &Value, seed: &str, recent: &[String]) -> Result<Option<CatalogTrack>> {
+    let tracks = value["tracks"]
+        .as_array()
+        .ok_or(Error::Invalid("Spotify autoplay response"))?;
+    Ok(tracks.iter().find_map(|track| {
+        let uri = track["uri"].as_str()?;
+        if uri == seed || recent.iter().any(|recent| recent == uri) || track_id(uri).is_err() {
+            return None;
+        }
+        let metadata = &track["metadata"];
+        let title = track["name"]
+            .as_str()
+            .or_else(|| metadata["title"].as_str())?;
+        if title.trim().is_empty() {
+            return None;
+        }
+        let cover_url = metadata["image_url"]
+            .as_str()
+            .and_then(|uri| uri.strip_prefix("spotify:image:"))
+            .filter(|id| id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(|id| format!("https://i.scdn.co/image/{id}"));
+        let artists: Vec<_> = metadata["artist_name"]
+            .as_str()
+            .map(|name| ArtistCredit {
+                name: name.to_owned(),
+                uri: track["artist_uri"]
+                    .as_str()
+                    .and_then(crate::resource_uri)
+                    .filter(|uri| uri.starts_with("spotify:artist:")),
+            })
+            .into_iter()
+            .collect();
+        Some(CatalogTrack {
+            metadata: TrackMetadata {
+                uri: uri.to_owned(),
+                title: title.to_owned(),
+                artist_names: artists.iter().map(|artist| artist.name.clone()).collect(),
+                album: metadata["album_title"].as_str().map(str::to_owned),
+                duration_ms: None,
+                cover_url,
+                explicit: metadata["is_explicit"].as_str() == Some("true"),
+            },
+            artists,
+            album_uri: track["album_uri"]
+                .as_str()
+                .and_then(crate::resource_uri)
+                .filter(|uri| uri.starts_with("spotify:album:")),
+            saved: false,
+            plays: None,
+            playlist_item_uid: None,
+        })
+    }))
+}
+
 fn correlation() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -1741,6 +1824,45 @@ mod tests {
                 verification_sequence: AtomicU64::new(0),
             }),
         }
+    }
+
+    #[test]
+    fn autoplay_preserves_rank_after_skipping_recent_and_invalid_tracks() {
+        let seed = "spotify:track:0000000000000000000001";
+        let recent = "spotify:track:0000000000000000000002";
+        let first = "spotify:track:0000000000000000000003";
+        let second = "spotify:track:0000000000000000000004";
+        let response = json!({"tracks": [
+            {"uri": seed, "name": "Seed"},
+            {"uri": recent, "name": "Recently played"},
+            {"uri": "spotify:episode:0000000000000000000005", "name": "Episode"},
+            {"uri": first, "artist_uri": "spotify:artist:0000000000000000000006",
+                "album_uri": "spotify:album:0000000000000000000007", "metadata": {
+                "title": "First", "artist_name": "Artist", "album_title": "Album",
+                "image_url": "spotify:image:0123456789abcdef0123456789abcdef01234567",
+                "is_explicit": "true"
+            }},
+            {"uri": second, "name": "Second"}
+        ]});
+        let track = autoplay_track(&response, seed, &[recent.to_owned()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(track.metadata.uri, first);
+        assert_eq!(track.metadata.title, "First");
+        assert_eq!(track.metadata.artist_names, ["Artist"]);
+        assert_eq!(track.metadata.album.as_deref(), Some("Album"));
+        assert!(track.artists[0].uri.is_some());
+        assert!(track.album_uri.is_some());
+        assert_eq!(
+            track.metadata.cover_url.as_deref(),
+            Some("https://i.scdn.co/image/0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(track.metadata.explicit);
+        assert!(
+            autoplay_track(&json!({"tracks": []}), seed, &[])
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn prepared_track(file_id: &str) -> PreparedTrack {

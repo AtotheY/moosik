@@ -230,6 +230,30 @@ impl PlayQueue {
         self.current.and_then(|i| self.tracks.get(i))
     }
 
+    pub(crate) fn recent_spotify_tracks(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.current_track()
+            .into_iter()
+            .chain(
+                self.history
+                    .played
+                    .iter()
+                    .rev()
+                    .filter_map(|point| self.get(point.index)),
+            )
+            .chain(
+                self.history
+                    .queues
+                    .iter()
+                    .rev()
+                    .filter_map(|point| point.queue.get(point.index)),
+            )
+            .filter(|track| track.is_spotify() && seen.insert(track.video_id.as_str()))
+            .take(20)
+            .map(|track| track.video_id.clone())
+            .collect()
+    }
+
     pub(crate) fn is_shuffled(&self) -> bool {
         self.shuffle.is_some()
     }
@@ -954,6 +978,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(q.next(RepeatMode::All, None), Some(0));
+        assert_eq!(q.recent_spotify_tracks(), [original[1].video_id.clone()]);
         for expected in original[..original.len() - 1].iter().rev() {
             let Some(Rewind::WithinQueue { index, queue_len }) = q.rewind() else {
                 panic!("Previous must reach the earlier source");

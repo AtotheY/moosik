@@ -536,6 +536,8 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
 fn playback(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut keep_order = app.settings.queue_click_keeps_order;
+    let mut youtube_autoplay = app.settings.autoplay;
+    let mut spotify_autoplay = app.settings.spotify_autoplay;
     let mut double_click = app.settings.double_click_to_play;
     let mut fullscreen_lyrics = app.settings.fullscreen_lyrics;
 
@@ -565,6 +567,24 @@ fn playback(app: &mut App, ui: &mut egui::Ui) {
             g,
             ui,
             &p,
+            "setting-autoplay",
+            "YouTube Music Autoplay",
+            "Plays similar songs after your YouTube Music queue.",
+            &mut youtube_autoplay,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "setting-spotify-autoplay",
+            "Spotify Autoplay",
+            "Plays similar songs after your Spotify queue.",
+            &mut spotify_autoplay,
+        );
+        toggle_row(
+            g,
+            ui,
+            &p,
             "setting-queue-keep-order",
             "Keep the songs you jump over",
             "Playing a song further down Up next plays it now and keeps the songs before it.",
@@ -575,6 +595,8 @@ fn playback(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
         s.queue_click_keeps_order = keep_order;
+        s.autoplay = youtube_autoplay;
+        s.spotify_autoplay = spotify_autoplay;
         s.double_click_to_play = double_click;
         s.fullscreen_lyrics = fullscreen_lyrics;
     });
@@ -890,7 +912,6 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
 fn youtube_playback(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
     let mut quality = app.settings.quality;
-    let mut autoplay = app.settings.autoplay;
     let mut normalise = app.settings.normalise_volume;
     let mut scrobble = app.settings.scrobble;
 
@@ -915,15 +936,6 @@ fn youtube_playback(app: &mut App, ui: &mut egui::Ui) {
             g,
             ui,
             &p,
-            "setting-autoplay",
-            "Autoplay",
-            "Plays similar songs when your queue ends.",
-            &mut autoplay,
-        );
-        toggle_row(
-            g,
-            ui,
-            &p,
             "setting-scrobble",
             "Save listening history",
             "Adds what you play to your YouTube history.",
@@ -934,7 +946,6 @@ fn youtube_playback(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
         s.quality = quality;
-        s.autoplay = autoplay;
         s.normalise_volume = normalise;
         s.scrobble = scrobble;
     });
