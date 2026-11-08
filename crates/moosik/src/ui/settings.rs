@@ -17,7 +17,7 @@ use crate::auth::AuthState;
 use crate::browser_cookies;
 use crate::model::Provider;
 use crate::settings::Opacity;
-use crate::settings::{HomeSource, Quality, Theme};
+use crate::settings::{HomeSource, Quality, Settings, Theme};
 use crate::theme;
 use crate::widgets;
 
@@ -1042,7 +1042,16 @@ impl CacheLimitDraft {
 }
 
 pub(crate) fn apply_pending_cache_limits(app: &mut App, ctx: &egui::Context) {
-    let now = Instant::now();
+    if let Some(change) = pending_cache_limit_change(ctx, &app.settings, Instant::now()) {
+        app.update_settings(ctx, change);
+    }
+}
+
+fn pending_cache_limit_change(
+    ctx: &egui::Context,
+    settings: &Settings,
+    now: Instant,
+) -> Option<impl FnOnce(&mut Settings) + use<>> {
     let ready = |provider: Provider, enabled: bool, applied: u64| {
         let id = cache_limit_draft_id(provider);
         let mut draft = ctx.data(|data| data.get_temp::<CacheLimitDraft>(id))?;
@@ -1061,24 +1070,22 @@ pub(crate) fn apply_pending_cache_limits(app: &mut App, ctx: &egui::Context) {
     };
     let youtube = ready(
         Provider::YouTubeMusic,
-        app.settings.youtube_cache_enabled,
-        app.settings.youtube_cache_limit_mb,
+        settings.youtube_cache_enabled,
+        settings.youtube_cache_limit_mb,
     );
     let spotify = ready(
         Provider::Spotify,
-        app.settings.spotify_cache_enabled,
-        app.settings.spotify_cache_limit_mb,
+        settings.spotify_cache_enabled,
+        settings.spotify_cache_limit_mb,
     );
-    if youtube.is_some() || spotify.is_some() {
-        app.update_settings(ctx, |settings| {
-            if let Some(limit) = youtube {
-                settings.youtube_cache_limit_mb = limit;
-            }
-            if let Some(limit) = spotify {
-                settings.spotify_cache_limit_mb = limit;
-            }
-        });
-    }
+    (youtube.is_some() || spotify.is_some()).then_some(move |settings: &mut Settings| {
+        if let Some(limit) = youtube {
+            settings.youtube_cache_limit_mb = limit;
+        }
+        if let Some(limit) = spotify {
+            settings.spotify_cache_limit_mb = limit;
+        }
+    })
 }
 
 fn cache_limit(
@@ -1623,6 +1630,144 @@ fn icon_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue_cache_limit(
+        ctx: &egui::Context,
+        provider: Provider,
+        applied: u64,
+        value: u64,
+        now: Instant,
+    ) {
+        let draft = CacheLimitDraft {
+            text: value.to_string(),
+            applied,
+            error: None,
+            pending: Some((value, now + CACHE_LIMIT_DEBOUNCE)),
+        };
+        ctx.data_mut(|data| data.insert_temp(cache_limit_draft_id(provider), draft));
+    }
+
+    #[test]
+    fn pending_cache_limits_update_each_provider_once_when_due() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let start = Instant::now();
+        let spotify_due = start + Duration::from_secs(10);
+        let youtube_due = start + Duration::from_secs(11);
+        queue_cache_limit(
+            &ctx,
+            Provider::Spotify,
+            settings.spotify_cache_limit_mb,
+            256,
+            start,
+        );
+        queue_cache_limit(
+            &ctx,
+            Provider::YouTubeMusic,
+            settings.youtube_cache_limit_mb,
+            96,
+            start + Duration::from_secs(1),
+        );
+
+        assert!(pending_cache_limit_change(&ctx, &settings, start).is_none());
+        let original_youtube = settings.youtube_cache_limit_mb;
+        pending_cache_limit_change(&ctx, &settings, spotify_due).unwrap()(&mut settings);
+        assert_eq!(settings.spotify_cache_limit_mb, 256);
+        assert_eq!(settings.youtube_cache_limit_mb, original_youtube);
+        assert!(pending_cache_limit_change(&ctx, &settings, spotify_due).is_none());
+        pending_cache_limit_change(&ctx, &settings, youtube_due).unwrap()(&mut settings);
+        assert_eq!(settings.spotify_cache_limit_mb, 256);
+        assert_eq!(settings.youtube_cache_limit_mb, 96);
+        assert!(pending_cache_limit_change(&ctx, &settings, youtube_due).is_none());
+    }
+
+    #[test]
+    fn disabling_cache_cancels_the_pending_limit_before_reenabling() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let start = Instant::now();
+        queue_cache_limit(
+            &ctx,
+            Provider::Spotify,
+            settings.spotify_cache_limit_mb,
+            1,
+            start,
+        );
+        queue_cache_limit(
+            &ctx,
+            Provider::YouTubeMusic,
+            settings.youtube_cache_limit_mb,
+            16,
+            start,
+        );
+
+        settings.spotify_cache_enabled = false;
+        settings.youtube_cache_enabled = false;
+        assert!(pending_cache_limit_change(&ctx, &settings, start).is_none());
+        settings.spotify_cache_enabled = true;
+        settings.youtube_cache_enabled = true;
+        assert!(
+            pending_cache_limit_change(&ctx, &settings, start + Duration::from_secs(10)).is_none()
+        );
+    }
+
+    #[test]
+    fn clicking_the_current_cache_preset_cancels_a_pending_custom_limit() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = theme::Palette::dark();
+        let mut settings = Settings::default();
+        let start = Instant::now();
+        queue_cache_limit(&ctx, Provider::Spotify, 512, 1, start);
+
+        let mut pass = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    widgets::setting_group(ui, &palette, None, |ui, group| {
+                        cache_limit(
+                            group,
+                            ui,
+                            &palette,
+                            settings.spotify_cache_enabled,
+                            &mut settings.spotify_cache_limit_mb,
+                            Provider::Spotify,
+                        );
+                    });
+                },
+            )
+        };
+        let first_frame = pass(vec![]);
+        let preset = first_frame
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(label) if label.galley.text() == "512 MiB" => {
+                    Some(label.visual_bounding_rect().center())
+                }
+                _ => None,
+            })
+            .expect("512 MiB preset should be visible");
+        first_frame.drop_without_applying_deltas();
+        pass(vec![egui::Event::PointerMoved(preset)]).drop_without_applying_deltas();
+        for pressed in [true, false] {
+            pass(vec![egui::Event::PointerButton {
+                pos: preset,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }])
+            .drop_without_applying_deltas();
+        }
+
+        assert_eq!(settings.spotify_cache_limit_mb, 512);
+        assert!(
+            pending_cache_limit_change(&ctx, &settings, start + Duration::from_secs(10)).is_none()
+        );
+    }
 
     #[test]
     fn custom_cache_limit_waits_ten_seconds_after_the_last_edit() {
