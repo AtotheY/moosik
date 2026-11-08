@@ -123,7 +123,7 @@ pub fn paint_source(ui: &egui::Ui, rect: egui::Rect, source: &str, color: Color3
         "YouTube Music" => {
             ui.painter().rect_stroke(
                 egui::Rect::from_min_max(point(1.5, 4.5), point(22.5, 19.5)),
-                egui::CornerRadius::same(3),
+                egui::CornerRadius::same((rect.width() / 8.0).round() as u8),
                 stroke,
                 egui::StrokeKind::Inside,
             );

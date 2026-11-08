@@ -10013,6 +10013,11 @@ impl eframe::App for App {
         self.publish_loading(&ctx);
         crate::widgets::set_downloaded(&ctx, std::sync::Arc::clone(&self.downloaded_ids));
         crate::widgets::set_premium(&ctx, self.can_download());
+        crate::widgets::set_streaming_source_badges(
+            &ctx,
+            self.signed_in(),
+            crate::spotify::is_signed_in(),
+        );
 
         self.leave_restored_fullscreen(&ctx);
         // A fullscreen window is as square as a maximised one: nothing of the shell's own edge

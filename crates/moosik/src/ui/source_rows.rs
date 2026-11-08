@@ -260,12 +260,12 @@ pub(super) fn draw_with_options(
             |index| {
                 let group = &state.groups[index];
                 match &group.variants[selected[index]] {
-                    Entry::Song(_) | Entry::Video(_) | Entry::Album(_) => {
+                    Entry::Song(_) | Entry::Video(_) | Entry::Album(_) if group.is_combined() => {
                         let count = group.providers().len() as f32;
                         widgets::RowSlot::Subtitle(count * 24.0 + (count - 1.0) * 4.0)
                     }
                     Entry::Artist(_) if group.is_combined() => widgets::RowSlot::Trailing(120.0),
-                    _ => widgets::RowSlot::Subtitle(24.0),
+                    _ => widgets::RowSlot::Trailing(0.0),
                 }
             },
             |ui, index| {
@@ -315,16 +315,6 @@ pub(super) fn draw_with_options(
                     ) {
                         source_choice = Some((index, providers[choice]));
                     }
-                } else {
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::Vec2::splat(24.0), egui::Sense::hover());
-                    widgets::source_name_indicator(
-                        ui,
-                        palette,
-                        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(20.0)),
-                        provider.name(),
-                        response.id.with("source"),
-                    );
                 }
             },
         )

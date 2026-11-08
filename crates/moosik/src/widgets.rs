@@ -67,14 +67,32 @@ pub(crate) fn provider_button(
     response.on_hover_text(label)
 }
 
-pub fn source_indicator(
+pub(crate) fn set_streaming_source_badges(ctx: &egui::Context, youtube: bool, spotify: bool) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new("streaming-source-badges"), youtube && spotify)
+    });
+}
+
+pub(crate) const SOURCE_BADGE_WIDTH: f32 = 20.0;
+
+pub(crate) fn visible_source_badge<'a>(ui: &Ui, source: &'a str) -> Option<&'a str> {
+    (!matches!(source, "YouTube Music" | "Spotify")
+        || ui.data(|data| {
+            data.get_temp::<bool>(egui::Id::new("streaming-source-badges"))
+                .unwrap_or_default()
+        }))
+    .then_some(source)
+}
+
+pub(crate) fn source_badge(
     ui: &Ui,
     palette: &Palette,
-    rect: Rect,
-    track: &crate::model::Track,
+    left_center: egui::Pos2,
+    source: &str,
     id: egui::Id,
 ) {
-    source_name_indicator(ui, palette, rect, track.source_name(), id);
+    let rect = Rect::from_center_size(left_center + vec2(8.0, 0.0), vec2(16.0, 16.0));
+    source_name_indicator(ui, palette, rect, source, id);
 }
 
 pub fn source_name_indicator(ui: &Ui, palette: &Palette, rect: Rect, source: &str, id: egui::Id) {
@@ -2987,17 +3005,18 @@ fn track_row_inner<'a>(
             slot.width() + 4.0
         } else if custom_slot.is_none()
             && sub_w >= 80.0
-            && let Some(source) =
-                source.or_else(|| menu.as_ref().map(|menu| menu.track.source_name()))
+            && let Some(source) = source
+                .or_else(|| menu.as_ref().map(|menu| menu.track.source_name()))
+                .and_then(|source| visible_source_badge(ui, source))
         {
-            source_name_indicator(
+            source_badge(
                 ui,
                 palette,
-                Rect::from_center_size(egui::pos2(text_x + 9.0, subtitle_y), vec2(18.0, 18.0)),
+                egui::pos2(text_x, subtitle_y),
                 source,
                 row_id.with("source"),
             );
-            22.0
+            SOURCE_BADGE_WIDTH
         } else {
             0.0
         };
@@ -4381,15 +4400,15 @@ fn interactive_art_card_with_sources(
                 }
             }
             sources.len() as f32 * 28.0
-        } else if let Some(source) = source {
-            source_name_indicator(
+        } else if let Some(source) = source.and_then(|source| visible_source_badge(ui, source)) {
+            source_badge(
                 ui,
                 palette,
-                Rect::from_center_size(art.left_bottom() + vec2(12.0, 34.0), vec2(20.0, 20.0)),
+                art.left_bottom() + vec2(0.0, 34.0),
                 source,
                 response.id.with("source"),
             );
-            28.0
+            SOURCE_BADGE_WIDTH
         } else {
             0.0
         };
@@ -6062,6 +6081,28 @@ pub fn volume_slider(ui: &mut Ui, palette: &Palette, volume: f64, unmute_to: f64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_source_badges_require_both_accounts() {
+        let ctx = egui::Context::default();
+        for (youtube, spotify) in [(false, false), (true, false), (false, true), (true, true)] {
+            set_streaming_source_badges(&ctx, youtube, spotify);
+            let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for provider in ["YouTube Music", "Spotify"] {
+                    assert_eq!(
+                        visible_source_badge(ui, provider).is_some(),
+                        youtube && spotify
+                    );
+                }
+                assert_eq!(visible_source_badge(ui, "Local file"), Some("Local file"));
+                assert_eq!(
+                    visible_source_badge(ui, "Private playlist"),
+                    Some("Private playlist")
+                );
+            });
+            frame.textures_delta.clear();
+        }
+    }
 
     #[test]
     fn album_card_source_buttons_and_cover_have_separate_actions() {

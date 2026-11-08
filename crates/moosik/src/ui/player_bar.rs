@@ -582,6 +582,11 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // credits' own width whenever the clearances allow. Past the cap (or squeezed by the
     // transport) the title and credits scroll on hover instead, which is what the marquee is
     // for; the 24pt floor keeps a degenerate window an ellipsis.
+    let source = app
+        .now
+        .track
+        .as_ref()
+        .and_then(|track| widgets::visible_source_badge(ui, track.source_name()));
     let content_w = app
         .now
         .track
@@ -590,7 +595,11 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .unwrap_or(0.0)
         .max(
             widgets::text_width(ui, &title, &theme::medium(13.0))
-                + if app.now.track.is_some() { 22.0 } else { 0.0 },
+                + if source.is_some() {
+                    widgets::SOURCE_BADGE_WIDTH
+                } else {
+                    0.0
+                },
         );
     let text_w = (content_w + 8.0)
         .clamp(24.0, FIELD_MAX_W)
@@ -608,19 +617,16 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     // blank field nor the credits answer the pointer.
     let title_font = theme::medium(13.0);
     let source_w = if field_w >= 64.0
-        && let Some(track) = app.now.track.as_ref()
+        && let Some(source) = source
     {
-        widgets::source_indicator(
+        widgets::source_badge(
             ui,
             &p,
-            Rect::from_center_size(
-                egui::pos2(title_x + 9.0, rect.center().y - 9.0),
-                vec2(18.0, 18.0),
-            ),
-            track,
+            egui::pos2(title_x, rect.center().y - 9.0),
+            source,
             ui.id().with("np-source"),
         );
-        22.0
+        widgets::SOURCE_BADGE_WIDTH
     } else {
         0.0
     };
