@@ -4,7 +4,7 @@
 
 # Moosik
 
-Moosik is an open-source desktop player for YouTube Music and local files, with Spotify on Windows. Host a YouTube Music listening party over Discord, share the queue with friends, and explore your listening history.
+Moosik is an open-source YouTube Music desktop player. Listen along on Discord, let friends add songs to your queue, and find tracks in your listening history.
 
 [Download for Apple Silicon Mac](https://moosik.dev/?platform=mac#download) · [Windows x64 and Ubuntu 24.04 x86-64 packages](https://github.com/AtotheY/moosik/releases/latest)
 
@@ -16,7 +16,7 @@ These macOS screenshots show signed-out browsing and synthetic listening stats. 
 
 <table>
   <tr>
-    <td width="50%"><a href="assets/screenshots/moosik/album-spotify.jpg"><img src="assets/screenshots/moosik/album-spotify.jpg" alt="Moosik album view in the Spotify theme"></a><br>Album · Spotify</td>
+    <td width="50%"><a href="assets/screenshots/moosik/album-spotify.jpg"><img src="assets/screenshots/moosik/album-spotify.jpg" alt="Moosik album view in the Spotify theme"></a><br>Album view</td>
     <td width="50%"><a href="assets/screenshots/moosik/listening-catppuccin-frappe.jpg"><img src="assets/screenshots/moosik/listening-catppuccin-frappe.jpg" alt="Moosik listening overview with synthetic listening stats"></a><br>Listening stats · Catppuccin Frappé</td>
   </tr>
   <tr>
@@ -27,7 +27,6 @@ These macOS screenshots show signed-out browsing and synthetic listening stats. 
 
 ## Player
 
-- **Spotify on Windows.** Sign in under **Settings → Providers → Spotify** to search Spotify and browse your library. Connect both accounts to see their songs together in **Liked Music**. Sign-in and playback require Windows WebView2. Playback requires an internet connection. Moosik recommends Spotify Premium.
 - **Listen along on Discord.** Open Discord desktop and enable **Discord Rich Presence** and **Host Listen along** in **Settings → Discord**. Play a YouTube Music track. Friends can join from your profile, follow your playback in Moosik, and add songs to the shared queue. [Setup guide](https://moosik.dev/blog/youtube-music-discord/)
 - **Queue and playlists.** Move several upcoming tracks together, undo edits, or save the queue as a private playlist. Organize playlists in nested folders and shuffle an entire folder. [Queue controls](docs/queue.md)
 - Follow synced lyrics, use keyboard shortcuts, and customize the player’s theme, sidebars, and fullscreen view.
@@ -45,7 +44,7 @@ Download a package from the [latest release](https://github.com/AtotheY/moosik/r
 | Platform | Package and status |
 | --- | --- |
 | macOS, Apple Silicon | DMG installer and signed in-app updates. See the release for macOS requirements. |
-| Windows, x64 | Experimental setup EXE and portable ZIP. |
+| Windows, x64 | Experimental setup EXE and portable ZIP. Optional [Spotify playback](https://moosik.dev/blog/alternative-spotify-client-windows/) requires WebView2. |
 | Ubuntu 24.04, x86-64 | Experimental [Debian package](docs/BUILDING.md#ubuntu-2404-x86-64) with a clean-install launch check. |
 
 On macOS, open the DMG and drag Moosik to Applications. First launch may require approval in **System Settings → Privacy & Security**. See [in-app updates](docs/client-updates.md) for signing and update details.
