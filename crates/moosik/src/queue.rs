@@ -96,6 +96,18 @@ impl PlayHistory {
         }
     }
 
+    /// Previous may discard later autoplay tracks, but it must keep a song the listener added.
+    fn keep_inserted_track(&mut self, at: usize) {
+        for point in &mut self.played {
+            if point.index >= at {
+                point.index += 1;
+            }
+            // Rewind restores a prefix. Extend it through the insertion even when the
+            // new song follows radio tracks that arrived after this point was recorded.
+            point.queue_len = point.queue_len.max(at) + 1;
+        }
+    }
+
     /// The queue's shape changed by hand. Every within-queue point was captured against the old
     /// shape, and shifting each to match is not worth it for a one-off edit: Previous stops
     /// rewinding past the edit rather than risk landing on the wrong track. Whole queues stay.
@@ -330,7 +342,8 @@ impl PlayQueue {
             }
             None => {
                 let start = self.current.map_or(0, |i| i + 1);
-                (start.min(self.tracks.len())..self.tracks.len()).collect()
+                let end = self.sequential_end(repeat, chosen);
+                (start..end).collect()
             }
         }
     }
@@ -396,13 +409,21 @@ impl PlayQueue {
     }
 
     fn next_in_list(&self, current: usize, repeat: RepeatMode, chosen: Chosen) -> Option<usize> {
-        let repeat_all = repeat == RepeatMode::All;
-        let len = if repeat_all {
-            loop_end(self.tail_start(chosen), current, self.tracks.len())
+        sequential_next(
+            current,
+            self.sequential_end(repeat, chosen),
+            repeat == RepeatMode::All,
+        )
+    }
+
+    fn sequential_end(&self, repeat: RepeatMode, chosen: Chosen) -> usize {
+        if repeat == RepeatMode::All
+            && let Some(current) = self.current
+        {
+            loop_end(self.tail_start(chosen), current, self.len())
         } else {
-            self.tracks.len()
-        };
-        sequential_next(current, len, repeat_all)
+            self.len()
+        }
     }
 
     fn next_in_order(&self, repeat: RepeatMode, chosen: Chosen) -> Option<usize> {
@@ -651,7 +672,9 @@ impl PlayQueue {
     pub(crate) fn insert(&mut self, at: usize, track: Track, slot: Slot, chosen: Chosen) {
         let at = at.min(self.tracks.len());
         self.tracks.insert(at, track);
-        if self.current.is_some_and(|c| c >= at) {
+        if matches!(slot, Slot::BeforeRadio) {
+            self.history.keep_inserted_track(at);
+        } else if self.current.is_some_and(|c| c >= at) {
             self.history.forget_within_queue();
         }
         self.reindex(|i| Some(if i >= at { i + 1 } else { i }));
@@ -749,10 +772,15 @@ impl PlayQueue {
     ) {
         let old = self.upcoming(repeat, chosen);
         let anchor = old.get(boundary).copied();
-        let start = self.len();
+        // In a sequential loop, append inside the loop, before any skipped radio tail.
+        let start = if self.is_shuffled() {
+            self.len()
+        } else {
+            self.sequential_end(repeat, chosen)
+        };
         let count = tracks.len();
-        for track in tracks {
-            self.insert(self.len(), track, Slot::BeforeRadio, chosen);
+        for (offset, track) in tracks.into_iter().enumerate() {
+            self.insert(start + offset, track, Slot::BeforeRadio, chosen);
         }
         let order = self.upcoming(repeat, chosen);
         let target = anchor
@@ -1322,6 +1350,43 @@ mod tests {
             sequential_next(0, 0, true),
             None,
             "an empty queue has nothing"
+        );
+    }
+
+    #[test]
+    fn drops_at_the_repeat_boundary_play_before_the_queue_loops() {
+        let mut q = queue(&["a", "b", "radio"], 1);
+        let chosen = set(&["a", "b", "x", "y"]);
+        let chosen = Some(&chosen);
+        let repeat = RepeatMode::All;
+        assert!(q.upcoming(repeat, chosen).is_empty());
+        q.insert_upcoming(tracks(&["x", "y"]), 0, repeat, chosen);
+        assert_eq!(ids(&q, &q.upcoming(repeat, chosen)), ["x", "y"]);
+        assert_eq!(play_out(&mut q, repeat, chosen, 3), ["x", "y", "a"]);
+        assert_eq!(
+            ids(&q, &q.upcoming(RepeatMode::Off, chosen)),
+            ["b", "x", "y", "radio"]
+        );
+    }
+
+    #[test]
+    fn previous_keeps_songs_dropped_at_the_repeat_boundary() {
+        let mut q = queue(&["a", "b", "radio"], 0);
+        q.remember_current();
+        q.set_current(1);
+        let chosen = set(&["a", "b", "x", "y"]);
+        q.insert_upcoming(tracks(&["x", "y"]), 0, RepeatMode::All, Some(&chosen));
+        q.append_radio(&[track("later radio")], Some(&chosen));
+
+        let Some(Rewind::WithinQueue { index, queue_len }) = q.rewind() else {
+            panic!("Previous should still return to a");
+        };
+        q.truncate(queue_len);
+        q.set_current(index);
+        assert_eq!(q.current_track().unwrap().video_id, "a");
+        assert_eq!(
+            ids(&q, &q.upcoming(RepeatMode::Off, Some(&chosen))),
+            ["b", "x", "y", "radio"]
         );
     }
 

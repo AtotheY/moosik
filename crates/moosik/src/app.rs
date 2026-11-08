@@ -7654,6 +7654,26 @@ impl App {
         self.advance_queue();
     }
 
+    /// At the end of the visible queue, a provider may still supply the next song.
+    pub(crate) fn autoplay_can_continue(&self) -> bool {
+        if self.q.current_track().is_some_and(Track::is_spotify) {
+            return self.spotify_autoplay_enabled()
+                && !self.spotify_autoplay.as_ref().is_some_and(|autoplay| {
+                    autoplay.generation == self.play_generation
+                        && matches!(
+                            autoplay.state,
+                            SpotifyAutoplayState::Ready(None) | SpotifyAutoplayState::Failed
+                        )
+                });
+        }
+        self.settings.autoplay
+            && !self.following()
+            && self
+                .radio
+                .as_ref()
+                .is_some_and(|radio| radio.state != River::Dead)
+    }
+
     fn spotify_autoplay_enabled(&self) -> bool {
         self.settings.spotify_autoplay
             && self.repeat == RepeatMode::Off
