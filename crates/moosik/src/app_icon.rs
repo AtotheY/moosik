@@ -22,13 +22,23 @@ pub enum AppIcon {
     Copper,
     Ink,
     Bloom,
+    Pearl,
+    Vinyl,
+    Amethyst,
+    Matcha,
+    Solar,
+    Denim,
+    Marble,
+    Lagoon,
+    Cherry,
+    Carbon,
     #[default]
     #[serde(other)]
     Ceramic,
 }
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 impl AppIcon {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 20] = [
         Self::Ceramic,
         Self::Celadon,
         Self::Midnight,
@@ -39,6 +49,16 @@ impl AppIcon {
         Self::Copper,
         Self::Ink,
         Self::Bloom,
+        Self::Pearl,
+        Self::Vinyl,
+        Self::Amethyst,
+        Self::Matcha,
+        Self::Solar,
+        Self::Denim,
+        Self::Marble,
+        Self::Lagoon,
+        Self::Cherry,
+        Self::Carbon,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -52,6 +72,16 @@ impl AppIcon {
             Self::Copper => "Copper",
             Self::Ink => "Ink",
             Self::Bloom => "Bloom",
+            Self::Pearl => "Pearl",
+            Self::Vinyl => "Vinyl",
+            Self::Amethyst => "Amethyst",
+            Self::Matcha => "Matcha",
+            Self::Solar => "Solar",
+            Self::Denim => "Denim",
+            Self::Marble => "Marble",
+            Self::Lagoon => "Lagoon",
+            Self::Cherry => "Cherry",
+            Self::Carbon => "Carbon",
         }
     }
     pub fn png(self) -> &'static [u8] {
@@ -83,6 +113,36 @@ impl AppIcon {
             Self::Ink => include_bytes!("../../../assets/branding/moosik/eclipse/variants/ink.png"),
             Self::Bloom => {
                 include_bytes!("../../../assets/branding/moosik/eclipse/variants/bloom.png")
+            }
+            Self::Pearl => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/pearl.png")
+            }
+            Self::Vinyl => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/vinyl.png")
+            }
+            Self::Amethyst => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/amethyst.png")
+            }
+            Self::Matcha => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/matcha.png")
+            }
+            Self::Solar => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/solar.png")
+            }
+            Self::Denim => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/denim.png")
+            }
+            Self::Marble => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/marble.png")
+            }
+            Self::Lagoon => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/lagoon.png")
+            }
+            Self::Cherry => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/cherry.png")
+            }
+            Self::Carbon => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/carbon.png")
             }
         }
     }
@@ -199,7 +259,7 @@ mod tests {
         }
     }
     #[test]
-    fn all_ten_selections_round_trip_and_decode_as_distinct_icons() {
+    fn all_selections_round_trip_and_decode_as_distinct_icons() {
         let mut images = std::collections::HashSet::new();
         for icon in AppIcon::ALL {
             let settings: crate::settings::Settings =
