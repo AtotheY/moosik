@@ -3099,21 +3099,11 @@ impl App {
         };
         for event in events {
             match event {
-                playwire::Event::Play => {
-                    if !self.playback_started || self.now.paused {
-                        self.toggle_playback();
-                    }
-                }
-                playwire::Event::Pause => {
-                    if self.playback_started && !self.now.paused {
-                        self.toggle_playback();
-                    }
-                }
+                playwire::Event::Play => self.set_media_paused(false),
+                playwire::Event::Pause => self.set_media_paused(true),
                 playwire::Event::PlayPause => self.toggle_playback(),
                 playwire::Event::Stop => {
-                    if self.playback_started && !self.now.paused {
-                        self.toggle_playback();
-                    }
+                    self.set_media_paused(true);
                     self.seek_to(0.0);
                 }
                 playwire::Event::Next => self.skip(1),
@@ -3878,6 +3868,22 @@ impl App {
                 self.play_index(self.q.current().unwrap_or_else(|| self.q.first()))
             }
             _ => {}
+        }
+    }
+
+    fn set_media_paused(&mut self, paused: bool) {
+        if !self.playback_started {
+            if !paused && !self.now.resolving {
+                self.toggle_playback();
+            }
+            return;
+        }
+        if let Some(player) = &self.player
+            && player.state().paused != paused
+        {
+            player.set_paused(paused);
+            self.spotify_pause = SpotifyPause::None;
+            self.note_playback_choice();
         }
     }
 

@@ -168,7 +168,8 @@ mod windows {
         let mut context = WebContext::new(Some(profile));
         let webview = WebViewBuilder::new_with_web_context(&mut context)
             .with_additional_browser_args(
-                "--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling",
+                "--autoplay-policy=no-user-gesture-required --disable-background-timer-throttling \
+                 --disable-features=HardwareMediaKeyHandling",
             )
             .with_url(&initial_url)
             .with_navigation_handler({
