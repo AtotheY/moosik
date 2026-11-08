@@ -5,7 +5,7 @@
 //! No rating thumbs here (`show_rating: false`). This is a list of what happens next, and a
 //! column of controls repeated down it is noise; rating a queued song is one right-click away.
 
-use crate::app::{App, SessionMember};
+use crate::app::{App, RepeatMode, SessionMember};
 use crate::icons::Icon;
 use crate::theme;
 use crate::ui::{ListClick, RowSpec, is_active, spec_rows, track_subtitle_no_album};
@@ -14,7 +14,6 @@ use crate::{backend::Backend, images::Images};
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let card = widgets::card_rect(ui.available_rect_before_wrap(), theme::CARD_INSET);
-    external_drop(app, ui, card);
     let _edge = (!app.fs.open).then(|| widgets::CardEdge::new(ui, card, &app.palette));
     widgets::clip_card_content(ui, card, theme::CARD_INSET_X, &app.palette);
 
@@ -287,7 +286,6 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
 
 /// The full queue uses the same live ordering and actions as the compact panel.
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
-    external_drop(app, ui, ui.available_rect_before_wrap());
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
         if !app.q.is_empty() {
@@ -440,26 +438,103 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
         ui.add_space(4.0);
     }
 
+    let list_top = ui.cursor().top();
     if upcoming.is_empty() {
-        empty_state(ui, &app.palette, has_current || in_room);
+        if !has_current && !in_room {
+            empty_state(ui, &app.palette);
+        } else if !has_current || app.repeat != RepeatMode::All {
+            let message = match app.repeat {
+                _ if !has_current => "No songs queued",
+                RepeatMode::One => "This song repeats",
+                _ if app.autoplay_can_continue() => "Autoplay is on",
+                _ => "End of queue",
+            };
+            ui.label(
+                egui::RichText::new(message)
+                    .font(theme::regular(13.0))
+                    .color(app.palette.secondary),
+            );
+        }
         if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
             app.edit_queue(action);
         }
     } else {
         next_up(app, ui, &upcoming);
     }
+    if has_current && app.repeat == RepeatMode::All {
+        repeat_footer(app, ui, upcoming.is_empty());
+    }
+    if super::song_drag::payload(ui.ctx()).is_some_and(|drag| !drag.queue)
+        && let Some(boundary) =
+            super::queue_edit::drop_boundary(ui, &app.palette, list_top, upcoming.len())
+        && ui.input(|i| i.pointer.primary_released())
+        && let Some(drag) = super::song_drag::take(ui.ctx())
+    {
+        app.insert_queue_tracks(drag.tracks, boundary);
+    }
 }
 
-fn empty_state(ui: &mut egui::Ui, palette: &theme::Palette, has_current: bool) {
-    if has_current {
+/// A preview of the next pass, outside the list of editable queue occurrences.
+fn repeat_footer(app: &mut App, ui: &mut egui::Ui, last_song: bool) {
+    let p = &app.palette;
+    let shuffled = app.q.is_shuffled();
+    let label = match (shuffled, last_song) {
+        (true, true) => "Queue shuffles again after this song",
+        (true, false) => "Queue shuffles again",
+        (false, _) => "Queue repeats",
+    };
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(theme::ROW_LEFT_INSET);
+        ui.add(Icon::Repeat.image(p.secondary, 14.0));
         ui.label(
-            egui::RichText::new("No songs queued")
-                .font(theme::regular(13.0))
-                .color(palette.secondary),
+            egui::RichText::new(label)
+                .font(theme::medium(12.0))
+                .color(p.secondary),
         );
+    });
+    if shuffled {
         return;
     }
+    let track = &app.q.tracks()[app.q.first()];
+    ui.horizontal(|ui| {
+        ui.set_min_height(theme::ROW_HEIGHT);
+        ui.add_space(theme::ROW_LEFT_INSET);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::Vec2::splat(theme::ART_SIZE), egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let art = super::art_texture(
+                &mut app.images,
+                &app.backend,
+                ui.ctx(),
+                track.thumbnail.as_ref(),
+                theme::ART_SIZE,
+            );
+            widgets::paint_art(ui, p, rect, art, ArtShape::Square);
+        }
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&track.title)
+                        .font(theme::medium(theme::ROW_TITLE_PT))
+                        .color(p.text),
+                )
+                .truncate(),
+            )
+            .on_hover_text(&track.title);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(track.artist_line())
+                        .font(theme::regular(12.0))
+                        .color(p.secondary),
+                )
+                .truncate(),
+            );
+        });
+    });
+}
 
+fn empty_state(ui: &mut egui::Ui, palette: &theme::Palette) {
     ui.add_space(24.0);
     ui.vertical_centered(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(40.0), egui::Sense::hover());
@@ -485,7 +560,6 @@ fn empty_state(ui: &mut egui::Ui, palette: &theme::Palette, has_current: bool) {
 
 fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
     let list_top = ui.cursor().top();
-    let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
     let signed_in = app.signed_in();
     let clicked = {
         let App {
@@ -561,35 +635,7 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
         )
     };
 
-    if super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue) {
-        let rect = egui::Rect::from_min_max(
-            egui::pos2(ui.min_rect().left(), list_top),
-            egui::pos2(
-                ui.max_rect().right(),
-                list_top + upcoming.len() as f32 * pitch,
-            ),
-        )
-        .intersect(ui.clip_rect());
-        if let Some(pos) = ui
-            .input(|i| i.pointer.interact_pos())
-            .filter(|p| rect.contains(*p))
-        {
-            let boundary = (((pos.y - list_top) / pitch) + 0.5).floor().max(0.0) as usize;
-            let boundary = boundary.min(upcoming.len());
-            let y = list_top + boundary as f32 * pitch;
-            ui.painter().hline(
-                rect.x_range(),
-                y,
-                egui::Stroke::new(2.0, app.palette.accent),
-            );
-            if ui.input(|i| i.pointer.any_released())
-                && let Some(drag) = super::song_drag::take(ui.ctx())
-            {
-                app.insert_queue_tracks(drag.tracks, boundary);
-            }
-        }
-    }
-    crate::ui::queue_edit::drop_target(ui, &app.palette, list_top, pitch, upcoming.len());
+    crate::ui::queue_edit::drop_target(ui, &app.palette, list_top, upcoming.len());
     if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
         app.edit_queue(action);
         return;
@@ -615,27 +661,5 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
     app.play_from_queue(i);
     if !already_here {
         app.queue_scroll_reset = true;
-    }
-}
-
-fn external_drop(app: &mut App, ui: &mut egui::Ui, rect: egui::Rect) {
-    if !super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue) {
-        return;
-    }
-    let target = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), (rect.bottom() - 48.0).max(rect.top())),
-        rect.right_bottom(),
-    );
-    ui.painter()
-        .rect_filled(target, crate::theme::RADIUS, app.palette.surface);
-    ui.painter().text(
-        target.center(),
-        egui::Align2::CENTER_CENTER,
-        "Drop to add to queue",
-        theme::medium(13.0),
-        app.palette.accent,
-    );
-    if let Some(tracks) = super::song_drag::target(ui, &app.palette, target, true) {
-        app.row_action(super::RowAction::PageQueue(tracks));
     }
 }

@@ -398,15 +398,44 @@ fn selection_controls(ui: &mut Ui, palette: &theme::Palette, compact: bool, s: &
     }
 }
 
-/// Geometry, not hovered rows: the bottom half inserts *after* a row, and the
-/// first/last boundaries remain valid even when the list is virtualized.
-pub(crate) fn drop_target(
+/// Return the insertion point under the pointer, including the open space below the last row.
+pub(crate) fn drop_boundary(
     ui: &mut Ui,
     palette: &theme::Palette,
     top: f32,
-    pitch: f32,
     count: usize,
-) {
+) -> Option<usize> {
+    let pointer = ui.input(|i| i.pointer.interact_pos())?;
+    let clip = ui.clip_rect();
+    let bounds = Rect::from_min_max(
+        pos2(ui.min_rect().left(), top),
+        pos2(ui.max_rect().right(), clip.bottom()),
+    )
+    .intersect(clip);
+    if !ui.rect_contains_pointer(bounds) {
+        return None;
+    }
+    let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
+    let boundary = (((pointer.y - top) / pitch).round() as usize).min(count);
+    let y = (top + boundary as f32 * pitch - 2.0).clamp(bounds.top(), bounds.bottom());
+    ui.painter()
+        .hline(bounds.x_range(), y, egui::Stroke::new(2.0, palette.accent));
+    let edge = 44.0;
+    let speed = if pointer.y < clip.top() + edge {
+        (clip.top() + edge - pointer.y) / edge
+    } else if pointer.y > clip.bottom() - edge {
+        -(pointer.y - clip.bottom() + edge) / edge
+    } else {
+        0.0
+    };
+    if speed != 0.0 {
+        ui.scroll_with_delta(vec2(0.0, speed * 9.0));
+        ui.ctx().request_repaint();
+    }
+    Some(boundary)
+}
+
+pub(crate) fn drop_target(ui: &mut Ui, palette: &theme::Palette, top: f32, count: usize) {
     let Some(drag) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) else {
         return;
     };
@@ -415,45 +444,23 @@ pub(crate) fn drop_target(
         egui::DragAndDrop::clear_payload(ui.ctx());
         return;
     }
+    if let Some(boundary) = drop_boundary(ui, palette, top, count)
+        && ui.input(|i| i.pointer.primary_released())
+    {
+        request(
+            ui.ctx(),
+            Action::Move {
+                stamp: drag.stamp,
+                indices: drag.indices.as_ref().clone(),
+                boundary,
+            },
+        );
+        egui::DragAndDrop::clear_payload(ui.ctx());
+        return;
+    }
     let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else {
         return;
     };
-    let clip = ui.clip_rect();
-    let bounds = Rect::from_min_max(
-        pos2(ui.min_rect().left(), top),
-        pos2(ui.max_rect().right(), top + count as f32 * pitch + 24.0),
-    )
-    .intersect(clip);
-    if bounds.contains(pointer) {
-        let boundary = (((pointer.y - top) / pitch + 0.5).floor().max(0.0) as usize).min(count);
-        let y = (top + boundary as f32 * pitch - 2.0).clamp(clip.top(), clip.bottom());
-        ui.painter()
-            .hline(bounds.x_range(), y, egui::Stroke::new(2.0, palette.accent));
-        if ui.input(|i| i.pointer.any_released()) {
-            request(
-                ui.ctx(),
-                Action::Move {
-                    stamp: drag.stamp,
-                    indices: drag.indices.as_ref().clone(),
-                    boundary,
-                },
-            );
-            egui::DragAndDrop::clear_payload(ui.ctx());
-            return;
-        }
-        let edge = 44.0;
-        let speed = if pointer.y < clip.top() + edge {
-            (clip.top() + edge - pointer.y) / edge
-        } else if pointer.y > clip.bottom() - edge {
-            -(pointer.y - clip.bottom() + edge) / edge
-        } else {
-            0.0
-        };
-        if speed != 0.0 {
-            ui.scroll_with_delta(vec2(0.0, speed * 9.0));
-            ui.ctx().request_repaint();
-        }
-    }
     if ui.input(|i| i.pointer.any_released()) {
         egui::DragAndDrop::clear_payload(ui.ctx());
         return;
@@ -518,7 +525,6 @@ mod tests {
             |ui| {
                 prepare(ui, stamp, &[10, 20, 30]);
                 let top = ui.cursor().top();
-                let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
                 for index in [10, 20, 30] {
                     let (rect, response) = ui.allocate_exact_size(
                         vec2(ui.available_width(), theme::ROW_HEIGHT),
@@ -527,7 +533,7 @@ mod tests {
                     interact(ui, &response, index, "Song", false, None);
                     rects.push(rect);
                 }
-                drop_target(ui, &theme::Palette::dark(), top, pitch, 3);
+                drop_target(ui, &theme::Palette::dark(), top, 3);
             },
         );
         output.textures_delta.clear();
@@ -550,7 +556,8 @@ mod tests {
         s.selected = Arc::new(vec![10, 30]);
         save(&ctx, s);
         let start = rects[0].center();
-        let end = rects[2].center() + vec2(0.0, 20.0);
+        // Drop in the open space well below the final row.
+        let end = rects[2].center_bottom() + vec2(0.0, 110.0);
         frame(&ctx, vec![egui::Event::PointerMoved(start)], 7);
         frame(&ctx, vec![pointer(start, true)], 7);
         frame(
@@ -620,7 +627,6 @@ mod tests {
                         prepare(ui, 7, &[10, 20, 30]);
                         toolbar(ui, &palette, "Next up", false);
                         let top = ui.cursor().top();
-                        let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
                         for (i, index) in [10, 20, 30].into_iter().enumerate() {
                             let hit = widgets::track_row(
                                 ui,
@@ -659,7 +665,7 @@ mod tests {
                             assert!(!hit.activate, "drag must not start playback");
                             rects.push(hit.response.rect);
                         }
-                        drop_target(ui, &palette, top, pitch, 3);
+                        drop_target(ui, &palette, top, 3);
                     });
                 },
             )
