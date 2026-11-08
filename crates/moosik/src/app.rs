@@ -3905,6 +3905,9 @@ impl App {
     }
 
     fn set_media_paused(&mut self, paused: bool) {
+        if paused && let Some(autoplay) = &mut self.spotify_autoplay {
+            autoplay.advance_after = None;
+        }
         if !self.playback_started {
             if !paused && !self.now.resolving {
                 self.toggle_playback();
