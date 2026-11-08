@@ -103,10 +103,7 @@ pub(crate) struct LocalViewCache {
     pub(crate) view: std::sync::Arc<crate::ui::library::LocalView>,
 }
 
-/// How long the startup splash may hold the shell back, counted from process start. Generous
-/// against a slow session check and a slow first feed, but a hard stop for the one case neither
-/// has a timeout for: a request that simply never answers would otherwise leave the splash — or
-/// an unresponsive window — up indefinitely.
+/// How long the startup splash may hold the shell back while a saved session is checked.
 const SPLASH_MAX: Duration = Duration::from_secs(10);
 
 /// How many times an attempt that never produced audio is reloaded before it is called a failure.
@@ -1662,7 +1659,7 @@ pub struct App {
     last_liked_save: Instant,
     /// Every track found under `settings.local_folders` by the last full rescan — there is no
     /// incremental update, a changed folder list just rescans everything again.
-    pub(crate) local_tracks: Vec<crate::model::Track>,
+    pub(crate) local_tracks: Arc<Vec<crate::model::Track>>,
     /// Bumped whenever `local_tracks` is replaced, so `ui::library::local_view` can cache what
     /// the Local tab shows instead of rebuilding it every frame the tab is open.
     pub(crate) local_tracks_generation: u64,
@@ -2088,7 +2085,12 @@ impl App {
         self.update_settings(ctx, |s| s.update_later = entry);
     }
 
-    pub fn new(cc: &eframe::CreationContext<'_>, options: Options) -> anyhow::Result<Self> {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        options: Options,
+        mut settings: crate::settings::Settings,
+        #[cfg(not(target_os = "macos"))] startup_icon: Option<Arc<egui::IconData>>,
+    ) -> anyhow::Result<Self> {
         let Options {
             decorated,
             startup_timing,
@@ -2118,9 +2120,11 @@ impl App {
         // Let the single-instance listener thread wake this UI (`instance`'s own doc comment).
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::instance::attach(&cc.egui_ctx);
-        let mut settings = crate::settings::load();
         if let Err(e) = settings.app_icon.apply(
+            #[cfg(not(target_os = "macos"))]
             &cc.egui_ctx,
+            #[cfg(not(target_os = "macos"))]
+            startup_icon,
             #[cfg(target_os = "windows")]
             cc.winit_window().map(Arc::as_ref),
         ) {
@@ -2463,7 +2467,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             video_open: false,
             video: None,
-            local_tracks: Vec::new(),
+            local_tracks: Arc::new(Vec::new()),
             local_tracks_generation: 0,
             local_view_cache: None,
             local_scanning: false,
@@ -2732,7 +2736,10 @@ impl App {
         }
         if self.settings.app_icon != before.app_icon {
             if let Err(e) = self.settings.app_icon.apply(
+                #[cfg(not(target_os = "macos"))]
                 ctx,
+                #[cfg(not(target_os = "macos"))]
+                None,
                 #[cfg(target_os = "windows")]
                 self.icon_window.upgrade().as_deref(),
             ) {
@@ -3550,11 +3557,14 @@ impl App {
                 && self.repeat != RepeatMode::All
                 && self.play_generation > 0
                 && !self.now.track.as_ref().is_some_and(Track::is_spotify);
-            let remaining = self
-                .q
-                .remaining(self.repeat, self.radio.as_ref().map(|r| &r.chosen));
             let call = self.radio.as_ref().and_then(|radio| {
-                river_call(radio, self.q.current(), remaining, self.q.tracks(), wants)
+                river_call(
+                    radio,
+                    self.q.current(),
+                    self.q.remaining(),
+                    self.q.tracks(),
+                    wants,
+                )
             });
             if let Some(call) = call {
                 self.radio_loading = true;
@@ -3581,6 +3591,8 @@ impl App {
         });
         if retrying_advance
             || (self.playback_started
+                && self.settings.spotify_autoplay
+                && self.q.current_track().is_some_and(Track::is_spotify)
                 && self
                     .q
                     .peek_next(self.repeat, self.radio.as_ref().map(|r| &r.chosen))
@@ -4061,23 +4073,11 @@ impl App {
         {
             return false;
         }
-        let waiting = match self.auth {
-            crate::auth::AuthState::Checking => matches!(
+        let waiting = matches!(self.auth, crate::auth::AuthState::Checking)
+            && matches!(
                 self.effective_home_source(),
                 crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
-            ),
-            // The shell paints before the landing feed is in — the rail, the chips, a grid of
-            // skeletons — and that half-built frame is the same flash the splash exists to cover.
-            // Hold until Home has something real to show, or has failed and has an error to show.
-            crate::auth::AuthState::SignedIn { .. } => {
-                matches!(self.current_route(), Route::Home)
-                    && self.home.is_none()
-                    && self.home_error.is_none()
-            }
-            // Signed out, or the check failed: there is no feed coming, and the shell — sign-in
-            // prompt included — is the real state, not a placeholder for one.
-            _ => false,
-        };
+            );
         let visible = waiting && crate::elapsed_since_start() < SPLASH_MAX;
         if !visible {
             self.startup_splash = false;
@@ -5995,7 +5995,7 @@ impl App {
                 Event::LocalScanDone { tracks } => {
                     self.local_scanning = false;
                     self.local_scan_error = None;
-                    self.local_tracks = tracks;
+                    self.local_tracks = Arc::new(tracks);
                     self.local_tracks_generation += 1;
                     self.refresh_local_home();
                     self.backend
@@ -10224,19 +10224,11 @@ impl eframe::App for App {
 
         // Safety net: a route whose fetch was dropped while we were elsewhere must load rather
         // than render an empty page. Idempotent, so calling it every frame costs a comparison.
-        //
-        // Before the splash check, deliberately: the landing page's fetch must be in flight
-        // underneath the splash for the half of it that waits on the first feed to have anything
-        // to wait for.
         self.ensure_route_loaded();
 
         // A stored session being checked is not the signed-out shell: rendering one — a chip
         // wired to Settings, "No playlists yet.", a "Sign in" prompt — is wrong for the moment it
-        // is on screen, and with a saved cookie that moment happens on every launch. Neither is
-        // the half-built signed-in shell of the frame after it settles, while the landing feed is
-        // still in flight. The splash covers both; a fresh profile never enters `Checking`, so the
-        // fast path is untouched. The background and blur are painted above, so the window looks
-        // the same underneath it.
+        // is on screen, and with a saved cookie that moment happens on every launch.
         if self.splash_visible() {
             ui::splash::screen(self, ui, maximized);
             // `begin_frame` above must be closed even on a frame that draws none of the shell, or

@@ -1,4 +1,6 @@
 //! Queue-scoped occurrence selection and typed drag/drop. Shared by the page and drawers.
+use std::sync::Arc;
+
 use crate::{icons::Icon, theme, widgets};
 use egui::{Context, Id, Key, Modifiers, Rect, Ui, pos2, vec2};
 
@@ -22,14 +24,15 @@ pub(crate) enum Action {
 #[derive(Clone, Default)]
 struct Selection {
     stamp: u64,
-    order: Vec<usize>,
-    selected: Vec<usize>,
+    order: Arc<Vec<usize>>,
+    selected: Arc<Vec<usize>>,
     anchor: Option<usize>,
     focus: Option<Id>,
     action: Option<Action>,
 }
 impl Selection {
     fn choose(&mut self, index: usize, command: bool, shift: bool) {
+        let selected = Arc::make_mut(&mut self.selected);
         if shift {
             let anchor = self.anchor.unwrap_or(index);
             if let (Some(a), Some(b)) = (
@@ -37,36 +40,36 @@ impl Selection {
                 self.order.iter().position(|i| *i == index),
             ) {
                 if !command {
-                    self.selected.clear();
+                    selected.clear();
                 }
                 for i in &self.order[a.min(b)..=a.max(b)] {
-                    if !self.selected.contains(i) {
-                        self.selected.push(*i);
+                    if !selected.contains(i) {
+                        selected.push(*i);
                     }
                 }
             }
         } else {
-            if command && self.selected.contains(&index) {
-                self.selected.retain(|i| *i != index);
+            if command && selected.contains(&index) {
+                selected.retain(|i| *i != index);
             } else {
                 if !command {
-                    self.selected.clear();
+                    selected.clear();
                 }
-                self.selected.push(index);
+                selected.push(index);
             }
             self.anchor = Some(index);
         }
-        self.selected = self
+        *selected = self
             .order
             .iter()
             .copied()
-            .filter(|i| self.selected.contains(i))
+            .filter(|i| selected.contains(i))
             .collect();
     }
     fn moving(&self, boundary: usize) -> Action {
         Action::Move {
             stamp: self.stamp,
-            indices: self.selected.clone(),
+            indices: self.selected.as_ref().clone(),
             boundary,
         }
     }
@@ -74,8 +77,8 @@ impl Selection {
 #[derive(Clone)]
 struct QueueDrag {
     stamp: u64,
-    order: Vec<usize>,
-    indices: Vec<usize>,
+    order: Arc<Vec<usize>>,
+    indices: Arc<Vec<usize>>,
     title: String,
     art: Option<egui::TextureHandle>,
 }
@@ -96,7 +99,7 @@ fn request(ctx: &Context, action: Action) {
 
 pub(crate) fn clear_selection(ctx: &Context) {
     let mut s = state(ctx);
-    s.selected.clear();
+    s.selected = Arc::default();
     s.anchor = None;
     s.focus = None;
     s.action = None;
@@ -108,13 +111,13 @@ pub(crate) fn clear_selection(ctx: &Context) {
 
 pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
     let mut s = state(ui.ctx());
-    if s.stamp != stamp || s.order != order {
-        for index in &s.order {
+    if s.stamp != stamp || s.order.as_slice() != order {
+        for index in s.order.iter() {
             egui::Popup::close_id(ui.ctx(), ui.id().with(("ytm-queue-row-menu", *index)));
         }
         s = Selection {
             stamp,
-            order: order.to_vec(),
+            order: Arc::new(order.to_vec()),
             ..Default::default()
         };
         if egui::DragAndDrop::has_payload_of_type::<QueueDrag>(ui.ctx()) {
@@ -138,27 +141,25 @@ pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
             }) {
                 s.action = Some(Action::Remove {
                     stamp,
-                    indices: s.selected.clone(),
+                    indices: s.selected.as_ref().clone(),
                 });
             }
-            let positions: Vec<_> = s
-                .order
-                .iter()
-                .enumerate()
-                .filter_map(|(p, i)| s.selected.contains(i).then_some(p))
-                .collect();
-            if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)) {
-                s.action = Some(s.moving(positions[0].saturating_sub(1)));
+            if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp))
+                && let Some(position) = s.order.iter().position(|i| s.selected.contains(i))
+            {
+                s.action = Some(s.moving(position.saturating_sub(1)));
             }
-            if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowDown)) {
-                s.action = Some(s.moving((positions[positions.len() - 1] + 2).min(s.order.len())));
+            if ui.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowDown))
+                && let Some(position) = s.order.iter().rposition(|i| s.selected.contains(i))
+            {
+                s.action = Some(s.moving((position + 2).min(s.order.len())));
             }
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             if egui::DragAndDrop::has_payload_of_type::<QueueDrag>(ui.ctx()) {
                 egui::DragAndDrop::clear_payload(ui.ctx());
             } else {
-                s.selected.clear();
+                s.selected = Arc::default();
                 s.anchor = None;
             }
         }
@@ -188,13 +189,16 @@ pub(crate) fn interact(
         .contains(ui.input(|i| i.pointer.interact_pos().unwrap_or(pos2(-1.0, -1.0))));
     let modified_click =
         modified && over && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+    let mut changed = false;
     if modified_click || response.clicked() && !on_more {
         s.choose(index, modifiers.command, modifiers.shift);
         s.focus = Some(response.id);
         response.request_focus();
+        changed = true;
     }
     if (response.secondary_clicked() || on_more) && !s.selected.contains(&index) {
         s.choose(index, false, false);
+        changed = true;
     }
     if response.drag_started() {
         if !s.selected.contains(&index) {
@@ -202,6 +206,7 @@ pub(crate) fn interact(
         }
         s.focus = Some(response.id);
         response.request_focus();
+        changed = true;
         egui::DragAndDrop::set_payload(
             ui.ctx(),
             QueueDrag {
@@ -222,7 +227,9 @@ pub(crate) fn interact(
             .clone()
             .on_hover_text("Drag to reorder · ⌘/Ctrl-click to select · Shift-click for a range");
     }
-    save(ui.ctx(), s);
+    if changed {
+        save(ui.ctx(), s);
+    }
     modified && over || dragging || response.drag_stopped()
 }
 pub(crate) fn selected(ctx: &Context, index: usize) -> bool {
@@ -256,7 +263,7 @@ pub(crate) fn group_menu(ui: &mut Ui, palette: &theme::Palette, index: usize) ->
             "Remove from queue",
             Action::Remove {
                 stamp: s.stamp,
-                indices: s.selected.clone(),
+                indices: s.selected.as_ref().clone(),
             },
         ),
     ] {
@@ -379,7 +386,7 @@ fn selection_controls(ui: &mut Ui, palette: &theme::Palette, compact: bool, s: &
     {
         s.action = Some(Action::Remove {
             stamp: s.stamp,
-            indices: s.selected.clone(),
+            indices: s.selected.as_ref().clone(),
         });
     }
     if !compact
@@ -387,7 +394,7 @@ fn selection_controls(ui: &mut Ui, palette: &theme::Palette, compact: bool, s: &
             .on_hover_text("Clear selection")
             .clicked()
     {
-        s.selected.clear();
+        s.selected = Arc::default();
     }
 }
 
@@ -427,7 +434,7 @@ pub(crate) fn drop_target(
                 ui.ctx(),
                 Action::Move {
                     stamp: drag.stamp,
-                    indices: drag.indices.clone(),
+                    indices: drag.indices.as_ref().clone(),
                     boundary,
                 },
             );
@@ -540,7 +547,7 @@ mod tests {
         theme::install_fonts(&ctx);
         let rects = frame(&ctx, vec![], 7);
         let mut s = state(&ctx);
-        s.selected = vec![10, 30];
+        s.selected = Arc::new(vec![10, 30]);
         save(&ctx, s);
         let start = rects[0].center();
         let end = rects[2].center() + vec2(0.0, 20.0);
@@ -554,8 +561,9 @@ mod tests {
         assert_eq!(
             egui::DragAndDrop::payload::<QueueDrag>(&ctx)
                 .unwrap()
-                .indices,
-            vec![10, 30]
+                .indices
+                .as_slice(),
+            &[10, 30]
         );
         frame(&ctx, vec![egui::Event::PointerMoved(end)], 7);
         frame(&ctx, vec![pointer(end, false)], 7);
@@ -679,12 +687,12 @@ mod tests {
         theme::install_fonts(&ctx);
         frame(&ctx, vec![], 7);
         let mut s = state(&ctx);
-        s.selected = vec![10, 30];
+        s.selected = Arc::new(vec![10, 30]);
         save(&ctx, s);
         let drag = QueueDrag {
             stamp: 7,
-            order: vec![10, 20, 30],
-            indices: vec![10, 30],
+            order: Arc::new(vec![10, 20, 30]),
+            indices: Arc::new(vec![10, 30]),
             title: "Two songs".into(),
             art: None,
         };
@@ -701,7 +709,7 @@ mod tests {
             7,
         );
         assert!(!egui::DragAndDrop::has_payload_of_type::<QueueDrag>(&ctx));
-        assert_eq!(state(&ctx).selected, vec![10, 30]);
+        assert_eq!(state(&ctx).selected.as_slice(), &[10, 30]);
         assert!(take_action(&ctx).is_none());
         egui::DragAndDrop::set_payload(&ctx, drag.clone());
         frame(&ctx, vec![], 8);
@@ -724,17 +732,17 @@ mod tests {
     #[test]
     fn ranges_and_disjoint_occurrences_keep_display_order() {
         let mut s = Selection {
-            order: vec![5, 2, 8, 1, 9],
+            order: Arc::new(vec![5, 2, 8, 1, 9]),
             ..Default::default()
         };
         s.choose(2, false, false);
         s.choose(1, true, false);
-        assert_eq!(s.selected, vec![2, 1]);
+        assert_eq!(s.selected.as_slice(), &[2, 1]);
         s.choose(5, false, true);
-        assert_eq!(s.selected, vec![5, 2, 8, 1]);
+        assert_eq!(s.selected.as_slice(), &[5, 2, 8, 1]);
         s.choose(8, true, false);
-        assert_eq!(s.selected, vec![5, 2, 1]);
+        assert_eq!(s.selected.as_slice(), &[5, 2, 1]);
         s.choose(9, true, true);
-        assert_eq!(s.selected, vec![5, 2, 8, 1, 9]);
+        assert_eq!(s.selected.as_slice(), &[5, 2, 8, 1, 9]);
     }
 }

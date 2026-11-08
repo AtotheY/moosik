@@ -396,13 +396,16 @@ impl Player {
 /// this, through [`Player::state`]: mpv allows one reader per handle, and nothing else reads it.
 fn drain_events(mpv: &Mpv) {
     use libmpv2::events::Event;
-    let home = directories::BaseDirs::new()
-        .map(|dirs| dirs.home_dir().to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let mut home = None;
     while let Some(event) = mpv.wait_event(0.0) {
         match event {
             Ok(Event::LogMessage { prefix, text, .. }) => {
-                tracing::warn!(source = prefix, "mpv: {}", redact(text.trim_end(), &home));
+                let home = home.get_or_insert_with(|| {
+                    directories::BaseDirs::new()
+                        .map(|dirs| dirs.home_dir().to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                });
+                tracing::warn!(source = prefix, "mpv: {}", redact(text.trim_end(), home));
             }
             // A file that ended with an error comes back this way, as mpv's bare error code.
             Err(libmpv2::Error::Raw(code)) => {

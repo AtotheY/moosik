@@ -14,7 +14,7 @@
 //!   36 KB; capping at "200 entries" meant the cache was worth either 7 MB or 80 MB depending on
 //!   what you happened to browse, against a whole-app memory gate of 85 MB.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
@@ -81,6 +81,7 @@ struct Slot {
 pub struct Images {
     slots: HashMap<Key, Slot>,
     dominants: HashMap<Arc<str>, [u8; 3]>,
+    dominants_dirty: bool,
     tick: u64,
     inflight: usize,
     bytes: usize,
@@ -164,33 +165,26 @@ impl Images {
         want: &mut impl FnMut(Arc<str>, String, u32, bool),
     ) -> Option<&TextureHandle> {
         self.tick += 1;
-        let key: Key = (Arc::clone(url), px, wide);
-
-        match self.slots.get_mut(&key) {
-            Some(slot) => {
+        match self.slots.entry((Arc::clone(url), px, wide)) {
+            Entry::Occupied(entry) => {
+                let slot = entry.into_mut();
                 slot.used = self.tick;
-            }
-            None => {
-                if self.inflight >= MAX_INFLIGHT {
-                    // Try again on a later frame; the row is still visible so it will ask again.
-                    return None;
+                match &slot.state {
+                    State::Ready(texture) => Some(texture),
+                    _ => None,
                 }
-                self.inflight += 1;
-                self.slots.insert(
-                    key.clone(),
-                    Slot {
-                        state: State::Loading,
-                        bytes: 0,
-                        used: self.tick,
-                    },
-                );
-                want(Arc::clone(url), sized(url, px), px, wide);
             }
-        }
-
-        match &self.slots.get(&key)?.state {
-            State::Ready(texture) => Some(texture),
-            _ => None,
+            Entry::Vacant(entry) if self.inflight < MAX_INFLIGHT => {
+                self.inflight += 1;
+                entry.insert(Slot {
+                    state: State::Loading,
+                    bytes: 0,
+                    used: self.tick,
+                });
+                want(Arc::clone(url), sized(url, px), px, wide);
+                None
+            }
+            Entry::Vacant(_) => None,
         }
     }
 
@@ -242,6 +236,7 @@ impl Images {
         ) {
             self.bytes -= old.bytes;
         }
+        self.evict();
     }
 
     /// Drop the least recently asked-for entries until the cache is back inside both budgets.
@@ -250,6 +245,7 @@ impl Images {
             let Some(oldest) = self
                 .slots
                 .iter()
+                .filter(|(_, slot)| !matches!(slot.state, State::Loading))
                 .min_by_key(|(_, slot)| slot.used)
                 .map(|(k, _)| k.clone())
             else {
@@ -257,17 +253,15 @@ impl Images {
             };
             if let Some(slot) = self.slots.remove(&oldest) {
                 self.bytes -= slot.bytes;
+                self.dominants_dirty = true;
             }
         }
 
-        if self.dominants.len() > MAX_DOMINANTS {
+        if self.dominants_dirty && self.dominants.len() > MAX_DOMINANTS {
             // Keep only colours we still hold art for; the rest can be recomputed on refetch.
-            let live: std::collections::HashSet<Arc<str>> = self
-                .slots
-                .keys()
-                .map(|(url, _, _)| Arc::clone(url))
-                .collect();
-            self.dominants.retain(|url, _| live.contains(url));
+            let live: HashSet<&str> = self.slots.keys().map(|(url, _, _)| url.as_ref()).collect();
+            self.dominants.retain(|url, _| live.contains(url.as_ref()));
+            self.dominants_dirty = false;
         }
     }
 }
@@ -353,11 +347,20 @@ fn sized_url_aspect(url: &str, w: u32, aspect: f32) -> String {
 /// that same scaled copy rather than resampling the source a second time.
 pub fn decode(bytes: &[u8], px: u32) -> anyhow::Result<(ColorImage, [u8; 3])> {
     let decoded = image::load_from_memory(bytes)?;
-    let scaled = decoded.resize(px, px, image::imageops::FilterType::Lanczos3);
+    let scaled = if decoded.width().max(decoded.height()) == px {
+        decoded
+    } else {
+        decoded.resize(px, px, image::imageops::FilterType::Lanczos3)
+    };
+    let size = [scaled.width() as usize, scaled.height() as usize];
+    if let Some(rgb) = scaled.as_rgb8() {
+        return Ok((
+            ColorImage::from_rgb(size, rgb.as_raw()),
+            dominant_colour(rgb.as_raw()),
+        ));
+    }
 
-    // One RGBA copy, not two: the dominant colour is read straight from the buffer we upload,
-    // dropping the alpha byte inline, instead of also materialising a whole `RgbImage`.
-    let rgba = scaled.to_rgba8();
+    let rgba = scaled.into_rgba8();
     let dominant = dominant_from_pixels(
         rgba.as_raw()
             .as_chunks::<4>()
@@ -365,10 +368,7 @@ pub fn decode(bytes: &[u8], px: u32) -> anyhow::Result<(ColorImage, [u8; 3])> {
             .iter()
             .map(|&[r, g, b, _]| [r, g, b]),
     );
-    let image = ColorImage::from_rgba_unmultiplied(
-        [rgba.width() as usize, rgba.height() as usize],
-        rgba.as_raw(),
-    );
+    let image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
     Ok((image, dominant))
 }
 
@@ -510,6 +510,40 @@ mod tests {
     }
 
     #[test]
+    fn decode_preserves_pixels_and_dominant_colour() {
+        use image::{DynamicImage, Rgb, Rgba};
+        use std::io::Cursor;
+
+        let sources = [
+            DynamicImage::ImageRgb8(image::RgbImage::from_fn(32, 16, |x, y| {
+                Rgb([(x * 8) as u8, (y * 16) as u8, 160])
+            })),
+            DynamicImage::ImageRgba8(image::RgbaImage::from_fn(32, 16, |x, y| {
+                Rgba([(x * 8) as u8, (y * 16) as u8, 160, (x * 8) as u8])
+            })),
+        ];
+        for source in sources {
+            let mut bytes = Vec::new();
+            source
+                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .expect("encodes");
+            for px in [16, 32, 64] {
+                let rgba = source
+                    .resize(px, px, image::imageops::FilterType::Lanczos3)
+                    .to_rgba8();
+                let size = [rgba.width() as usize, rgba.height() as usize];
+                let expected_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                let expected_colour =
+                    dominant_from_pixels(rgba.pixels().map(|&Rgba([r, g, b, _])| [r, g, b]));
+                let (image, colour) = decode(&bytes, px).expect("decodes");
+                assert_eq!(image.size, size);
+                assert_eq!(image.pixels, expected_image.pixels);
+                assert_eq!(colour, expected_colour);
+            }
+        }
+    }
+
+    #[test]
     fn does_not_mangle_other_parameters() {
         // `l90` and `rj` must survive; only w/h are ours to change.
         let out = sized_url("https://x/y=w60-h60-l90-rj", 256);
@@ -583,6 +617,23 @@ mod tests {
             images.texture(&url, 64, |_, _, _, _| asked += 1);
         }
         assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn failure_pressure_keeps_pending_requests_and_bounds_the_cache() {
+        let mut images = Images::new();
+        let pending: Arc<str> = Arc::from("https://x/pending");
+        let mut pending_requests = 0;
+        images.texture(&pending, 64, |_, _, _, _| pending_requests += 1);
+        for i in 0..MAX_ENTRIES + 32 {
+            let url: Arc<str> = Arc::from(format!("https://x/broken-{i}"));
+            images.texture(&url, 64, |_, _, _, _| {});
+            images.mark_failed(url, 64, false);
+            assert!(images.len() <= MAX_ENTRIES);
+        }
+        images.texture(&pending, 64, |_, _, _, _| pending_requests += 1);
+        assert_eq!(pending_requests, 1);
+        assert_eq!(images.inflight(), 1);
     }
 
     fn solid(r: u8, g: u8, b: u8, n: usize) -> Vec<u8> {

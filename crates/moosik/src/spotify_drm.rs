@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::{Mutex as AsyncMutex, Notify, mpsc, watch},
     task::{JoinHandle, JoinSet},
@@ -147,7 +147,7 @@ fn cache_entries() -> Result<Vec<(PathBuf, u64, SystemTime)>> {
         if stem.len() != 64 || !stem.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             continue;
         }
-        let metadata = std::fs::symlink_metadata(entry.path())?;
+        let metadata = entry.metadata()?;
         if metadata.is_file() && !metadata.file_type().is_symlink() {
             files.push((entry.path(), metadata.len(), metadata.modified()?));
         }
@@ -163,13 +163,15 @@ fn trim_cache(limit: u64, incoming: u64) -> Result<()> {
     CACHE_USAGE_KNOWN.store(false, Ordering::SeqCst);
     let mut entries = cache_entries()?;
     let mut total: u64 = entries.iter().map(|entry| entry.1).sum();
-    entries.sort_by_key(|entry| entry.2);
-    for (path, size, _) in entries {
-        if total.saturating_add(incoming) <= limit {
-            break;
+    if total.saturating_add(incoming) > limit {
+        entries.sort_by_key(|entry| entry.2);
+        for (path, size, _) in entries {
+            if total.saturating_add(incoming) <= limit {
+                break;
+            }
+            std::fs::remove_file(path)?;
+            total = total.saturating_sub(size);
         }
-        std::fs::remove_file(path)?;
-        total = total.saturating_sub(size);
     }
     CACHE_USAGE.store(total, Ordering::SeqCst);
     CACHE_USAGE_KNOWN.store(true, Ordering::SeqCst);
@@ -299,7 +301,7 @@ fn write_cached(
     result.map_err(Into::into)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Snapshot {
     pub position: f64,
     pub duration: f64,
@@ -310,6 +312,7 @@ pub struct Snapshot {
     pub rate: f64,
     pub volume: f64,
     pub muted: bool,
+    seek_version: u64,
 }
 
 impl Default for Snapshot {
@@ -324,6 +327,7 @@ impl Default for Snapshot {
             rate: 1.0,
             volume: 70.0,
             muted: false,
+            seek_version: 0,
         }
     }
 }
@@ -1086,18 +1090,21 @@ async fn start(
     }
 }
 
-async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
+async fn read_request_header(input: impl AsyncBufRead + Unpin) -> Result<Vec<u8>> {
+    let mut input = input.take(8192);
     let mut request = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut byte = [0u8; 1];
-        while request.len() < 8192 && !request.ends_with(b"\r\n\r\n") {
-            socket.read_exact(&mut byte).await?;
-            request.push(byte[0]);
+    while input.read_until(b'\n', &mut request).await? != 0 {
+        if request.ends_with(b"\r\n\r\n") {
+            return Ok(request);
         }
-        io::Result::Ok(())
-    })
-    .await??;
-    ensure!(request.ends_with(b"\r\n\r\n"), "Invalid renderer request");
+    }
+    bail!("Invalid renderer request");
+}
+
+async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
+    let mut input = BufReader::with_capacity(1024, &mut socket);
+    let request =
+        tokio::time::timeout(Duration::from_secs(5), read_request_header(&mut input)).await??;
     let header = std::str::from_utf8(&request)?;
     let mut lines = header.split("\r\n");
     let mut first = lines.next().unwrap_or_default().split_whitespace();
@@ -1131,7 +1138,7 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
     }
     let mut body = vec![0u8; content_len];
     if content_len > 0 {
-        tokio::time::timeout(Duration::from_secs(10), socket.read_exact(&mut body)).await??;
+        tokio::time::timeout(Duration::from_secs(10), input.read_exact(&mut body)).await??;
     }
     match (method, route) {
         ("GET", "") => {
@@ -1408,7 +1415,7 @@ impl BrowserState {
         })
     }
 
-    fn update(self, inner: &Inner) -> Result<()> {
+    fn update(&self, inner: &Inner) -> Result<()> {
         if inner.canceled.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -1439,13 +1446,13 @@ impl BrowserState {
         {
             let mut reporting = inner.reporting.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(reporter) = reporting.as_mut() {
-                reporter.observe(&self);
+                reporter.observe(self);
             }
             if self.ended || self.error_code.is_some() {
                 reporting.take();
             }
         }
-        *inner.state.lock().unwrap_or_else(|e| e.into_inner()) = Snapshot {
+        let next = Snapshot {
             position: self.position,
             duration: self.duration,
             paused: self.paused,
@@ -1455,12 +1462,26 @@ impl BrowserState {
             rate: self.rate,
             volume: self.volume,
             muted: self.muted,
+            seek_version: self.seek_version,
         };
-        if self.playing || (self.ready && self.paused && inner.paused.load(Ordering::SeqCst)) {
-            inner.playing.store(true, Ordering::SeqCst);
-        }
+        let changed = {
+            let mut previous = inner.state.lock().unwrap_or_else(|e| e.into_inner());
+            let position = if self.playing && !self.seeking {
+                previous.position
+            } else {
+                next.position
+            };
+            let changed = *previous != Snapshot { position, ..next };
+            *previous = next;
+            changed
+        };
+        let ready =
+            self.playing || (self.ready && self.paused && inner.paused.load(Ordering::SeqCst));
+        let became_ready = ready && !inner.playing.swap(true, Ordering::SeqCst);
         inner.started.notify_waiters();
-        inner.ctx.request_repaint();
+        if changed || became_ready || self.error_code.is_some() {
+            inner.ctx.request_repaint();
+        }
         Ok(())
     }
 }
@@ -1517,6 +1538,86 @@ fn certificate(bytes: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn renderer_headers_keep_body_bytes_and_enforce_the_size_limit() {
+        let mut request = b"POST /state HTTP/1.1\r\nX-Fill: ".to_vec();
+        request.resize(8192 - 4, b'x');
+        request.extend_from_slice(b"\r\n\r\nbody");
+        let mut input = BufReader::with_capacity(request.len(), request.as_slice());
+        assert_eq!(read_request_header(&mut input).await.unwrap().len(), 8192);
+        let mut body = [0; 4];
+        input.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"body");
+
+        request.insert(8192 - 4, b'x');
+        assert!(
+            read_request_header(BufReader::new(request.as_slice()))
+                .await
+                .is_err()
+        );
+        assert!(
+            read_request_header(BufReader::new(&b"GET / HTTP/1.1\r\n"[..]))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn renderer_progress_updates_the_snapshot_without_requesting_frames() {
+        let ctx = egui::Context::default();
+        let handle = Handle::new(ctx.clone());
+        let repaint_requested = || {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |_| {});
+            !ctx.repaint_causes().is_empty()
+        };
+        let mut state = BrowserState {
+            position: 10.0,
+            duration: 100.0,
+            played_ms: 10_000,
+            start_offset_ms: 0,
+            started_at_ms: Some(1_000),
+            ended_at_ms: None,
+            seek_version: 0,
+            seek_from_ms: 0,
+            paused: false,
+            ended: false,
+            buffering: false,
+            seeking: false,
+            rate: 1.0,
+            volume: 70.0,
+            muted: false,
+            playing: true,
+            ready: true,
+            error_code: None,
+        };
+        state.update(&handle.0).unwrap();
+        assert!(repaint_requested());
+
+        state.position = 10.25;
+        state.played_ms = 10_250;
+        state.update(&handle.0).unwrap();
+        assert_eq!(handle.state().position, 10.25);
+        assert!(!repaint_requested());
+
+        state.position = 50.0;
+        state.seek_version = 1;
+        state.seek_from_ms = 10_250;
+        state.update(&handle.0).unwrap();
+        assert!(repaint_requested());
+
+        handle.set_paused(true);
+        state.position = 50.1;
+        state.paused = true;
+        state.playing = false;
+        state.update(&handle.0).unwrap();
+        assert!(repaint_requested());
+
+        state.error_code = Some(3);
+        state.update(&handle.0).unwrap();
+        assert!(repaint_requested());
+        assert!(handle.last_error().is_some());
+    }
 
     #[test]
     fn stale_renderer_release_keeps_the_new_song_active() {

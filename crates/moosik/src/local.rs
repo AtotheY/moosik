@@ -36,7 +36,6 @@ pub fn scan(roots: &[String]) -> Vec<Track> {
                 })
                 .filter(|entry| entry.file_type().is_file() && is_audio(entry.path()))
                 .filter_map(|entry| track_from_path(entry.path()))
-                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -115,14 +114,28 @@ pub fn search(tracks: &[crate::model::Track], query: &str) -> crate::model::Sear
     let items = if terms.is_empty() {
         Vec::new()
     } else {
+        let mut text = String::new();
         tracks
             .iter()
             .filter(|track| {
-                let fields = std::iter::once(track.title.as_str())
-                    .chain(track.artists.iter().map(|artist| artist.name.as_str()))
-                    .chain(track.album.as_deref());
-                let text = fields.collect::<Vec<_>>().join(" ").to_lowercase();
-                terms.iter().all(|term| text.contains(term))
+                text.clear();
+                text.push_str(&track.title);
+                for field in track
+                    .artists
+                    .iter()
+                    .map(|artist| artist.name.as_str())
+                    .chain(track.album.as_deref())
+                {
+                    text.push(' ');
+                    text.push_str(field);
+                }
+                if text.is_ascii() {
+                    text.make_ascii_lowercase();
+                    terms.iter().all(|term| text.contains(term))
+                } else {
+                    let lowercase = text.to_lowercase();
+                    terms.iter().all(|term| lowercase.contains(term))
+                }
             })
             .cloned()
             .map(crate::model::Entry::Song)
