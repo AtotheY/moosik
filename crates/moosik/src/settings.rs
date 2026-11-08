@@ -403,15 +403,6 @@ pub struct Settings {
     pub sidebar_width: Option<f32>,
     /// The queue/lyrics panel's width as last dragged. Still capped by the window on the way in.
     pub panel_width: Option<f32>,
-    /// Offer Moosik updates with a quiet badge. Configured macOS bundles use Sparkle's
-    /// persisted scheduler preference; other builds check GitHub at launch.
-    pub check_for_updates: bool,
-    /// A release the user chose to skip: the launch check does not offer it again, though About
-    /// still shows it and a manual check still offers it.
-    pub skipped_update: Option<String>,
-    /// A release the user answered "Later" to, and when (unix seconds): the launch check keeps
-    /// quiet about it for a day.
-    pub update_later: Option<(String, i64)>,
 }
 
 impl Default for Settings {
@@ -458,9 +449,6 @@ impl Default for Settings {
             playlist_default_sort: crate::app::PlaylistSort::Default,
             sidebar_width: None,
             panel_width: None,
-            check_for_updates: true,
-            skipped_update: None,
-            update_later: None,
         }
     }
 }
@@ -664,6 +652,19 @@ mod tests {
         };
         let saved: Settings = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
         assert!(saved.discord_rich_presence && !saved.discord_host_listen_along);
+    }
+
+    #[test]
+    fn legacy_update_opt_out_and_dismissals_are_ignored() {
+        let old: Settings = serde_json::from_value(serde_json::json!({
+            "theme": "light",
+            "check_for_updates": false,
+            "skipped_update": "0.1.43",
+            "update_later": ["0.1.43", 1794173233]
+        }))
+        .unwrap();
+        let fresh: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(old, fresh);
     }
 
     /// A settings file from an older build, or a hand-edited one, must not stop the app.

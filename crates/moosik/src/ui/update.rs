@@ -7,15 +7,13 @@ use crate::theme;
 use crate::update::Install;
 use crate::widgets;
 
-/// What the update check found, and how far an install has got. Kept for the session only;
-/// a skipped version is the one part that persists, in the settings.
+/// What the update check found, and how far an install has got. Kept for this session.
 #[derive(Default)]
 pub(crate) struct State {
     /// A release newer than this build, once a check has found one.
     pub(crate) available: Option<crate::update::Release>,
     /// Sparkle owns the macOS update session when the bundle is configured.
     pub(crate) native: bool,
-    pub(crate) notice: bool,
     /// The window is open.
     pub(crate) open: bool,
     /// A check is in flight.
@@ -51,12 +49,9 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     let busy =
         app.update.progress.is_some() || app.update.refreshing || app.update.install_requested;
     let width = 580.0_f32.min(screen.width() - 40.0);
-    // Four buttons need about 540 points. Below that, "Skip this version" takes its own line
-    // above the others rather than running off the card's left edge.
-    let one_line = width >= 560.0;
-    let height = (if one_line { 210.0_f32 } else { 250.0 }).min(screen.height() - 80.0);
+    let height = 210.0_f32.min(screen.height() - 80.0);
 
-    let (mut install, mut page, mut skip, mut later) = (false, false, false, false);
+    let (mut install, mut page, mut later) = (false, false, false);
     egui::Area::new(egui::Id::new("ytm-update-modal"))
         .order(egui::Order::Middle)
         .fixed_pos(screen.min)
@@ -144,19 +139,6 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
                 egui::pos2(card.left() + 16.0, card.bottom() - 46.0),
                 egui::pos2(card.right() - 16.0, card.bottom() - 16.0),
             );
-            // The way out of this version sits apart, on the left: it is not one of the answers
-            // to "update now?", and it is the one a stray click should be furthest from.
-            let skip_line = if one_line {
-                buttons
-            } else {
-                buttons.translate(egui::vec2(0.0, -40.0))
-            };
-            let mut left = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(skip_line)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            skip = widgets::chip(&mut left, &p, "Skip this version", false).clicked();
             let mut row = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(buttons)
@@ -184,16 +166,7 @@ pub(crate) fn modal(app: &mut App, ui: &mut egui::Ui) {
     if install {
         app.activate_update();
     }
-    if skip {
-        let ctx = ui.ctx().clone();
-        app.update_settings(&ctx, |s| s.skipped_update = Some(release.version.clone()));
-    }
     if later {
-        let ctx = ui.ctx().clone();
-        app.update_later(&ctx, &release.version);
-    }
-    if later || skip {
-        app.update.notice = false;
         app.update.open = false;
         app.update.error = None;
     }

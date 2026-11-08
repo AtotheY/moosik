@@ -2066,9 +2066,6 @@ fn matched_artist_route(
 }
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
-/// How long "Later" on the update window keeps the launch check quiet about that release.
-const UPDATE_LATER_SECS: i64 = 24 * 60 * 60;
-
 /// Unix seconds, for the Discord presence's timestamps. Zero on a clock that predates 1970, which
 /// only ever costs a progress bar.
 fn unix_now() -> i64 {
@@ -2079,12 +2076,6 @@ fn unix_now() -> i64 {
 }
 
 impl App {
-    /// "Later" on the update window: no window for this release at launch for a day.
-    pub fn update_later(&mut self, ctx: &egui::Context, version: &str) {
-        let entry = Some((version.to_owned(), unix_now()));
-        self.update_settings(ctx, |s| s.update_later = entry);
-    }
-
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         options: Options,
@@ -2500,7 +2491,7 @@ impl App {
         // not an update window or the request behind it.
         #[cfg(target_os = "macos")]
         if !startup_timing && app.screenshot.is_none() && app.stats_after.is_none() {
-            match crate::update::macos::start(&app.ctx, app.settings.check_for_updates) {
+            match crate::update::macos::start(&app.ctx) {
                 Ok(native) => app.update.native = native,
                 Err(e) => tracing::warn!(error = %e, "native updater unavailable"),
             }
@@ -2729,11 +2720,6 @@ impl App {
         {
             autoplay.advance_after = None;
         }
-        if self.settings.check_for_updates != before.check_for_updates
-            && self.update.next_check.is_some()
-        {
-            self.update.next_check = Some(Instant::now());
-        }
         if self.settings.app_icon != before.app_icon {
             if let Err(e) = self.settings.app_icon.apply(
                 #[cfg(not(target_os = "macos"))]
@@ -2909,7 +2895,6 @@ impl App {
         match result {
             Ok(Check::Available(release)) => {
                 self.update.available = Some(release.clone());
-                self.update.notice = true;
                 #[cfg(target_os = "macos")]
                 if release.native {
                     self.update.open = false;
@@ -2925,7 +2910,6 @@ impl App {
             }
             Ok(status) => {
                 self.update.available = None;
-                self.update.notice = false;
                 self.update.open = false;
                 self.update.up_to_date = matches!(status, Check::Current);
                 self.update.not_published = matches!(status, Check::NotPublished);
@@ -6020,24 +6004,14 @@ impl App {
                     self.update.not_published = false;
                     match release {
                         Some(release) => {
-                            let skipped = self.settings.skipped_update.as_deref()
-                                == Some(release.version.as_str())
-                                || self.settings.update_later.as_ref().is_some_and(
-                                    |(version, at)| {
-                                        *version == release.version
-                                            && (0..UPDATE_LATER_SECS).contains(&(unix_now() - at))
-                                    },
-                                );
                             tracing::info!(version = %release.version, "update available");
                             // Background checks leave a quiet badge; only an explicit check opens UI.
                             self.update.open |= manual;
-                            self.update.notice = !skipped || manual;
                             self.update.up_to_date = false;
                             self.update.available = Some(*release);
                         }
                         None => {
                             self.update.available = None;
-                            self.update.notice = false;
                             self.update.up_to_date = true;
                             if manual {
                                 self.toast("Moosik is up to date");
@@ -6059,7 +6033,6 @@ impl App {
                 Event::UpdateNotPublished { manual } => {
                     self.update.checking = false;
                     self.update.available = None;
-                    self.update.notice = false;
                     self.update.up_to_date = false;
                     self.update.not_published = true;
                     self.update.error = None;
@@ -10058,9 +10031,7 @@ impl eframe::App for App {
         self.handle_events(ctx);
         ui::settings::apply_pending_cache_limits(self, ctx);
         self.refresh_update_if_requested();
-        if (self.update.native || self.settings.check_for_updates)
-            && let Some(next) = self.update.next_check
-        {
+        if let Some(next) = self.update.next_check {
             let now = Instant::now();
             if now >= next {
                 self.update.next_check = Some(now + UPDATE_CHECK_INTERVAL);
@@ -10111,18 +10082,15 @@ impl eframe::App for App {
                 Event::Available(version) => {
                     self.update.not_published = false;
                     self.update.available = Some(crate::update::native_release(version));
-                    self.update.notice = true;
                     self.update.up_to_date = false;
                     self.update.error = None;
                 }
                 Event::Current => {
                     self.update.not_published = false;
                     self.update.available = None;
-                    self.update.notice = false;
                     self.update.up_to_date = true;
                     self.update.error = None;
                 }
-                Event::Skipped => self.update.notice = false,
                 Event::Finished => self.update.checking = false,
                 Event::Failed(error) => {
                     self.update.checking = false;

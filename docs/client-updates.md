@@ -5,8 +5,10 @@ membership or App Store listing is **not required**. On macOS, Sparkle 2 handles
 checking, verifying the archive, installation, permissions, and relaunch.
 
 A lit download button appears immediately left of the profile picture when an update is
-available. With automatic checks enabled (the default), Moosik checks at launch and every
-15 minutes while running. Clicking Update checks the release source again. If a newer release
+available. Moosik checks at launch and every 15 minutes while running. Dismissing an
+update offer leaves the button visible. Older macOS installs with Sparkle scheduling
+disabled use an information-only check to discover eligible updates.
+Clicking Update checks the release source again. If a newer release
 appeared after the badge, Moosik uses the newer version. A failed lookup leaves the app running
 and the user can retry. On Windows setup installs, one click downloads the
 installer, verifies its checksum and restarts Moosik. Portable builds offer the release page.

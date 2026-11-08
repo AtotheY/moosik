@@ -61,9 +61,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     account_menu(app, &mut right, &chip);
     right.add_space(2.0);
     // This group lays out right to left: put an available update directly beside the avatar.
-    if app.update.notice
-        && let Some(release) = &app.update.available
-    {
+    if let Some(release) = &app.update.available {
         let tip = if app.update.refreshing || app.update.install_requested {
             "Checking for the latest release…".to_owned()
         } else if let Some(percent) = app.update.progress {

@@ -8,7 +8,7 @@ use objc2::{
     runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, Sel},
     sel,
 };
-use objc2_foundation::{NSBundle, NSError, NSObject, NSString, NSUserDefaults};
+use objc2_foundation::{NSBundle, NSError, NSObject, NSString};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -20,7 +20,6 @@ pub(crate) enum Event {
     Available(String),
     ShowOffer,
     Current,
-    Skipped,
     Finished,
     Failed(String),
     Relaunch,
@@ -80,11 +79,8 @@ fn found(item: &AnyObject) {
     let version: Retained<NSString> = unsafe { msg_send![item, displayVersionString] };
     emit(Event::Available(version.to_string()));
 }
-extern "C" fn valid(_: &AnyObject, _: Sel, updater: &AnyObject, item: &AnyObject) {
-    let downloading: Bool = unsafe { msg_send![updater, automaticallyDownloadsUpdates] };
-    if !downloading.as_bool() {
-        found(item);
-    }
+extern "C" fn valid(_: &AnyObject, _: Sel, _: &AnyObject, item: &AnyObject) {
+    found(item);
 }
 extern "C" fn prepared(
     _: &AnyObject,
@@ -271,19 +267,6 @@ extern "C" fn postpone(
     emit(Event::Relaunch);
     Bool::YES
 }
-extern "C" fn choice(
-    _: &AnyObject,
-    _: Sel,
-    _: &AnyObject,
-    choice: isize,
-    _: &AnyObject,
-    _: &AnyObject,
-) {
-    // SPUUserUpdateChoice: Skip=0, Install=1, Dismiss=2 (public SPUUserUpdateState.h).
-    if choice == 0 && REQUEST.with(|slot| slot.borrow().is_none()) {
-        emit(Event::Skipped);
-    }
-}
 fn delegate_class() -> &'static AnyClass {
     static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
     CLASS.get_or_init(|| {
@@ -306,10 +289,6 @@ fn delegate_class() -> &'static AnyClass {
             class.add_method(
                 sel!(standardUserDriverWillHandleShowingUpdate:forUpdate:state:),
                 showing as extern "C" fn(_, _, _, _, _),
-            );
-            class.add_method(
-                sel!(updater:userDidMakeChoice:forUpdate:state:),
-                choice as extern "C" fn(_, _, _, _, _, _),
             );
             class.add_method(
                 sel!(updater:didFindValidUpdate:),
@@ -342,7 +321,7 @@ fn delegate_class() -> &'static AnyClass {
 
 /// Main-thread only. A missing feed/key is a development build, never a reason to
 /// fall back to an unsigned installer or a different application's update feed.
-pub(crate) fn start(ctx: &egui::Context, legacy_automatic: bool) -> Result<bool> {
+pub(crate) fn start(ctx: &egui::Context) -> Result<bool> {
     if NATIVE.with(|n| n.borrow().is_some()) {
         return Ok(true);
     }
@@ -369,13 +348,6 @@ pub(crate) fn start(ctx: &egui::Context, legacy_automatic: bool) -> Result<bool>
     }
     let class = AnyClass::get(c"SPUUpdater").context("Sparkle updater class is missing")?;
     let delegate: Retained<AnyObject> = unsafe { msg_send![delegate_class(), new] };
-    // Preserve an existing Moosik opt-out on the first Sparkle-enabled launch.
-    // Thereafter Sparkle's persisted preference is authoritative.
-    let defaults = NSUserDefaults::standardUserDefaults();
-    let preference = NSString::from_str("SUEnableAutomaticChecks");
-    if !legacy_automatic && defaults.objectForKey(&preference).is_none() {
-        defaults.setBool_forKey(false, &preference);
-    }
     let driver: Retained<AnyObject> = unsafe {
         msg_send![msg_send![user_driver_class()?, alloc], initWithHostBundle: &*bundle, delegate: &*delegate]
     };
@@ -417,8 +389,15 @@ pub(crate) fn check_in_background() {
                 let updater = &native.updater;
                 let automatic: Bool = msg_send![&**updater, automaticallyChecksForUpdates];
                 let busy: Bool = msg_send![&**updater, sessionInProgress];
-                if automatic.as_bool() && !busy.as_bool() {
+                if busy.as_bool() {
+                    return;
+                }
+                if automatic.as_bool() {
                     let _: () = msg_send![&**updater, checkForUpdatesInBackground];
+                } else {
+                    // Discover eligible releases even on older installs with Sparkle scheduling off.
+                    // An information check only reports availability to our delegate.
+                    let _: () = msg_send![&**updater, checkForUpdateInformation];
                 }
             }
         }
@@ -435,26 +414,6 @@ pub(crate) fn check() {
             let _: () = msg_send![&*updater, checkForUpdates];
         }
     }
-}
-pub(crate) fn automatic_checks() -> Option<bool> {
-    NATIVE.with(|n| {
-        n.borrow().as_ref().map(|native| unsafe {
-            let updater = &native.updater;
-            let enabled: Bool = msg_send![&**updater, automaticallyChecksForUpdates];
-            enabled.as_bool()
-        })
-    })
-}
-pub(crate) fn set_automatic_checks(enabled: bool) {
-    NATIVE.with(|n| {
-        if let Some(native) = n.borrow().as_ref() {
-            unsafe {
-                let updater = &native.updater;
-                let _: () =
-                    msg_send![&**updater, setAutomaticallyChecksForUpdates: Bool::new(enabled)];
-            }
-        }
-    });
 }
 /// Invoke only after synchronously saving the queue/settings on the UI thread.
 pub(crate) fn continue_relaunch() {
