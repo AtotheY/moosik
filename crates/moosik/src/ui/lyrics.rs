@@ -1,99 +1,101 @@
-//! The lyrics panel: the now-playing song's words, synced to playback when we have timings.
-//!
-//! Shares the right panel with the queue — opening one closes the other — so it takes the same
-//! width and insets the queue uses.
-
 use crate::app::App;
 use crate::theme;
 use crate::widgets;
 
+use super::fullscreen::line_alpha;
+
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
-    // The card's own rect, before the header and list consume the ui: the corner repaint at
-    // the end needs its rounded edges.
     let card = widgets::card_rect(ui.available_rect_before_wrap(), theme::CARD_INSET);
     let _edge = widgets::CardEdge::new(ui, card, &p);
     widgets::clip_card_content(ui, card, theme::CARD_INSET_X, &p);
+    ui.set_min_width(ui.available_width());
+
+    let inset = theme::PAGE_INSET.left - theme::CARD_INSET.left;
+    let size = egui::remap_clamp(
+        card.width(),
+        theme::UPNEXT_MIN..=theme::UPNEXT_MAX,
+        theme::SECTION_PT..=24.0,
+    )
+    .round();
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(inset, 0))
+        .show(ui, |ui| contents(app, ui, size));
+    widgets::paint_corner_notches(ui, card, theme::CARD_INSET_X, &p);
+}
+
+fn contents(app: &mut App, ui: &mut egui::Ui, size: f32) {
+    let p = app.palette;
+    ui.add_space(theme::HEADER_TOP_PAD);
+    ui.label(
+        egui::RichText::new("Lyrics")
+            .font(theme::semibold(theme::ROW_TITLE_PT))
+            .color(p.secondary),
+    );
+    ui.add_space(theme::ROW_NUMBER_GAP);
 
     if app.lyrics_loading {
-        // The card is as wide as what it holds, and the skeleton's ragged lines reach only part
-        // of the way: without this the card's fill stopped short of its right edge. The loaded
-        // lyrics fill it through their scroll area.
-        ui.set_min_width(ui.available_width());
-        title(ui, &p);
-        ui.horizontal(|ui| {
-            ui.add_space(2.0);
-            ui.vertical(|ui| widgets::skeleton_lines(ui, &p, 8));
+        widgets::contain(ui, ui.available_rect_before_wrap(), |ui| {
+            widgets::skeleton_lines(ui, &p, 8);
         });
         return;
     }
-    let Some(lyrics) = app.lyrics.as_ref() else {
-        title(ui, &p);
-        let message = app
-            .lyrics_error
-            .clone()
-            .unwrap_or_else(|| "Play a song to see its lyrics".to_owned());
-        crate::ui::centered(app, ui, &message);
+    let Some(lyrics) = app
+        .lyrics
+        .as_ref()
+        .filter(|lyrics| !lyrics.lines.is_empty())
+    else {
+        let message = app.lyrics_error.as_deref().unwrap_or_else(|| {
+            if app.lyrics.is_some() {
+                "No lyrics available"
+            } else {
+                "Play a song to see its lyrics"
+            }
+        });
+        super::centered(app, ui, message);
         return;
     };
 
-    // Which line is playing. Only synced lyrics know; plain text has no highlight.
+    let synced = lyrics.synced;
     let position_ms = (app.player_state.position * 1000.0) as u64;
-    let active = lyrics
-        .synced
+    let active = synced
         .then(|| lyrics.lines.iter().rposition(|l| l.at_ms <= position_ms))
         .flatten();
+
+    let reset = std::mem::take(&mut app.lyrics_scroll_reset);
+    let follow = reset || active != app.lyrics_active;
+    app.lyrics_active = active;
 
     let mut area = egui::ScrollArea::vertical()
         .id_salt("lyrics")
         .auto_shrink([false, false]);
-    if app.lyrics_scroll_reset {
+    if reset {
         area = area.vertical_scroll_offset(0.0);
-        app.lyrics_scroll_reset = false;
-        // Land on the top of the panel, not wherever the active line happens to be — the
-        // sync below then treats this frame's line as already seen, so the scroll-to-active
-        // below doesn't immediately undo the reset.
-        app.lyrics_active = active;
     }
-    // Only scroll when the active line actually changed since last frame — not every repaint,
-    // which used to snap the view back the instant a paused listener scrolled away to read
-    // ahead. Since `active` only advances as `position_ms` crosses a new line, this is also
-    // exactly "only while playback advances": paused, position never changes, so neither does
-    // `active`.
-    let scroll = active != app.lyrics_active;
-    app.lyrics_active = active;
 
-    let synced = lyrics.synced;
+    let instant = reset || widgets::reduced_motion();
+    let scroll_animation = if instant {
+        egui::style::ScrollAnimation::none()
+    } else {
+        ui.style().scroll_animation
+    };
+    let alpha_time = if instant { 0.0 } else { 0.28 };
+    let font = theme::semibold(if synced { size } else { size * 0.85 });
+    let gap = if synced { size * 0.65 } else { size * 0.45 };
     let from = widgets::painted_so_far(ui);
     let output = area.show(ui, |ui| {
-        // Inside the scroll: the title scrolls away with the lyrics rather than staying
-        // pinned.
-        title(ui, &p);
+        ui.spacing_mut().item_spacing.y = 0.0;
         let mut clicked = None;
+        ui.add_space(theme::GUTTER);
         for (i, line) in lyrics.lines.iter().enumerate() {
-            // The gap goes before each line but the first, not after each: after the last
-            // one it was blank space below the lyrics, inside a card whose content runs to
-            // its bottom edge.
-            if i > 0 {
-                ui.add_space(4.0);
-            }
-            let is_active = Some(i) == active;
-            let font = if is_active {
-                theme::semibold(15.0)
-            } else {
-                theme::regular(14.0)
-            };
             let text = if line.text.is_empty() {
                 "♪"
             } else {
                 &line.text
             };
-            // Laid out before the colour is known: a synced line lights up under the
-            // pointer, which needs the row's rect first. The whole row is the target, so a
-            // short line is as easy to hit as a long one.
             let galley = ui.painter().layout(
                 text.to_owned(),
-                font,
+                font.clone(),
                 egui::Color32::PLACEHOLDER,
                 ui.available_width(),
             );
@@ -102,55 +104,48 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             } else {
                 egui::Sense::hover()
             };
+            let height = galley.size().y;
             let (rect, response) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), galley.size().y), sense);
-            let hovered = synced && response.hovered();
-            if hovered {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), height + gap), sense);
+            if (Some(i) == active && follow)
+                || (response.gained_focus() && !ui.clip_rect().contains_rect(rect))
+            {
+                let line_rect =
+                    egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), height));
+                ui.scroll_to_rect_animation(line_rect, Some(egui::Align::Center), scroll_animation);
             }
-            let color = if is_active {
-                p.accent_text()
-            } else if hovered {
-                p.text
-            } else {
-                p.secondary
-            };
-            ui.painter().galley(rect.min, galley, color);
             if synced && response.clicked() {
                 clicked = Some(line.at_ms);
             }
-            if is_active && scroll {
-                ui.scroll_to_rect(
-                    rect.expand2(egui::vec2(0.0, 48.0)),
-                    Some(egui::Align::Center),
-                );
+            if !ui.is_rect_visible(rect) {
+                continue;
             }
+            let alpha = if synced {
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text)
+                });
+                let mut alpha = line_alpha(i, active);
+                if response.hovered() || response.has_focus() {
+                    alpha = alpha.max(0.85);
+                }
+                ui.ctx()
+                    .animate_value_with_time(response.id.with("alpha"), alpha, alpha_time)
+            } else {
+                0.85
+            };
+            ui.painter()
+                .galley(rect.min, galley, p.text.gamma_multiply(alpha));
         }
+        ui.add_space(theme::GUTTER);
         clicked
     });
-    // The title scrolls with the words, so at the top of the lyrics nothing fades there.
-    widgets::fade_scroll_edges(ui, from, &output, widgets::scroll_fade(&app.settings));
-    let clicked = output.inner;
-    // A click on a synced line plays from where it starts.
-    if let Some(at_ms) = clicked {
+
+    if widgets::scroll_fade(&app.settings) > 0.0 {
+        let band = (size * 3.0).min(output.inner_rect.height() * 0.28);
+        widgets::fade_scroll_edges(ui, from, &output, band);
+    }
+    if let Some(at_ms) = output.inner {
         app.seek_to(at_ms as f64 / 1000.0);
     }
-    // The card's rounded corners, over everything the lyrics drew: the list runs to the card's
-    // bottom edge now.
-    widgets::paint_corner_notches(ui, card, theme::CARD_INSET_X, &p);
-}
-
-/// The panel's own title, a hair right of the lyrics below it by eye — the same nudge the
-/// queue's own header takes.
-fn title(ui: &mut egui::Ui, p: &theme::Palette) {
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new("Lyrics")
-                .font(theme::semibold(14.0))
-                .color(p.text),
-        );
-    });
-    ui.add_space(8.0);
 }

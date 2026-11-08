@@ -450,28 +450,17 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         .font_data
         .insert(INTER_BOLD.to_owned(), weighted(700.0));
 
-    // Inter leads the proportional family, then Noto Emoji, then egui's bundled faces as
-    // fallbacks for scripts neither covers. Order is precedence: the first face with the glyph
-    // wins, so Inter keeps the text-style arrows and dingbats it draws better itself.
-    //
-    // Between the two sits whatever CJK faces the system carries, loaded from disk rather than
-    // bundled — Noto Sans CJK JP alone is ~19 MB across the weights, and a music app that
-    // cannot show its users' own song titles is broken. Nothing here ships a font that large
-    // for the one machine in ten that has no CJK installed at all; without one, titles fall
-    // back to the boxes they were, which was never this code's making.
-    let mut cjk_names = Vec::new();
-    for (name, bytes) in system_cjk_fonts() {
+    let mut system_names = Vec::new();
+    for (name, bytes) in system_fonts() {
         fonts
             .font_data
             .insert(name.to_owned(), Arc::new(FontData::from_static(bytes)));
-        cjk_names.push(name);
+        system_names.push(name.to_owned());
     }
     let head = fonts.families.entry(FontFamily::Proportional).or_default();
     head.insert(0, "inter".to_owned());
     head.insert(1, EMOJI.to_owned());
-    for (i, name) in cjk_names.iter().enumerate() {
-        head.insert(2 + i, (*name).to_owned());
-    }
+    head.splice(2..2, system_names);
 
     let fallbacks: Vec<String> = fonts.families[&FontFamily::Proportional]
         .iter()
@@ -487,20 +476,16 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Every system CJK face worth registering, one per script, in fallback order.
-///
-/// Linux carries a single super-TTC that covers Japanese, Korean and Chinese, so one entry does
-/// it. Windows ships a face per script and none covers the others' kana or hangul — Yu Gothic
-/// for Japanese, Malgun Gothic for Korean, Microsoft YaHei for Chinese — so all three go in,
-/// Japanese first to match the Linux preference. Each group takes the first path that exists;
-/// a group with nothing installed simply contributes nothing.
-///
-/// Mapped, not read: `NotoSansCJK-Regular.ttc` is a ~20 MB super-TTC, and a music app that
-/// cannot show its users' own song titles is broken — but almost none of those 20 MB needs to
-/// be resident. `std::fs::read` would keep the whole file in a process-lifetime heap `Vec`
-/// (the largest single line item in the idle figure on any machine with `noto-cjk`); a map is
-/// file-backed and only the pages holding glyphs actually drawn are ever faulted in.
-fn system_cjk_fonts() -> Vec<(&'static str, &'static [u8])> {
+fn system_fonts() -> Vec<(&'static str, &'static [u8])> {
+    use std::path::Path;
+
+    #[cfg(target_os = "windows")]
+    let root = std::env::var_os("WINDIR").unwrap_or_else(|| r"C:\Windows".into());
+    #[cfg(target_os = "windows")]
+    let root = Path::new(&root).join("Fonts");
+    #[cfg(not(target_os = "windows"))]
+    let root = Path::new("/");
+
     #[cfg(target_os = "windows")]
     const GROUPS: &[(&str, &[&str])] = &[
         (
@@ -508,27 +493,16 @@ fn system_cjk_fonts() -> Vec<(&'static str, &'static [u8])> {
             &[
                 // Yu Gothic ships on Windows 10 and 11; Meiryo and MS Gothic are the older
                 // installs.
-                r"C:\Windows\Fonts\YuGothM.ttc",
-                r"C:\Windows\Fonts\meiryo.ttc",
-                r"C:\Windows\Fonts\msgothic.ttc",
+                "YuGothM.ttc",
+                "meiryo.ttc",
+                "msgothic.ttc",
             ],
         ),
-        (
-            "system-cjk-kr",
-            &[
-                r"C:\Windows\Fonts\malgun.ttf",
-                r"C:\Windows\Fonts\gulim.ttc",
-                r"C:\Windows\Fonts\batang.ttc",
-            ],
-        ),
-        (
-            "system-cjk-sc",
-            &[
-                r"C:\Windows\Fonts\msyh.ttc",
-                r"C:\Windows\Fonts\msjh.ttc",
-                r"C:\Windows\Fonts\simsun.ttc",
-            ],
-        ),
+        ("system-cjk-kr", &["malgun.ttf", "gulim.ttc", "batang.ttc"]),
+        ("system-cjk-sc", &["msyh.ttc", "msjh.ttc", "simsun.ttc"]),
+        ("system-ui", &["segoeui.ttf", "arial.ttf"]),
+        ("system-indic", &["Nirmala.ttc", "nirmala.ttf"]),
+        ("system-thai", &["LeelawUI.ttf", "tahoma.ttf"]),
     ];
     // macOS ships these with the system; PingFang lives in a private framework, so Hiragino Sans
     // GB stands in for Simplified Chinese.
@@ -552,36 +526,86 @@ fn system_cjk_fonts() -> Vec<(&'static str, &'static [u8])> {
                 "/System/Library/Fonts/STHeiti Light.ttc",
             ],
         ),
+        ("system-arabic", &["/System/Library/Fonts/GeezaPro.ttc"]),
+        (
+            "system-ui",
+            &["/System/Library/Fonts/Supplemental/Arial.ttf"],
+        ),
+        (
+            "system-devanagari",
+            &["/System/Library/Fonts/KohinoorDevanagari.ttc"],
+        ),
+        (
+            "system-bengali",
+            &["/System/Library/Fonts/KohinoorBangla.ttc"],
+        ),
+        ("system-thai", &["/System/Library/Fonts/Thonburi.ttc"]),
     ];
     // Fedora and Arch keep Noto under `opentype/noto`, Debian and KDE under `noto-cjk`; the
     // Regular weight is preferred so titles match the UI's own voice, and the DemiLight
     // commonly-installed variant fills in where it does not exist.
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    const GROUPS: &[(&str, &[&str])] = &[(
-        "system-cjk",
-        &[
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-DemiLight.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-DemiLight.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK.ttc",
-        ],
-    )];
+    const GROUPS: &[(&str, &[&str])] = &[
+        (
+            "system-cjk",
+            &[
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK-DemiLight.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-DemiLight.ttc",
+                "/usr/share/fonts/noto-cjk/NotoSansCJK.ttc",
+            ],
+        ),
+        (
+            "system-arabic",
+            &[
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/google-noto-sans-arabic-fonts/NotoSansArabic[wght].ttf",
+            ],
+        ),
+        (
+            "system-ui",
+            &[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            ],
+        ),
+        (
+            "system-devanagari",
+            &[
+                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf",
+            ],
+        ),
+        (
+            "system-bengali",
+            &[
+                "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSansBengali-Regular.ttf",
+            ],
+        ),
+        (
+            "system-thai",
+            &[
+                "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+                "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+            ],
+        ),
+    ];
 
     GROUPS
         .iter()
         .filter_map(|(name, paths)| {
             paths
                 .iter()
-                .find_map(|path| mapped_font(path).map(|bytes| (*name, bytes)))
+                .find_map(|path| mapped_font(&root.join(path)).map(|bytes| (*name, bytes)))
         })
         .collect()
 }
 
-/// Map a font file and leak the mapping — see [`system_cjk_fonts`] for why a map, and why
-/// leaking is the lifetime epaint wants: `&'static [u8]` has to outlive every glyph lookup
-/// egui makes, i.e. the whole process, which is exactly what a leak gives it.
-fn mapped_font(path: &str) -> Option<&'static [u8]> {
+fn mapped_font(path: &std::path::Path) -> Option<&'static [u8]> {
     let file = std::fs::File::open(path).ok()?;
     // SAFETY: as in `emoji::load_font` — a font file replaced under a running process is seen
     // as changed bytes; skrifa bounds-checks every read and a bad parse yields fallback boxes,
@@ -1002,7 +1026,10 @@ mod tests {
     /// and Korean song titles as replacement glyphs.
     #[test]
     fn the_system_cjk_font_covers_kana_and_hangul() {
-        if system_cjk_fonts().is_empty() {
+        if !system_fonts()
+            .iter()
+            .any(|(name, _)| name.starts_with("system-cjk"))
+        {
             return;
         }
         let ctx = fonts_ready();
@@ -1013,6 +1040,25 @@ mod tests {
                 c as u32
             );
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_windows_font_stack_covers_international_titles_and_lyrics() {
+        let ctx = fonts_ready();
+        ctx.fonts_mut(|fonts| {
+            for font in [regular(14.0), medium(14.0), semibold(24.0), bold(26.0)] {
+                for text in ["مرحبا", "پژوهش", "گانا", "שלום", "नमस्ते", "বাংলা", "เพลง"]
+                {
+                    for c in text.chars() {
+                        assert!(
+                            fonts.has_glyph(&font, c),
+                            "no glyph for {c:?} in {text:?} with {font:?}"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     /// An unassigned code point, as the negative control: without one, the coverage test above
