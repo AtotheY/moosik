@@ -6,23 +6,16 @@
 //! column of controls repeated down it is noise; rating a queued song is one right-click away.
 
 use crate::app::{App, SessionMember};
+use crate::icons::Icon;
 use crate::theme;
-use crate::ui::{ListClick, RowSpec, centered, is_active, spec_rows, track_subtitle_no_album};
+use crate::ui::{ListClick, RowSpec, is_active, spec_rows, track_subtitle_no_album};
 use crate::widgets::{self, ArtShape};
 use crate::{backend::Backend, images::Images};
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
-    // The card's own rect, before the list consumes the ui: the corner repaint at the end
-    // needs its rounded edges. Taken before the empty queue returns, so that card has its edge
-    // too. Not in the fullscreen drawer, which is no card (see the notches below).
     let card = widgets::card_rect(ui.available_rect_before_wrap(), theme::CARD_INSET);
     external_drop(app, ui, card);
     let _edge = (!app.fs.open).then(|| widgets::CardEdge::new(ui, card, &app.palette));
-    if app.q.is_empty() && app.room_snapshot().is_none() && !app.following() {
-        edit_controls(app, ui, &[], true);
-        centered(app, ui, "Empty queue");
-        return;
-    }
     widgets::clip_card_content(ui, card, theme::CARD_INSET_X, &app.palette);
 
     let mut area = egui::ScrollArea::vertical()
@@ -34,24 +27,19 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     }
     let from = widgets::painted_so_far(ui);
     let out = area.show(ui, |ui| {
-        // The list runs to the card's top edge now; this is the header's own breathing room,
-        // and it scrolls away with it — the same distance the content has from the sides.
-        ui.add_space(8.0);
-        now_playing(app, ui, false);
-        session_queue(app, ui, false);
-        if app.following() && app.room_snapshot().is_some() {
-            return;
-        }
-        let label = if app.room_snapshot().is_some() {
-            "Personal queue"
-        } else {
-            "Next up"
-        };
-        section(app, ui, 8.0, label);
-        let upcoming = app
-            .q
-            .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-        next_up(app, ui, &upcoming);
+        ui.add_space(12.0);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(4, 0))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Queue")
+                        .font(theme::bold(theme::SECTION_PT))
+                        .color(app.palette.text),
+                );
+                ui.add_space(12.0);
+                queue_contents(app, ui, false);
+            });
+        ui.add_space(12.0);
     });
     // Where the list is scrolled to, for the fullscreen view's edge fades: they only belong where
     // there is more to scroll to.
@@ -72,20 +60,6 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     if !app.fs.open {
         widgets::paint_corner_notches(ui, card, theme::CARD_INSET_X, &app.palette);
     }
-}
-
-/// A small caps-ish section label, as the reference uses above each block. `gap` is the space
-/// above it: sections that follow a row carry 8, the first block under the panel's top carries
-/// none — the queue is dismissed from the player bar's list button, so there is no header row
-/// to clear.
-fn section(app: &App, ui: &mut egui::Ui, gap: f32, label: &str) {
-    ui.add_space(gap);
-    ui.label(
-        egui::RichText::new(label)
-            .font(theme::semibold(12.0))
-            .color(app.palette.secondary),
-    );
-    ui.add_space(4.0);
 }
 
 const AVATAR: f32 = 24.0;
@@ -135,7 +109,7 @@ fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
     let p = app.palette;
     ui.horizontal(|ui| {
         if !page {
-            ui.add_space(2.0);
+            ui.add_space(theme::ROW_LEFT_INSET);
         }
         let text = egui::RichText::new(title);
         ui.label(if page {
@@ -147,6 +121,9 @@ fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
             return;
         };
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !page {
+                ui.add_space(theme::ROW_LEFT_INSET);
+            }
             ui.spacing_mut().item_spacing.x = AVATAR_GAP;
             let slots =
                 ((ui.available_width() + AVATAR_GAP) / (AVATAR + AVATAR_GAP)).floor() as usize;
@@ -190,7 +167,9 @@ fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
             }
         });
     });
-    ui.add_space(if page { 8.0 } else { 4.0 });
+    if page {
+        ui.add_space(8.0);
+    }
 }
 
 /// The track the transport is on, above the list of what follows it.
@@ -201,7 +180,6 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
         }
         return;
     };
-    playing_header(app, ui, "Now playing", page);
     let credit = app
         .room_snapshot()
         .and_then(|room| room.playing_credit(&track.video_id))
@@ -259,30 +237,42 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
         })
         .inner
     };
-    let clicked = if let Some((member, label)) = credit {
-        ui.horizontal(|ui| {
-            let width = ui.available_width() - AVATAR - ui.spacing().item_spacing.x;
-            let clicked = ui
-                .allocate_ui_with_layout(
-                    egui::vec2(width.max(0.0), theme::ROW_HEIGHT),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| row(app, ui),
-                )
-                .inner;
-            avatar(
-                ui,
-                &app.palette,
-                &mut app.images,
-                &app.backend,
-                &member,
-                &label,
-            );
-            clicked
+    let clicked = egui::Frame::new()
+        .fill(app.palette.surface)
+        .corner_radius(theme::RADIUS)
+        .inner_margin(egui::Margin {
+            top: 8,
+            ..egui::Margin::ZERO
         })
-        .inner
-    } else {
-        row(app, ui)
-    };
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            playing_header(app, ui, "Now playing", false);
+            if let Some((member, label)) = credit {
+                ui.horizontal(|ui| {
+                    let width = ui.available_width() - AVATAR - ui.spacing().item_spacing.x;
+                    let clicked = ui
+                        .allocate_ui_with_layout(
+                            egui::vec2(width.max(0.0), theme::ROW_HEIGHT),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| row(app, ui),
+                        )
+                        .inner;
+                    avatar(
+                        ui,
+                        &app.palette,
+                        &mut app.images,
+                        &app.backend,
+                        &member,
+                        &label,
+                    );
+                    clicked
+                })
+                .inner
+            } else {
+                row(app, ui)
+            }
+        })
+        .inner;
     if let Some(action) = clicked.action {
         app.row_action(action);
     }
@@ -300,61 +290,30 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     external_drop(app, ui, ui.available_rect_before_wrap());
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
-        if app.q.current_track().is_none() && app.q.tracks().is_empty() {
-            if app.following() || app.room_snapshot().is_some() {
-                now_playing(app, ui, true);
-                session_queue(app, ui, true);
-                return;
+        if !app.q.is_empty() {
+            if widgets::pill_button(ui, &app.palette, "Save as private playlist").clicked() {
+                let tracks = app
+                    .q
+                    .current_track()
+                    .cloned()
+                    .into_iter()
+                    .chain(
+                        app.room_snapshot()
+                            .into_iter()
+                            .flat_map(|room| room.queue.iter().map(|e| e.song.track())),
+                    )
+                    .chain(
+                        app.q
+                            .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen))
+                            .into_iter()
+                            .map(|i| app.q.tracks()[i].clone()),
+                    )
+                    .collect();
+                app.new_private_playlist(tracks, None);
             }
-            edit_controls(app, ui, &[], false);
-            centered(app, ui, "Your queue is empty. Play a song to get started.");
-            return;
+            ui.add_space(12.0);
         }
-        if widgets::pill_button(ui, &app.palette, "Save as private playlist").clicked() {
-            let tracks = app
-                .q
-                .current_track()
-                .cloned()
-                .into_iter()
-                .chain(
-                    app.room_snapshot()
-                        .into_iter()
-                        .flat_map(|room| room.queue.iter().map(|e| e.song.track())),
-                )
-                .chain(
-                    app.q
-                        .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen))
-                        .into_iter()
-                        .map(|i| app.q.tracks()[i].clone()),
-                )
-                .collect();
-            app.new_private_playlist(tracks, None);
-        }
-        ui.add_space(12.0);
-        now_playing(app, ui, true);
-        session_queue(app, ui, true);
-        if app.following() && app.room_snapshot().is_some() {
-            return;
-        }
-        let upcoming = app
-            .q
-            .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
-        let label = if app.room_snapshot().is_some() {
-            "Personal queue"
-        } else {
-            "Next up"
-        };
-        crate::ui::section(ui, &app.palette, label);
-        if upcoming.is_empty() {
-            edit_controls(app, ui, &upcoming, false);
-            ui.label(
-                egui::RichText::new("Nothing up next")
-                    .font(theme::regular(13.0))
-                    .color(app.palette.secondary),
-            );
-        } else {
-            next_up(app, ui, &upcoming);
-        }
+        queue_contents(app, ui, true);
     });
 }
 
@@ -451,13 +410,80 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
     }
 }
 
-fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
+fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
+    let has_current = app.q.current_track().is_some();
+    let session_only =
+        page && app.q.is_empty() && (app.following() || app.room_snapshot().is_some());
+    now_playing(app, ui, page);
+    session_queue(app, ui, page);
+
+    let in_room = app.room_snapshot().is_some();
+    if session_only || (app.following() && in_room) {
+        return;
+    }
+    if has_current || in_room || app.following() {
+        ui.add_space(16.0);
+    }
+
+    let upcoming = app
+        .q
+        .upcoming(app.repeat, app.radio.as_ref().map(|r| &r.chosen));
     let undo = app
         .queue_undo
         .as_ref()
         .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
-    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), upcoming);
-    crate::ui::queue_edit::controls(ui, &app.palette, undo, ui.available_width() < 400.0);
+    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), &upcoming);
+    let show_section = has_current || in_room || !upcoming.is_empty() || undo;
+    if show_section {
+        let title = if in_room { "Personal queue" } else { "Next up" };
+        crate::ui::queue_edit::toolbar(ui, &app.palette, title, undo);
+        ui.add_space(4.0);
+    }
+
+    if upcoming.is_empty() {
+        empty_state(ui, &app.palette, has_current || in_room);
+        if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
+            app.edit_queue(action);
+        }
+    } else {
+        next_up(app, ui, &upcoming);
+    }
+}
+
+fn empty_state(ui: &mut egui::Ui, palette: &theme::Palette, has_current: bool) {
+    if has_current {
+        ui.label(
+            egui::RichText::new("No songs queued")
+                .font(theme::regular(13.0))
+                .color(palette.secondary),
+        );
+        return;
+    }
+
+    ui.add_space(24.0);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(40.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS, palette.surface);
+        Icon::ListMusic.image(palette.secondary, 20.0).paint_at(
+            ui,
+            egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(20.0)),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Queue is empty")
+                .font(theme::semibold(theme::ROW_TITLE_PT))
+                .color(palette.text),
+        );
+        ui.label(
+            egui::RichText::new("Play a song to get started.")
+                .font(theme::regular(13.0))
+                .color(palette.secondary),
+        );
+    });
+}
+
+fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
     let list_top = ui.cursor().top();
     let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
     let signed_in = app.signed_in();
@@ -589,18 +615,6 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
     app.play_from_queue(i);
     if !already_here {
         app.queue_scroll_reset = true;
-    }
-}
-
-fn edit_controls(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize], compact: bool) {
-    let undo = app
-        .queue_undo
-        .as_ref()
-        .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
-    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), upcoming);
-    crate::ui::queue_edit::controls(ui, &app.palette, undo, compact);
-    if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
-        app.edit_queue(action);
     }
 }
 

@@ -295,64 +295,100 @@ pub(crate) fn single_move_menu(ui: &mut Ui, palette: &theme::Palette) {
     move_menu(ui, palette, &state(ui.ctx()));
 }
 
-pub(crate) fn controls(ui: &mut Ui, palette: &theme::Palette, undo: bool, compact: bool) {
+pub(crate) fn toolbar(ui: &mut Ui, palette: &theme::Palette, title: &str, undo: bool) {
     let mut s = state(ui.ctx());
-    ui.horizontal_wrapped(|ui| {
-        if !s.selected.is_empty() {
-            ui.label(
-                egui::RichText::new(if compact {
-                    s.selected.len().to_string()
-                } else {
-                    format!("{} selected", s.selected.len())
-                })
-                .font(theme::regular(12.0))
-                .color(palette.secondary),
-            );
-            if widgets::icon_button(ui, palette, Icon::ListStart, 16.0, false)
-                .on_hover_text("Play selected songs next")
-                .clicked()
-            {
-                s.action = Some(s.moving(0));
-            }
-            if widgets::icon_button(ui, palette, Icon::ListX, 16.0, false)
-                .on_hover_text("Remove selected songs · Delete")
-                .clicked()
-            {
-                s.action = Some(Action::Remove {
-                    stamp: s.stamp,
-                    indices: s.selected.clone(),
-                });
-            }
-            if !compact
-                && widgets::icon_button(ui, palette, Icon::X, 16.0, false)
-                    .on_hover_text("Clear selection")
-                    .clicked()
-            {
-                s.selected.clear();
-            }
-        }
-        if undo {
-            let response = if compact {
-                widgets::icon_button(ui, palette, Icon::History, 16.0, false)
+    let width = ui.available_width();
+    let compact = width < 400.0;
+    let selecting = !s.selected.is_empty();
+    ui.allocate_ui_with_layout(
+        vec2(width, 30.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            if selecting {
+                selection_controls(ui, palette, compact, &mut s);
             } else {
-                widgets::outline_button(ui, palette, "Undo")
-            };
-            if response
-                .on_hover_text("Undo queue edit · ⌘/Ctrl+Z")
-                .clicked()
-            {
-                s.action = Some(Action::Undo);
+                let heading = if compact {
+                    theme::semibold(16.0)
+                } else {
+                    theme::bold(theme::SECTION_PT)
+                };
+                ui.label(egui::RichText::new(title).font(heading).color(palette.text));
             }
-        }
-        if !s.order.is_empty()
-            && widgets::outline_button(ui, palette, if compact { "Clear" } else { "Clear queue" })
-                .on_hover_text("Clear upcoming songs; keep playing the current song")
-                .clicked()
-        {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                queue_actions(ui, palette, undo, &mut s);
+                if !selecting && !s.order.is_empty() {
+                    let count = s.order.len();
+                    let label = if count == 1 { "song" } else { "songs" };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{count} {label}"))
+                                .font(theme::regular(12.0))
+                                .color(palette.secondary),
+                        )
+                        .truncate(),
+                    );
+                }
+            });
+        },
+    );
+    save(ui.ctx(), s);
+}
+
+fn queue_actions(ui: &mut Ui, palette: &theme::Palette, undo: bool, s: &mut Selection) {
+    if !s.order.is_empty() {
+        let clear = widgets::icon_button(ui, palette, Icon::Trash2, 16.0, false)
+            .on_hover_text("Clear upcoming songs. Keep the current song.");
+        clear.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Clear queue")
+        });
+        if clear.clicked() {
             s.action = Some(Action::Clear { stamp: s.stamp });
         }
-    });
-    save(ui.ctx(), s);
+    }
+    if undo {
+        let restore = widgets::icon_button(ui, palette, Icon::History, 16.0, false)
+            .on_hover_text("Undo queue edit · ⌘/Ctrl+Z");
+        restore.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Undo queue edit")
+        });
+        if restore.clicked() {
+            s.action = Some(Action::Undo);
+        }
+    }
+}
+
+fn selection_controls(ui: &mut Ui, palette: &theme::Palette, compact: bool, s: &mut Selection) {
+    ui.label(
+        egui::RichText::new(if compact {
+            s.selected.len().to_string()
+        } else {
+            format!("{} selected", s.selected.len())
+        })
+        .font(theme::regular(12.0))
+        .color(palette.secondary),
+    );
+    if widgets::icon_button(ui, palette, Icon::ListStart, 16.0, false)
+        .on_hover_text("Play selected songs next")
+        .clicked()
+    {
+        s.action = Some(s.moving(0));
+    }
+    if widgets::icon_button(ui, palette, Icon::ListX, 16.0, false)
+        .on_hover_text("Remove selected songs · Delete")
+        .clicked()
+    {
+        s.action = Some(Action::Remove {
+            stamp: s.stamp,
+            indices: s.selected.clone(),
+        });
+    }
+    if !compact
+        && widgets::icon_button(ui, palette, Icon::X, 16.0, false)
+            .on_hover_text("Clear selection")
+            .clicked()
+    {
+        s.selected.clear();
+    }
 }
 
 /// Geometry, not hovered rows: the bottom half inserts *after* a row, and the
@@ -574,7 +610,7 @@ mod tests {
                 |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         prepare(ui, 7, &[10, 20, 30]);
-                        controls(ui, &palette, false, false);
+                        toolbar(ui, &palette, "Next up", false);
                         let top = ui.cursor().top();
                         let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;
                         for (i, index) in [10, 20, 30].into_iter().enumerate() {
@@ -629,7 +665,8 @@ mod tests {
         frame(vec![pointer(start, true)]);
         frame(vec![egui::Event::PointerMoved(start + vec2(0.0, 15.0))]);
         assert!(egui::DragAndDrop::has_payload_of_type::<QueueDrag>(&ctx));
-        frame(vec![egui::Event::PointerMoved(end)]);
+        let dragging = frame(vec![egui::Event::PointerMoved(end)]);
+        assert_eq!(dragging[2].top(), rects[2].top());
         frame(vec![pointer(end, false)]);
         assert!(matches!(
             take_action(&ctx),
