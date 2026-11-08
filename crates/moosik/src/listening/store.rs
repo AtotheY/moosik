@@ -68,7 +68,40 @@ pub(super) fn open(path: &std::path::Path) -> Result<Connection> {
             SELECT id,last_ms,'recovered_after_interruption','{}' FROM sessions WHERE ended_ms IS NULL;
         UPDATE sessions SET ended_ms=last_ms,outcome='interrupted' WHERE ended_ms IS NULL;
         COMMIT;")?;
+    install_weekly_totals(&db)?;
     Ok(db)
+}
+
+/// Backfill once from the local dates recorded at playback. The trigger keeps the
+/// summary atomic with new segments, including segments written by an older app.
+fn install_weekly_totals(db: &Connection) -> Result<()> {
+    let tx = db.unchecked_transaction()?;
+    if !tx.table_exists(None, "weekly_listening")? {
+        tx.execute_batch(
+            "CREATE TABLE weekly_listening (
+                monday TEXT PRIMARY KEY, listen_ms REAL NOT NULL
+            );
+            INSERT INTO weekly_listening
+                SELECT date(day, 'weekday 0', '-6 days') AS monday, SUM(listen_ms)
+                FROM segments WHERE listen_ms > 0 GROUP BY monday;
+            CREATE TRIGGER credit_listening_week AFTER INSERT ON segments
+            WHEN NEW.listen_ms > 0 BEGIN
+                INSERT INTO weekly_listening(monday, listen_ms)
+                    VALUES (date(NEW.day, 'weekday 0', '-6 days'), NEW.listen_ms)
+                    ON CONFLICT(monday) DO UPDATE SET listen_ms = listen_ms + excluded.listen_ms;
+            END;",
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn peak_week_minutes(db: &Connection) -> Result<u32> {
+    Ok(db.query_row(
+        "SELECT CAST(COALESCE(MAX(listen_ms), 0) / 60000 AS INTEGER) FROM weekly_listening",
+        [],
+        |row| row.get(0),
+    )?)
 }
 fn record(db: &mut Connection, records: Vec<Record>) -> Result<()> {
     let tx = db.transaction()?;
@@ -153,12 +186,20 @@ pub(super) fn worker(
     lock.try_lock()
         .context("Another Moosik instance is already recording. Close the extra instance.")?;
     let mut db = open(&path)?;
+    let mut peak = peak_week_minutes(&db)?;
+    let _ = replies.send(Reply::PeakWeekMinutes(peak));
     while let Ok(command) = commands.recv() {
         let result:Result<()> = match command {
             Command::Records(records) => {
                 // Failed writes stop the recorder rather than silently dropping samples and
                 // continuing with plausible-looking totals. UI displays the failure persistently.
-                record(&mut db,records).context("Could not save listening data")?; Ok(())
+                record(&mut db,records).context("Could not save listening data")?;
+                let minutes = peak_week_minutes(&db)?;
+                if minutes != peak {
+                    peak = minutes;
+                    let _ = replies.send(Reply::PeakWeekMinutes(peak));
+                }
+                Ok(())
             }
             Command::Report(query) => report::build(&db,&query).map(|report| { let _=replies.send(Reply::Report(Box::new(report))); }),
             Command::Tags(id,genres,tags,rating) => db.execute("INSERT INTO track_tags(track_id,genres,tags,rating,updated_ms) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(track_id) DO UPDATE SET genres=excluded.genres,tags=excluded.tags,rating=excluded.rating,updated_ms=excluded.updated_ms",
@@ -337,6 +378,36 @@ mod tests {
             artwork: None,
         }
     }
+    #[test]
+    fn best_week_backfills_once_and_credits_new_playback_across_years() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE segments(day TEXT, listen_ms REAL);
+            INSERT INTO segments VALUES ('2025-12-28', 60000), ('2025-12-29', 3600000),
+                ('2026-01-04', 14399999), ('2026-01-05', 120000);",
+        )
+        .unwrap();
+        install_weekly_totals(&db).unwrap();
+        assert_eq!(peak_week_minutes(&db).unwrap(), 299);
+        // A final millisecond in the same local week crosses the five-hour milestone.
+        db.execute("INSERT INTO segments VALUES ('2026-01-04', 1)", [])
+            .unwrap();
+        assert_eq!(peak_week_minutes(&db).unwrap(), 300);
+        db.execute_batch("INSERT INTO segments VALUES ('2026-01-05', 0), ('2026-01-11', 60000);")
+            .unwrap();
+        install_weekly_totals(&db).unwrap();
+        assert_eq!(peak_week_minutes(&db).unwrap(), 300);
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM weekly_listening", [], |r| r
+                .get::<_, usize>(0))
+                .unwrap(),
+            3
+        );
+        db.execute("INSERT INTO segments VALUES ('2026-01-11', 36000000)", [])
+            .unwrap();
+        assert_eq!(peak_week_minutes(&db).unwrap(), 603);
+    }
+
     #[test]
     fn recovery_preserves_samples_and_marks_interrupted() {
         let dir = temp();

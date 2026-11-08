@@ -173,6 +173,7 @@ enum Command {
     Shutdown,
 }
 enum Reply {
+    PeakWeekMinutes(u32),
     Report(Box<Report>),
     Error(String),
     Saved(String),
@@ -254,6 +255,7 @@ pub struct Ledger {
     last_flush: Instant,
     last_sample: Instant,
     nonce: u64,
+    pub peak_week_minutes: Option<u32>,
     pub report: Option<std::sync::Arc<Report>>,
     pub error: Option<String>,
     pub notice: Option<String>,
@@ -289,6 +291,7 @@ impl Ledger {
             last_flush: Instant::now(),
             last_sample: Instant::now(),
             nonce: 0,
+            peak_week_minutes: None,
             report: None,
             error,
             notice: None,
@@ -485,6 +488,7 @@ impl Ledger {
     pub fn poll(&mut self) {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
+                Reply::PeakWeekMinutes(peak) => self.peak_week_minutes = Some(peak),
                 Reply::Report(report) => {
                     self.report = Some(std::sync::Arc::from(report));
                     self.loading = false;

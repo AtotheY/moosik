@@ -60,6 +60,34 @@ impl AppIcon {
         Self::Cherry,
         Self::Carbon,
     ];
+    /// Best local calendar week required to equip this finish, in hours.
+    pub fn milestone(self) -> Option<u32> {
+        match self {
+            Self::Pearl => Some(5),
+            Self::Vinyl => Some(10),
+            Self::Amethyst => Some(15),
+            Self::Matcha => Some(20),
+            Self::Solar => Some(25),
+            Self::Denim => Some(30),
+            Self::Marble => Some(35),
+            Self::Lagoon => Some(40),
+            Self::Cherry => Some(45),
+            Self::Carbon => Some(50),
+            _ => None,
+        }
+    }
+
+    pub fn available_at(self, peak_minutes: u32) -> Self {
+        if self
+            .milestone()
+            .is_some_and(|hours| peak_minutes < hours * 60)
+        {
+            Self::Ceramic
+        } else {
+            self
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Ceramic => "Ceramic",
@@ -258,6 +286,20 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn only_the_new_finishes_require_a_personal_best() {
+        for (index, icon) in AppIcon::ALL.into_iter().enumerate() {
+            if index < 10 {
+                assert_eq!(icon.milestone(), None);
+                assert_eq!(icon.available_at(0), icon);
+            } else {
+                let minutes = (index as u32 - 9) * 5 * 60;
+                assert_eq!(icon.available_at(minutes - 1), AppIcon::Ceramic);
+                assert_eq!(icon.available_at(minutes), icon);
+            }
+        }
+    }
+
     #[test]
     fn all_selections_round_trip_and_decode_as_distinct_icons() {
         let mut images = std::collections::HashSet::new();

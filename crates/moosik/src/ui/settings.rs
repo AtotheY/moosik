@@ -1544,76 +1544,93 @@ fn premium_badge(ui: &mut egui::Ui, palette: &crate::theme::Palette) {
 
 /// Native icon choice; textures are decoded once and retained in egui's context cache.
 fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
-    let chosen = icon_grid(ui, &app.palette, app.settings.app_icon);
-    let ctx = ui.ctx().clone();
-    app.update_settings(&ctx, |s| s.app_icon = chosen);
-}
-
-fn icon_grid(
-    ui: &mut egui::Ui,
-    palette: &crate::theme::Palette,
-    mut chosen: crate::app_icon::AppIcon,
-) -> crate::app_icon::AppIcon {
     use crate::app_icon::AppIcon;
+    let peak = app.listening.peak_week_minutes;
+    let selected = AppIcon::current();
     ui.label(egui::RichText::new("App icon").size(18.0).strong());
-    ui.label("A different finish. The same Moosik.");
     ui.add_space(12.0);
-    let columns = ((ui.available_width() / 118.0).floor() as usize).clamp(2, 5);
-    for row in AppIcon::ALL.chunks(columns) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            for &icon in row {
-                ui.push_id(icon.label(), |ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(108.0);
-                        let selected = chosen == icon;
-                        if let Some(texture) = icon.texture(ui.ctx()) {
-                            let image = egui::Image::new((texture.id(), egui::vec2(86.0, 86.0)));
-                            let response = ui.add(
-                                egui::Button::new(image)
-                                    .selected(selected)
-                                    .min_size(egui::vec2(108.0, 100.0))
-                                    .corner_radius(12),
-                            );
-                            response.widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    egui::WidgetType::RadioButton,
-                                    true,
-                                    selected,
-                                    format!("{} app icon", icon.label()),
-                                )
-                            });
-                            if response
-                                .on_hover_text(format!("Use {}", icon.label()))
-                                .clicked()
-                            {
-                                chosen = icon;
+
+    let columns = ((ui.available_width() / 118.0).floor() as usize).clamp(1, 5);
+    let mut choice = None;
+    for finishes in AppIcon::ALL.chunk_by(|a, b| a.milestone().is_some() == b.milestone().is_some())
+    {
+        if finishes[0].milestone().is_some() {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Listening milestones")
+                        .size(18.0)
+                        .strong(),
+                );
+                let progress = match peak {
+                    Some(minutes) => format!("Best week · {}h {}m", minutes / 60, minutes % 60),
+                    None if app.listening.error.is_some() => "History unavailable".to_owned(),
+                    None => "Loading history…".to_owned(),
+                };
+                ui.label(egui::RichText::new(progress).color(app.palette.secondary));
+            });
+            ui.label("Reach each milestone in one Monday–Sunday week to keep its finish.");
+            ui.add_space(12.0);
+        }
+        for row in finishes.chunks(columns) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                for &icon in row {
+                    ui.push_id(icon.label(), |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(108.0);
+                            let unlocked = icon.available_at(peak.unwrap_or(0)) == icon;
+                            let status = match icon.milestone() {
+                                _ if icon == selected => "Selected".to_owned(),
+                                Some(hours) if !unlocked => format!("Unlock at {hours}h"),
+                                Some(hours) => format!("{hours}h earned"),
+                                None if icon == AppIcon::Ceramic => "Default".to_owned(),
+                                None => " ".to_owned(),
+                            };
+                            if let Some(texture) = icon.texture(ui.ctx()) {
+                                let image =
+                                    egui::Image::new((texture.id(), egui::vec2(86.0, 86.0)));
+                                let response = ui.add_enabled(
+                                    unlocked,
+                                    egui::Button::new(image)
+                                        .selected(icon == selected)
+                                        .min_size(egui::vec2(108.0, 100.0))
+                                        .corner_radius(12),
+                                );
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::WidgetType::RadioButton,
+                                        unlocked,
+                                        icon == selected,
+                                        format!("{} app icon. {}", icon.label(), status.trim()),
+                                    )
+                                });
+                                if response
+                                    .on_hover_text(format!("Use {}", icon.label()))
+                                    .on_disabled_hover_text(&status)
+                                    .clicked()
+                                {
+                                    choice = Some(icon);
+                                }
                             }
-                        }
-                        ui.label(egui::RichText::new(icon.label()).size(12.0));
-                        ui.label(
-                            egui::RichText::new(if selected {
-                                "Selected"
-                            } else if icon == AppIcon::Ceramic {
-                                "Default"
+                            ui.label(egui::RichText::new(icon.label()).size(12.0));
+                            let color = if icon == selected {
+                                app.palette.accent
                             } else {
-                                " "
-                            })
-                            .size(11.0)
-                            .color(if selected {
-                                palette.accent
-                            } else {
-                                palette.secondary
-                            }),
-                        );
+                                app.palette.secondary
+                            };
+                            ui.label(egui::RichText::new(status).size(11.0).color(color));
+                        });
                     });
-                });
-            }
-        });
-        ui.add_space(10.0);
+                }
+            });
+            ui.add_space(10.0);
+        }
     }
     ui.add_space(8.0);
-    chosen
+    if let Some(icon) = choice {
+        app.update_settings(&ui.ctx().clone(), |s| s.app_icon = icon);
+    }
 }
 
 #[cfg(test)]

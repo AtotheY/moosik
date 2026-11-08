@@ -1994,7 +1994,7 @@ impl Drop for App {
         }
         #[cfg(target_os = "windows")]
         {
-            self.settings.app_icon.refresh_pin(); // Also catch a pin created during this session.
+            crate::app_icon::AppIcon::current().refresh_pin(); // Also catch a pin created during this session.
             if let Some(window) = self.icon_window.upgrade() {
                 crate::app_icon::AppIcon::clear_taskbar_group(&window);
             }
@@ -2111,7 +2111,7 @@ impl App {
         // Let the single-instance listener thread wake this UI (`instance`'s own doc comment).
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         crate::instance::attach(&cc.egui_ctx);
-        if let Err(e) = settings.app_icon.apply(
+        if let Err(e) = settings.app_icon.available_at(0).apply(
             #[cfg(not(target_os = "macos"))]
             &cc.egui_ctx,
             #[cfg(not(target_os = "macos"))]
@@ -2705,6 +2705,37 @@ impl App {
         }
     }
 
+    /// Validate the saved choice against the ledger before applying any native icon.
+    fn sync_app_icon(&mut self, ctx: &egui::Context) {
+        let icon = self
+            .settings
+            .app_icon
+            .available_at(self.listening.peak_week_minutes.unwrap_or(0));
+        let current = crate::app_icon::AppIcon::current();
+        self.settings.app_icon = icon;
+        if icon == current {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let _ = ctx;
+        if let Err(e) = icon.apply(
+            #[cfg(not(target_os = "macos"))]
+            ctx,
+            #[cfg(not(target_os = "macos"))]
+            None,
+            #[cfg(target_os = "windows")]
+            self.icon_window.upgrade().as_deref(),
+        ) {
+            self.settings.app_icon = current;
+            self.toast(&format!("Could not change app icon: {e}"));
+            return;
+        }
+        self.logo = None;
+        if let Some(tray) = &self.tray {
+            tray.refresh_icon();
+        }
+    }
+
     pub(crate) fn update_settings(
         &mut self,
         ctx: &egui::Context,
@@ -2721,22 +2752,7 @@ impl App {
             autoplay.advance_after = None;
         }
         if self.settings.app_icon != before.app_icon {
-            if let Err(e) = self.settings.app_icon.apply(
-                #[cfg(not(target_os = "macos"))]
-                ctx,
-                #[cfg(not(target_os = "macos"))]
-                None,
-                #[cfg(target_os = "windows")]
-                self.icon_window.upgrade().as_deref(),
-            ) {
-                self.settings.app_icon = before.app_icon;
-                self.toast(&format!("Could not change app icon: {e}"));
-            } else {
-                self.logo = None;
-                if let Some(tray) = &self.tray {
-                    tray.refresh_icon();
-                }
-            }
+            self.sync_app_icon(ctx);
         }
         // Any of what makes a palette: the mode, the theme chosen for either mode, or how much
         // of the desktop shows through it.
@@ -3463,6 +3479,20 @@ impl App {
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
+        if self.listening.peak_week_minutes.is_none() {
+            if self.listening.error.is_none() {
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+        } else if self.settings.app_icon != crate::app_icon::AppIcon::current() {
+            // Restore a previously equipped milestone only after history has loaded.
+            let saved = self.settings.app_icon;
+            self.sync_app_icon(ctx);
+            if self.settings.app_icon != saved
+                && let Err(e) = crate::settings::save(&self.settings)
+            {
+                tracing::warn!(%e, "could not save validated icon");
+            }
+        }
         if self.spotify_pause != SpotifyPause::Released
             && self.listening.due()
             && let Some(player) = &self.player
