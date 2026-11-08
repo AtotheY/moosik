@@ -10057,6 +10057,7 @@ impl eframe::App for App {
     /// minimized window played its song out and stopped there, and answered no media key.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_events(ctx);
+        ui::settings::apply_pending_cache_limits(self, ctx);
         self.refresh_update_if_requested();
         if (self.update.native || self.settings.check_for_updates)
             && let Some(next) = self.update.next_check
