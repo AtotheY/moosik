@@ -217,7 +217,12 @@ impl Player {
         }
     }
 
-    pub fn playback_handle(&mut self, spotify: bool, ctx: egui::Context) -> Option<PlaybackHandle> {
+    pub fn playback_handle(
+        &mut self,
+        spotify: bool,
+        ctx: egui::Context,
+        volume: f64,
+    ) -> Option<PlaybackHandle> {
         self.stop();
         self.active = None;
         self.reported_error = None;
@@ -228,6 +233,7 @@ impl Player {
             crate::spotify_drm::retire_idle_renderer();
             PlaybackHandle::Mpv(self.handle()?)
         };
+        self.volume = volume.clamp(0.0, 100.0);
         self.active = Some(handle.clone());
         Some(handle)
     }
@@ -302,8 +308,8 @@ impl Player {
                 buffering: state.buffering,
                 seeking: state.seeking,
                 speed: state.rate,
-                volume: state.volume,
-                muted: state.muted,
+                volume: self.volume,
+                muted: self.volume == 0.0 || state.muted,
                 seek_serial: self.seek_serial.load(std::sync::atomic::Ordering::Relaxed),
             };
         }
@@ -323,12 +329,11 @@ impl Player {
             speed: mpv
                 .and_then(|m| m.get_property("speed").ok())
                 .unwrap_or(1.0),
-            volume: mpv
-                .and_then(|m| m.get_property("volume").ok())
-                .unwrap_or(self.volume),
-            muted: mpv
-                .and_then(|m| m.get_property("mute").ok())
-                .unwrap_or(false),
+            volume: self.volume,
+            muted: self.volume == 0.0
+                || mpv
+                    .and_then(|m| m.get_property("mute").ok())
+                    .unwrap_or(false),
             seek_serial: self.seek_serial.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
@@ -387,9 +392,24 @@ impl Player {
             return;
         }
         if let Some(mpv) = &self.mpv {
-            let _ = mpv.set_property("volume", self.volume);
+            let _ = mpv.set_property("volume", mpv_volume(self.volume));
         }
     }
+}
+
+pub(crate) fn volume_gain(volume: f64) -> f64 {
+    const RANGE_DB: f64 = 60.0;
+    let fraction = volume.clamp(0.0, 100.0) / 100.0;
+    if fraction > 0.0 {
+        10f64.powf((fraction - 1.0) * RANGE_DB / 20.0)
+    } else {
+        0.0
+    }
+}
+
+fn mpv_volume(volume: f64) -> f64 {
+    // mpv cubes its volume property before applying it to audio samples.
+    volume_gain(volume).cbrt() * 100.0
 }
 
 /// Log mpv's error messages and empty its event queue, without waiting. Only the UI thread calls
@@ -482,12 +502,13 @@ pub fn load(
     // Apply YouTube's own loudness measurement so tracks don't jump in level. It rides mpv's
     // `volume-gain` (dB, on top of `volume`), so the slider, mute and media keys can set `volume`
     // later without dropping this song's correction.
+    let volume = mpv_volume(volume);
     let gain = gain_db(normalise, loudness_db);
     if mpv.set_property("volume-gain", gain).is_ok() {
         let _ = mpv.set_property("volume", volume.clamp(0.0, 130.0));
     } else {
         // An mpv too old to have `volume-gain`: fold the correction into the percentage instead.
-        let folded = volume * 10f64.powf(gain / 20.0);
+        let folded = volume * 10f64.powf(gain / 60.0);
         let _ = mpv.set_property("volume", folded.clamp(0.0, 130.0));
     }
     let _ = mpv.set_property("pause", false);
@@ -531,7 +552,7 @@ pub fn load_video(
     let _ = mpv.set_property("audio-display", "no");
     // A video carries no loudness figure, and the song before it may have set a gain.
     let _ = mpv.set_property("volume-gain", 0.0);
-    let _ = mpv.set_property("volume", volume.clamp(0.0, 130.0));
+    let _ = mpv.set_property("volume", mpv_volume(volume));
     let _ = mpv.set_property("pause", false);
     // Decode on the GPU when the platform can, copying frames back into the software surface;
     // mpv falls back to software decoding when it cannot. The buffer is what makes this
@@ -549,8 +570,9 @@ pub fn load_video(
     // to this file only and is gone when the next one loads. Commas inside the URL are safe:
     // the option parser takes the value to the end of the entry.
     let options = audio_url.map(|a| format!("audio-files-append={a}"));
-    let mut args: Vec<&str> = vec![video_url, "replace", "-1"];
+    let mut args: Vec<&str> = vec![video_url, "replace"];
     if let Some(options) = &options {
+        args.push("-1");
         args.push(options);
     }
     mpv.command("loadfile", &args)
@@ -583,7 +605,108 @@ pub struct NowPlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::{gain_db, redact};
+    use super::{Player, gain_db, load, load_video, mpv_volume, redact, volume_gain};
+
+    #[test]
+    fn volume_gain_preserves_silence_and_full_volume() {
+        for volume in [-100.0, 0.0, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(volume_gain(volume), 0.0);
+        }
+        for volume in [100.0, 150.0, f64::INFINITY] {
+            assert_eq!(volume_gain(volume), 1.0);
+        }
+    }
+
+    #[test]
+    fn volume_steps_have_equal_decibel_spacing() {
+        for (volume, expected_db) in [(1.0, -59.4), (25.0, -45.0), (50.0, -30.0), (75.0, -15.0)] {
+            let db = 20.0 * volume_gain(volume).log10();
+            assert!((db - expected_db).abs() < 1e-10, "{volume}: {db}");
+        }
+        let mut previous = 0.0;
+        for step in 1..=1000 {
+            let gain = volume_gain(f64::from(step) / 10.0);
+            assert!(gain > previous && gain <= 1.0);
+            previous = gain;
+        }
+    }
+
+    #[test]
+    fn mpv_and_linear_outputs_apply_the_same_volume_gain() {
+        for step in 0..=100 {
+            let volume = f64::from(step);
+            let mpv_gain = (mpv_volume(volume) / 100.0).powi(3);
+            assert!((mpv_gain - volume_gain(volume)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn spotify_listening_samples_keep_slider_volume_through_mute() {
+        let mut player = Player::new();
+        player
+            .playback_handle(true, egui::Context::default(), 2.0)
+            .unwrap();
+        assert_eq!(player.listening_sample().volume, 2.0);
+        player.set_volume(1.0);
+        let quiet = player.listening_sample();
+        assert_eq!(quiet.volume, 1.0);
+        assert!(!quiet.muted);
+        player.set_volume(0.0);
+        let silent = player.listening_sample();
+        assert_eq!(silent.volume, 0.0);
+        assert!(silent.muted);
+    }
+
+    #[test]
+    fn mpv_volume_curve_survives_load_adjustment_and_video_switch() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        super::restore_c_locale();
+        let mpv = std::sync::Arc::new(
+            libmpv2::Mpv::with_initializer(|init| {
+                init.set_property("ao", "null")?;
+                init.set_property("vid", "no")?;
+                init.set_property("terminal", "no")
+            })
+            .unwrap(),
+        );
+        let mut player = Player::new();
+        player.mpv = Some(mpv.clone());
+        let supports_gain = mpv.get_property::<f64>("volume-gain").is_ok();
+        for volume in [0.0, 1.0, 25.0, 50.0, 75.0, 100.0] {
+            player
+                .playback_handle(false, egui::Context::default(), volume)
+                .unwrap();
+            load(&mpv, "av://lavfi:anullsrc", volume, Some(6.0), true, None).unwrap();
+            let sample = player.listening_sample();
+            assert_eq!(sample.volume, volume);
+            assert_eq!(sample.muted, volume == 0.0);
+            let loaded: f64 = mpv.get_property("volume").unwrap();
+            let expected = mpv_volume(volume);
+            let expected_load = if supports_gain {
+                expected
+            } else {
+                expected * 10f64.powf(-6.0 / 60.0)
+            };
+            assert!((loaded - expected_load).abs() < 1e-5);
+            if supports_gain {
+                assert_eq!(mpv.get_property::<f64>("volume-gain").unwrap(), -6.0);
+            }
+
+            player.set_volume(100.0);
+            player.set_volume(volume);
+            assert_eq!(player.listening_sample().volume, volume);
+            assert!((mpv.get_property::<f64>("volume").unwrap() - expected).abs() < 1e-5);
+            if supports_gain {
+                assert_eq!(mpv.get_property::<f64>("volume-gain").unwrap(), -6.0);
+            }
+
+            load_video(&mpv, "av://lavfi:anullsrc", None, volume, None).unwrap();
+            assert!((mpv.get_property::<f64>("volume").unwrap() - expected).abs() < 1e-5);
+            if supports_gain {
+                assert_eq!(mpv.get_property::<f64>("volume-gain").unwrap(), 0.0);
+            }
+        }
+    }
 
     /// The lines mpv really prints for a stream it cannot open and a missing local file: no IP,
     /// no signature and no username may survive into the log.

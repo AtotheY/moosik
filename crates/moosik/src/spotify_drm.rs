@@ -721,7 +721,7 @@ impl Handle {
 
     pub fn set_volume(&self, volume: f64) {
         if volume.is_finite() && !self.0.canceled.load(Ordering::SeqCst) {
-            let volume = volume.clamp(0.0, 100.0);
+            let volume = crate::player::volume_gain(volume) * 100.0;
             self.0
                 .state
                 .lock()
@@ -880,7 +880,7 @@ async fn start(
         media: AsyncMutex::new(media),
         prefix,
         origin,
-        volume: volume.clamp(0.0, 100.0),
+        volume: crate::player::volume_gain(volume) * 100.0,
         start_at,
         cache_generation,
         handle: Arc::downgrade(&handle.0),
@@ -1896,6 +1896,31 @@ mod tests {
         assert!(name.ends_with(".cenc"));
         assert!(name[..64].bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(cache_name("file-one"), cache_name("file-two"));
+    }
+
+    #[test]
+    fn volume_commands_apply_logarithmic_gain() {
+        let handle = Handle::new(egui::Context::default());
+        for (volume, gain) in [
+            (-10.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.001071519305237606),
+            (50.0, 0.03162277660168379),
+            (100.0, 1.0),
+            (150.0, 1.0),
+        ] {
+            handle.set_volume(volume);
+            let command = handle.0.commands.lock().unwrap().pop_front().unwrap();
+            assert_eq!(command["kind"], "volume");
+            let sent = command["value"].as_f64().unwrap();
+            assert!((sent / 100.0 - gain).abs() < 1e-12);
+            assert_eq!(handle.state().volume, sent);
+        }
+        for volume in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            handle.set_volume(volume);
+            assert!(handle.0.commands.lock().unwrap().is_empty());
+            assert_eq!(handle.state().volume, 100.0);
+        }
     }
 
     #[test]
