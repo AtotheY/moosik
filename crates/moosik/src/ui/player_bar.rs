@@ -409,20 +409,108 @@ const TRANSPORT_ICON_BOX: f32 = 16.0 + 14.0;
 /// than leaving it 6 pt high, as the old −12/+16 did.
 const TRANSPORT_DY: f32 = -6.0;
 const SEEK_DY: f32 = 22.0;
-/// The right-hand control cluster, pinned to the window's edge: the 14pt inset, the volume
-/// slider, Queue, Lyrics and the video toggle, with their separations. The seek bar's duration
-/// label must clear this, or a narrow window paints the video toggle over the number.
-const CONTROL_CLUSTER_W: f32 = 14.0 + 76.0 + 8.0 + 30.0 + 8.0 + 30.0 + 8.0 + 30.0;
-
-/// The least room the full layout must leave the title and credits, or the bar goes compact:
-/// past this the window-centred transport, the seek bar with its labels and the right-hand
-/// cluster crowd out the song — a window snapped to half of a portrait screen painted Queue
-/// over Repeat and the thumbs over the title. The compact bar keeps previous/play/next beside
-/// the volume, runs the seek bar edge to edge along its top without labels, and leaves shuffle
-/// and repeat to their shortcuts (Ctrl+S, Ctrl+R) and the fullscreen player.
+/// A pair of 36pt targets, grouped like YouTube Music's player rating control.
+const RATING_PILL_W: f32 = 72.0;
+const RATING_PILL_H: f32 = 32.0;
+const CONTROL_GAP: f32 = 8.0;
+/// Right inset, slider, gap and mute button.
+const COMPACT_CLUSTER_W: f32 = 14.0 + 76.0 + CONTROL_GAP + 30.0;
+/// The full cluster also has Queue and Lyrics. A video adds one more button.
+const CONTROL_CLUSTER_W: f32 = COMPACT_CLUSTER_W + 2.0 * (30.0 + CONTROL_GAP);
+/// Below this much room for the title and credits, use the compact transport and top seek line.
 const FULL_FIELD_MIN: f32 = 80.0;
-/// The compact bar's right-hand cluster: the inset and the volume slider with its mute icon.
-const COMPACT_CLUSTER_W: f32 = 14.0 + 76.0 + 8.0 + 30.0;
+
+fn control_cluster_w(ratings: bool, panels: bool, video: bool, volume_track: bool) -> f32 {
+    let volume = if volume_track {
+        COMPACT_CLUSTER_W
+    } else {
+        14.0 + 30.0
+    };
+    volume
+        + if panels {
+            CONTROL_CLUSTER_W - COMPACT_CLUSTER_W
+        } else {
+            0.0
+        }
+        + if video { 30.0 + CONTROL_GAP } else { 0.0 }
+        + if ratings {
+            RATING_PILL_W + CONTROL_GAP
+        } else {
+            0.0
+        }
+}
+
+/// Keep the ratings and transport reachable at the minimum window width. The volume slider
+/// yields to its mute button only when keeping it would squeeze out the song's credits.
+fn compact_volume_track(width: f32, save_w: f32, row_w: f32, ratings: bool) -> bool {
+    let title_x = 14.0 + BAR_ART_PT + 12.0;
+    width
+        - control_cluster_w(ratings, false, false, true)
+        - CONTROL_GAP
+        - row_w
+        - save_w
+        - CONTROL_GAP
+        - title_x
+        >= FULL_FIELD_MIN
+}
+
+fn rating_pill(ui: &mut egui::Ui, palette: &theme::Palette, track: &Track) -> Option<RowAction> {
+    let (rect, _) = ui.allocate_exact_size(vec2(RATING_PILL_W, RATING_PILL_H), Sense::hover());
+    let radius = egui::CornerRadius::same(16);
+    ui.painter()
+        .rect_filled(rect, radius, palette.glass(palette.surface));
+    ui.painter().rect_stroke(
+        rect,
+        radius,
+        egui::Stroke::new(1.0, palette.outline.gamma_multiply(0.55)),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().vline(
+        rect.center().x,
+        rect.top() + 8.0..=rect.bottom() - 8.0,
+        egui::Stroke::new(1.0, palette.outline),
+    );
+    let mut action = None;
+    for (index, (up, status)) in [(true, LikeStatus::Like), (false, LikeStatus::Dislike)]
+        .into_iter()
+        .enumerate()
+    {
+        let hit = Rect::from_min_size(
+            rect.min + vec2(index as f32 * RATING_PILL_W / 2.0, 0.0),
+            vec2(RATING_PILL_W / 2.0, RATING_PILL_H),
+        );
+        let selected = track.like == status;
+        let label = crate::ui::tips::rate(up, selected);
+        let response = widgets::rate_button(
+            ui,
+            palette,
+            hit,
+            ui.id().with(("np-rating", &track.video_id, up)),
+            up,
+            selected,
+            true,
+        )
+        .on_hover_text(label);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+        });
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                hit.shrink(2.0),
+                egui::CornerRadius::same(14),
+                egui::Stroke::new(1.0, palette.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if response.clicked() {
+            action = Some(RowAction::Rate {
+                video_id: track.video_id.clone(),
+                status: track.like.toggled(status),
+            });
+        }
+    }
+    action
+}
 
 /// The seek bar's width: grows with the window from the transport's own width up to 420pt,
 /// and never so wide that the duration label hanging right of it reaches the control cluster.
@@ -442,9 +530,9 @@ fn seek_width(width: f32, cluster_left: f32, total_w: f32, center_x: f32) -> f32
 /// How wide the title and credits field is in the full layout of a bar `width` wide: from the
 /// cover to the transport, or to the elapsed label hanging left of the seek bar, whichever is
 /// nearer, less the thumbs. The same clearances `player_bar` lays the full bar out with.
-fn full_field_w(width: f32, thumbs_w: f32, total_w: f32) -> f32 {
+fn full_field_w(width: f32, thumbs_w: f32, total_w: f32, cluster_w: f32) -> f32 {
     let center = width / 2.0;
-    let bar_w = seek_width(width, width - CONTROL_CLUSTER_W, total_w, center);
+    let bar_w = seek_width(width, width - cluster_w, total_w, center);
     let title_x = 14.0 + BAR_ART_PT + 12.0;
     (center - TRANSPORT_W / 2.0 - 8.0).min(center - bar_w / 2.0 - 10.0 - total_w - 22.0)
         - thumbs_w
@@ -546,15 +634,22 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         &widgets::fmt_duration(state.duration as u64),
         &theme::regular(11.0),
     );
-    let compact = full_field_w(rect.width(), thumbs_w, total_w) < FULL_FIELD_MIN;
+    let ratings = provider == Some(Provider::YouTubeMusic) && app.signed_in();
+    let screen_w = ui.ctx().content_rect().width();
+    let panels = theme::right_panel_fits(screen_w);
+    let video = app.now.track.as_ref().is_some_and(|track| track.wide);
+    let full_cluster_w = control_cluster_w(ratings, panels, video, true);
+    let compact = full_field_w(rect.width(), thumbs_w, total_w, full_cluster_w) < FULL_FIELD_MIN
+        || rect.width() - full_cluster_w < rect.width() / 2.0 + TRANSPORT_W / 2.0 + CONTROL_GAP;
     // The transport row's own width — 30 pt icon buttons around the 40 pt play button and the
     // gaps between: four icons in full, two compact (no shuffle or repeat).
     let icons = if compact { 2.0 } else { 4.0 };
     let row_w = icons * TRANSPORT_ICON_BOX + PLAY_DIAMETER + icons * ui.spacing().item_spacing.x;
+    let volume_track = !compact || compact_volume_track(rect.width(), thumbs_w, row_w, ratings);
     let cluster_w = if compact {
-        COMPACT_CLUSTER_W
+        control_cluster_w(ratings, false, false, volume_track)
     } else {
-        CONTROL_CLUSTER_W
+        full_cluster_w
     };
     // Full, the transport is centred on the window; compact, it sits against the volume, which
     // leaves the title all the room to its left.
@@ -575,7 +670,7 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     } else {
         let bar_w = seek_width(
             rect.width(),
-            rect.right() - CONTROL_CLUSTER_W,
+            rect.right() - cluster_w,
             total_w,
             rect.center().x,
         );
@@ -927,30 +1022,41 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
             .max_rect(vol_rect)
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
     );
+    // Explicit gaps match the cluster measurements, including the volume widget's own gap.
+    vui.spacing_mut().item_spacing.x = CONTROL_GAP;
     // `vui` packs right-to-left, so whatever is added first ends up closest to the window's
     // edge: the volume slider goes first to sit rightmost, with Queue and Lyrics to its left.
     vui.add_space(14.0);
     // The user's volume, not `player.volume()`: the Audio normaliser folds the track's gain into
     // the live value.
     let volume = if app.muted { 0.0 } else { app.last_volume };
-    if let Some(v) = widgets::volume_slider(&mut vui, &p, volume, app.last_volume) {
-        app.set_user_volume(v);
+    if volume_track {
+        if let Some(v) = widgets::volume_slider(&mut vui, &p, volume, app.last_volume) {
+            app.set_user_volume(v);
+        }
+    } else {
+        let icon = if app.muted || volume <= 0.5 {
+            Icon::VolumeX
+        } else {
+            Icon::Volume2
+        };
+        if widgets::icon_button(&mut vui, &p, icon, 16.0, false)
+            .on_hover_text(crate::ui::tips::mute(app.muted || volume <= 0.5))
+            .clicked()
+        {
+            app.toggle_mute();
+        }
     }
     // Queue and Lyrics only where their panel can be shown: a narrower window hides the panel
     // (`theme::right_panel_fits`), and a button that toggled nothing visible would read as
     // broken. The fullscreen player carries both at any width.
-    let screen_w = ui
-        .ctx()
-        .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.width()));
-    if !compact && theme::right_panel_fits(screen_w) {
-        vui.add_space(8.0);
+    if !compact && panels {
         if widgets::icon_button(&mut vui, &p, Icon::ListMusic, 16.0, app.upnext_open)
             .on_hover_text(crate::ui::tips::QUEUE)
             .clicked()
         {
             app.upnext_open = !app.upnext_open;
         }
-        vui.add_space(8.0);
         if widgets::icon_button(&mut vui, &p, Icon::MicVocal, 16.0, app.lyrics_open)
             .on_hover_text(crate::ui::tips::LYRICS)
             .clicked()
@@ -959,14 +1065,20 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     // The video view, further left still, and only when the track actually has one.
-    if !compact && app.now.track.as_ref().is_some_and(|t| t.wide) {
-        vui.add_space(8.0);
+    if !compact && video {
         if widgets::icon_button(&mut vui, &p, Icon::Video, 16.0, app.video_open)
             .on_hover_text(crate::ui::tips::video(app.video_open))
             .clicked()
         {
             app.toggle_video();
         }
+    }
+
+    if ratings
+        && let Some(track) = app.now.track.as_ref()
+        && let Some(action) = rating_pill(&mut vui, &p, track)
+    {
+        app.row_action(action);
     }
 
     // The now-playing song's menu, last: painting is done, and the choices route through the
@@ -1060,17 +1172,113 @@ mod tests {
         let bar = |window: f32| window - 2.0 * (theme::GUTTER + 6.0);
         for window in [540.0, 760.0] {
             assert!(
-                full_field_w(bar(window), 72.0, 30.0) < FULL_FIELD_MIN,
+                full_field_w(bar(window), 72.0, 30.0, CONTROL_CLUSTER_W) < FULL_FIELD_MIN,
                 "{window}"
             );
         }
         for window in [900.0, 1100.0, 1920.0] {
             assert!(
-                full_field_w(bar(window), 72.0, 30.0) >= FULL_FIELD_MIN,
+                full_field_w(bar(window), 72.0, 30.0, CONTROL_CLUSTER_W) >= FULL_FIELD_MIN,
                 "{window}"
             );
         }
         // Signed out, no thumbs: the title keeps their room and the bar stays full for longer.
-        assert!(full_field_w(bar(760.0), 0.0, 30.0) >= FULL_FIELD_MIN);
+        assert!(full_field_w(bar(760.0), 0.0, 30.0, CONTROL_CLUSTER_W) >= FULL_FIELD_MIN);
+    }
+
+    #[test]
+    fn rating_pill_toggles_and_switches_both_ratings_for_the_playing_song() {
+        let ctx = egui::Context::default();
+        let palette = theme::Palette::dark();
+        let mut track = crate::listening::Metadata {
+            id: "playing-video".to_owned(),
+            ..Default::default()
+        }
+        .to_track();
+        let mut time = 0.0;
+        for initial in [
+            LikeStatus::Indifferent,
+            LikeStatus::Like,
+            LikeStatus::Dislike,
+        ] {
+            track.like = initial;
+            for (index, pressed) in [LikeStatus::Like, LikeStatus::Dislike]
+                .into_iter()
+                .enumerate()
+            {
+                let mut action = None;
+                let pill_rect = std::cell::Cell::new(Rect::NOTHING);
+                let mut frame = |events| {
+                    time += 0.05;
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                vec2(400.0, 120.0),
+                            )),
+                            time: Some(time),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            pill_rect.set(Rect::from_min_size(
+                                ui.next_widget_position(),
+                                vec2(RATING_PILL_W, RATING_PILL_H),
+                            ));
+                            if let Some(choice) = rating_pill(ui, &palette, &track) {
+                                action = Some(choice);
+                            }
+                        },
+                    );
+                    output.textures_delta.clear();
+                };
+                frame(Vec::new());
+                let pos = pill_rect.get().left_center()
+                    + vec2((index as f32 + 0.5) * RATING_PILL_W / 2.0, 0.0);
+                frame(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                frame(vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]);
+                assert!(
+                    matches!(action,
+                        Some(RowAction::Rate { ref video_id, status })
+                            if video_id == "playing-video" && status == initial.toggled(pressed)
+                    ),
+                    "initial={initial:?}, pressed={pressed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ratings_leave_room_for_transport_and_song_at_the_minimum_window_width() {
+        let width = theme::WINDOW_MIN_W - 2.0 * (theme::GUTTER + 6.0);
+        let row_w = 2.0 * TRANSPORT_ICON_BOX + PLAY_DIAMETER + 2.0 * CONTROL_GAP;
+        let save_w = 36.0;
+        assert!(!compact_volume_track(width, save_w, row_w, true));
+        assert!(compact_volume_track(760.0, save_w, row_w, true));
+        let cluster_w = control_cluster_w(true, false, false, false);
+        let transport_start = width - cluster_w - CONTROL_GAP - row_w;
+        let title_x = 14.0 + BAR_ART_PT + 12.0;
+        assert!(transport_start - save_w - CONTROL_GAP - title_x >= FULL_FIELD_MIN);
+
+        // Even with a video and both panels, seek labels clear the pill at every full width.
+        for window in [900.0, 1100.0, 1512.0, 1920.0] {
+            let width = window - 2.0 * (theme::GUTTER + 6.0);
+            let cluster_left = width - control_cluster_w(true, true, true, true);
+            let bar_w = seek_width(width, cluster_left, 45.0, width / 2.0);
+            assert!(width / 2.0 + bar_w / 2.0 + 10.0 + 45.0 <= cluster_left - 6.0);
+        }
     }
 }
