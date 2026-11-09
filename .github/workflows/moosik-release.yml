@@ -162,50 +162,27 @@ jobs:
     uses: ./.github/workflows/moosik-linux.yml
   windows:
     uses: ./.github/workflows/moosik-windows.yml
-  publish:
+  publish-macos:
+    needs: [macos, macos-checks]
     if: github.ref_type == 'tag'
-    concurrency:
-      group: moosik-publish-latest
-      queue: max
-    needs: [macos-checks, macos, windows, linux]
-    runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/stamp-release
-      - uses: actions/download-artifact@v4
-        with:
-          name: moosik-macos
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: moosik-windows
-          path: windows
-      - uses: actions/download-artifact@v4
-        with:
-          name: moosik-linux
-          path: linux
-      - name: Publish a complete release
-        run: |
-          version="${GITHUB_REF_NAME#moosik-v}"
-          mv "linux/moosik-$version-linux-amd64.deb" dist/
-          mv "windows/moosik-$version-windows-x86_64-setup.exe" "windows/moosik-$version-windows-x86_64.zip" dist/
-          cat windows/moosik-windows-SHA256SUMS.txt linux/moosik-linux-SHA256SUMS.txt >> "dist/moosik-$version-SHA256SUMS.txt"
-          (cd dist && sha256sum --check "moosik-$version-SHA256SUMS.txt")
-          # A retry may find a draft left by an interrupted upload.
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Moosik $version" --notes-file "release-notes/$version.md"
-          fi
-          if [[ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" == true ]]; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-            latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
-            newest=$(printf '%s\n' "$latest" "$GITHUB_REF_NAME" | sort -V | tail -1)
-            promote=false
-            if [[ "$newest" == "$GITHUB_REF_NAME" ]]; then promote=true; fi
-            gh release edit "$GITHUB_REF_NAME" --draft=false --latest="$promote"
-          fi
+    uses: ./.github/workflows/moosik-publish-platform.yml
+    with:
+      platform: macos
+  publish-windows:
+    needs: windows
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/moosik-publish-platform.yml
+    with:
+      platform: windows
+  publish-linux:
+    needs: linux
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/moosik-publish-platform.yml
+    with:
+      platform: linux

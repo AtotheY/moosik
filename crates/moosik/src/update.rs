@@ -1,6 +1,6 @@
 //! Updates: whether a newer release is out, and — for the packages that can — installing it.
 //!
-//! The check is one request to GitHub's "latest release" endpoint, compared with this build's own
+//! The check finds a published package for this platform and compares it with this build's own
 //! version. What an update can do next depends on how this copy was installed:
 //!
 //! - The Windows setup and MSI download the matching installer, check it against the release's
@@ -27,7 +27,7 @@ pub mod diagnostic;
 pub(crate) mod macos;
 
 pub(crate) const LATEST_PAGE: &str = "https://github.com/AtotheY/moosik/releases/latest";
-const LATEST: &str = "https://api.github.com/repos/AtotheY/moosik/releases/latest";
+const CATALOG: &str = "https://api.github.com/repos/AtotheY/moosik/releases?per_page=30";
 /// Where the project's releases live. A download or page URL outside it is never followed, even
 /// if the API's answer names one.
 pub(crate) const RELEASES: &str = "https://github.com/AtotheY/moosik/releases/";
@@ -49,6 +49,14 @@ pub enum Install {
 impl Install {
     pub fn current() -> Self {
         detect()
+    }
+
+    fn platform(self) -> &'static str {
+        match self {
+            Install::WindowsSetup | Install::WindowsMsi => "windows",
+            Install::AppImage => "linux",
+            Install::Manual => std::env::consts::OS,
+        }
     }
 
     /// The release file this install updates from. `None` for a manual install, and for a CPU a
@@ -183,6 +191,10 @@ impl Release {
 
 #[derive(Deserialize)]
 struct GhRelease {
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
     tag_name: String,
     html_url: String,
     #[serde(default)]
@@ -206,7 +218,7 @@ pub enum Check {
 
 /// A missing first release is different from a published release that is already installed.
 pub async fn check(http: &reqwest::Client) -> Result<Check> {
-    check_release(http, LATEST, &current_version(), Install::current()).await
+    check_release(http, CATALOG, &current_version(), Install::current()).await
 }
 
 async fn check_release(
@@ -215,32 +227,78 @@ async fn check_release(
     current: &str,
     install: Install,
 ) -> Result<Check> {
-    let response = http
-        .get(url)
-        .header(reqwest::header::CACHE_CONTROL, "no-cache")
-        .header(reqwest::header::USER_AGENT, USER_AGENT)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await
-        .context("could not reach GitHub")?;
-    // A source-preview repository may not have published its first release yet.
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(Check::NotPublished);
+    let mut page = 1;
+    loop {
+        let response = http
+            .get(url)
+            .query(&[("page", page)])
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .context("could not reach GitHub")?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Check::NotPublished);
+        }
+        let response = response
+            .error_for_status()
+            .context("GitHub release lookup failed")?;
+        let has_next = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|links| links.contains("rel=\"next\""));
+        let releases: Vec<GhRelease> = serde_json::from_slice(&response.bytes().await?)
+            .context("could not read GitHub's answer")?;
+        // Releases are returned newest first. Within the page use version order
+        // so retrying an older tag cannot displace a newer verified package.
+        if let Some(release) = releases
+            .into_iter()
+            .filter(|r| r.published_for(install))
+            .max_by_key(|r| r.tag_name.strip_prefix("moosik-v").and_then(parse_version))
+        {
+            return Ok(pick(release, current, install).map_or(Check::Current, Check::Available));
+        }
+        if !has_next {
+            return Ok(Check::NotPublished);
+        }
+        page += 1;
     }
-    if !response.status().is_success() {
-        bail!("GitHub answered {}", response.status());
+}
+
+impl GhRelease {
+    fn published_for(&self, install: Install) -> bool {
+        let Some(version) = self.tag_name.strip_prefix("moosik-v") else {
+            return false;
+        };
+        if self.draft || self.prerelease || parse_version(version).is_none() {
+            return false;
+        }
+        let platform = install.platform();
+        let has = |name: &str| {
+            self.assets
+                .iter()
+                .any(|a| a.name == name && a.browser_download_url.starts_with(RELEASES))
+        };
+        let marker = |os: &str| format!("moosik-{version}-{os}-SHA256SUMS.txt");
+        if ["windows", "macos", "linux"]
+            .iter()
+            .any(|os| has(&marker(os)))
+        {
+            return has(&marker(platform));
+        }
+        // Releases published before per-platform manifests used one shared manifest.
+        has(&format!("moosik-{version}-SHA256SUMS.txt"))
+            && (install.asset_name(version).is_some_and(|name| has(&name))
+                || match platform {
+                    "windows" => has(&format!("moosik-{version}-windows-x86_64.zip")),
+                    "linux" => has(&format!("moosik-{version}-linux-amd64.deb")),
+                    "macos" => has(&format!("moosik-{version}-macos-arm64.dmg")),
+                    _ => false,
+                })
     }
-    let bytes = response
-        .bytes()
-        .await
-        .context("could not read GitHub's answer")?;
-    let release: GhRelease =
-        serde_json::from_slice(&bytes).context("could not read GitHub's answer")?;
-    Ok(match pick(release, current, install) {
-        Some(release) => Check::Available(release),
-        None => Check::Current,
-    })
 }
 
 /// The native bundle publishes one stable release in its appcast. Read its version only;
@@ -361,7 +419,11 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
     };
     let download = install.asset_name(&version).and_then(|name| {
         let asset = find(&name)?;
-        let sums = find(&format!("moosik-{version}-SHA256SUMS.txt"))?;
+        let sums = find(&format!(
+            "moosik-{version}-{}-SHA256SUMS.txt",
+            install.platform()
+        ))
+        .or_else(|| find(&format!("moosik-{version}-SHA256SUMS.txt")))?;
         Some(Download {
             url: asset.browser_download_url.clone(),
             size: asset.size,
@@ -720,26 +782,33 @@ mod tests {
         let url = format!("http://{}/latest", listener.local_addr().unwrap());
         let installer = Install::WindowsMsi;
         let server = tokio::spawn(async move {
-            for version in ["0.1.1", "0.1.2"] {
+            // The first lookup reaches the Windows build on page two. Once a
+            // newer Windows build finishes it is available on page one.
+            for (page, version, linux_only) in
+                [(1, "0.1.2", true), (2, "0.1.1", false), (1, "0.1.2", false)]
+            {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 4096];
                 let read = socket.read(&mut buf).await.unwrap();
-                assert!(
-                    String::from_utf8_lossy(&buf[..read])
-                        .to_ascii_lowercase()
-                        .contains("cache-control: no-cache")
-                );
-                let names = [
-                    installer.asset_name(version).unwrap(),
-                    format!("moosik-{version}-SHA256SUMS.txt"),
-                ];
+                let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+                assert!(request.starts_with(&format!("get /latest?page={page} ")));
+                assert!(request.contains("cache-control: no-cache"));
+                let (package, next_page) = if linux_only {
+                    (
+                        format!("moosik-{version}-linux-amd64.deb"),
+                        "Link: </latest?page=2>; rel=\"next\"\r\n",
+                    )
+                } else {
+                    (installer.asset_name(version).unwrap(), "")
+                };
+                let names = [package, format!("moosik-{version}-SHA256SUMS.txt")];
                 let base = format!("{RELEASES}download/moosik-v{version}");
-                let body = serde_json::json!({
+                let body = serde_json::json!([{
                     "tag_name": format!("moosik-v{version}"),
                     "html_url": format!("{RELEASES}tag/moosik-v{version}"),
                     "assets": names.map(|name| serde_json::json!({"name":name, "browser_download_url":format!("{base}/{name}")})),
-                }).to_string();
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }]).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{next_page}Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
         let http = reqwest::Client::new();
@@ -773,6 +842,8 @@ mod tests {
 
     fn release(tag: &str, assets: &[&str]) -> GhRelease {
         GhRelease {
+            draft: false,
+            prerelease: false,
             tag_name: tag.to_owned(),
             html_url: format!("https://github.com/AtotheY/moosik/releases/tag/{tag}"),
             assets: assets
@@ -784,6 +855,29 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn windows_waits_for_its_verified_package_on_partial_releases() {
+        let linux = "moosik-0.1.60-linux-SHA256SUMS.txt";
+        let windows = "moosik-0.1.60-windows-SHA256SUMS.txt";
+        let setup = "moosik-0.1.60-windows-x86_64-setup.exe";
+        let sums = "moosik-0.1.60-SHA256SUMS.txt";
+        let partial = release("moosik-v0.1.60", &[linux, setup, sums]);
+        assert!(!partial.published_for(Install::WindowsSetup));
+        let mut ready = release("moosik-v0.1.60", &[linux, windows, setup, sums]);
+        assert!(ready.published_for(Install::WindowsSetup));
+        let verified = pick(
+            release("moosik-v0.1.60", &[windows, setup]),
+            "0.1.59",
+            Install::WindowsSetup,
+        )
+        .unwrap();
+        if cfg!(target_arch = "x86_64") {
+            assert!(verified.download.unwrap().sums_url.ends_with(windows));
+        }
+        ready.prerelease = true;
+        assert!(!ready.published_for(Install::WindowsSetup));
     }
 
     #[test]

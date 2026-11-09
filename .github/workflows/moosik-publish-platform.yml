@@ -1,0 +1,33 @@
+name: Publish a verified Moosik platform
+on:
+  workflow_call:
+    inputs:
+      platform:
+        type: string
+        required: true
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Only release edits share this lock. Builds and smoke tests stay independent.
+    concurrency:
+      group: moosik-publish-latest
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/stamp-release
+      - uses: actions/download-artifact@v4
+        with:
+          name: moosik-${{ inputs.platform }}
+          path: dist
+      - name: Publish verified files
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          python3 scripts/publish-platform.py "$GITHUB_REF_NAME" "$PLATFORM" dist

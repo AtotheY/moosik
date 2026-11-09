@@ -111,19 +111,24 @@ Write `release-notes/<version>.md` for curated notes. Otherwise the tag carries
 GitHub-generated release notes. To reproduce a tagged build, check out the tag
 and run `python3 scripts/public-version.py stamp <tag>` before building.
 
-Mac, Windows and Ubuntu packages build in parallel. A manual dispatch of
-**Moosik release** on a branch produces rehearsal artifacts. Dispatch it on a
-public tag to retry that version. Only verified, complete releases update the
-public feed.
+Mac, Windows and Ubuntu each publish their files to the same tagged release as
+soon as that platform passes its build and checks. The Windows checks exercise
+the installer and shortcut upgrade. Ubuntu installs the .deb and renders a
+window. macOS verifies the signed bundle and Sparkle archive. Each platform adds
+its own checksum manifest and updates the version-wide manifest. A failed job
+stays visible in Actions. Use **Re-run failed jobs** to add the missing platform
+to the same release. Previously published packages keep their original bytes.
 
-The release includes the initial-install DMG, the signed update ZIP, checksums, and
-`appcast.xml`. It stays a draft until all files are uploaded, then becomes Latest.
-The feed rejects mismatched versions/architectures or absent signatures. The current
-packaging job ships Apple silicon; its feed declares `arm64` and the minimum macOS
-version required by the actual bundled executables and playback libraries.
-Publication also requires Windows installer launch and shortcut migration from 0.1.20,
-and installation and rendering from the Linux .deb on clean Ubuntu. The versioned
-checksum manifest covers the Windows setup and ZIP and the Ubuntu package. To test actual Explorer clicks and artwork on an interactive runner, dispatch the Windows workflow with `interactive_pin` enabled.
+GitHub's Latest release follows the newest verified Mac version so installed
+Sparkle clients always have a signed feed. Windows and Linux clients built with
+platform-aware updates look through the releases for a verified package for
+their OS. Older Windows and Linux clients still follow GitHub Latest. All
+published packages also appear on their version's release page.
+
+Dispatch **Moosik release** on a branch for rehearsal artifacts or on a public
+tag to rebuild that version. The macOS feed declares Apple silicon and the
+minimum macOS version required by the bundle. For interactive Explorer and
+artwork checks, dispatch the Windows workflow with `interactive_pin` enabled.
 
 The alternative packaging workflow runs on manual dispatch.
 
