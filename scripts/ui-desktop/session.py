@@ -17,6 +17,7 @@ os.environ.update(
     XDG_CACHE_HOME=str(profile / ".cache"),
     XDG_STATE_HOME=str(profile / ".local/state"),
     LIBGL_ALWAYS_SOFTWARE="1",
+    MOOSIK_DISABLE_ACTIVE_COUNT="1",
     WINIT_UNIX_BACKEND="x11",
     GDK_BACKEND="x11",
     PULSE_SERVER=f"unix:{session}/pulse",

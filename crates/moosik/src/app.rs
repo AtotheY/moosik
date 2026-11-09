@@ -1880,6 +1880,7 @@ pub struct App {
     profile_ids: std::collections::HashSet<String>,
     /// Live counters behind `--stats`; free when off.
     pub(crate) stats: Stats,
+    active_counter: Option<crate::usage_active::ActiveCounter>,
     usage: Option<crate::usage::Reporter>,
     pub(crate) listening: crate::listening::Ledger,
     pub(crate) listening_view: crate::ui::listening::View,
@@ -2422,6 +2423,7 @@ impl App {
             toast: None,
             autoplay,
             images: Images::new(),
+            active_counter: None,
             usage: settings
                 .share_listening_minutes
                 .then(crate::usage::Reporter::open)
@@ -2521,6 +2523,16 @@ impl App {
             } else {
                 Instant::now()
             });
+        }
+        if !startup_timing
+            && app.screenshot.is_none()
+            && app.stats_after.is_none()
+            && tray_test.is_none()
+        {
+            app.active_counter = crate::usage_active::ActiveCounter::new();
+            if let Some(counter) = &mut app.active_counter {
+                counter.poll(app.backend.runtime(), !autostart);
+            }
         }
         if let Some(mode) = tray_test {
             app.spawn_tray_test(mode);
@@ -3024,6 +3036,9 @@ impl App {
     /// forward — all three want the same thing, and on Wayland all three hit the same protocol
     /// gap (`request_foreground`).
     fn show_window(&mut self, ctx: &egui::Context) {
+        if let Some(counter) = &mut self.active_counter {
+            counter.poll(self.backend.runtime(), true);
+        }
         self.hidden = false;
         set_window_hidden(ctx, false);
         // A visible taskbar-minimized window also needs an explicit restore.
@@ -3507,6 +3522,21 @@ impl App {
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
+        if let Some(counter) = &mut self.active_counter {
+            let playing =
+                self.playback_started && !state.paused && !state.idle && self.listening.due();
+            let interacted = ctx.input(|i| {
+                i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::PointerButton { pressed: true, .. }
+                            | egui::Event::Key { pressed: true, .. }
+                            | egui::Event::MouseWheel { .. }
+                    )
+                })
+            });
+            counter.poll(self.backend.runtime(), playing || interacted);
+        }
         if let Some(usage) = &mut self.usage {
             usage.poll(self.backend.runtime());
         }

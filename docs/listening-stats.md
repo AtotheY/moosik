@@ -174,6 +174,8 @@ cargo clippy --locked -p moosik --lib --tests -- -D warnings
 cargo build --locked --release -p moosik --bin moosik
 ```
 
-## Optional anonymous usage counts
+## Anonymous usage counts
 
-**Settings → About → Privacy → Share anonymous usage** is off by default. Turning it on shares only daily listening minutes from then on, with a random ID that changes each UTC day. Songs, artists, playlists, account details and listening history stay out of these reports. Turn it off at any time to stop sharing. See [how Moosik counts daily listeners](../usage-counter/README.md) for retention and limitations.
+Moosik counts a profile once per UTC day when you open the app yourself, interact with it, or play music. It sends the day and a random token that changes daily. A background login launch or a window sitting idle overnight needs interaction or playback to count.
+
+**Settings → About → Privacy → Share listening time** is off by default. Turning it on also shares whole minutes of playback from then on, using a separate daily token. See [the usage counter](../usage-counter/README.md) for reporting and retention details.

@@ -211,8 +211,8 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &p,
             "share-listening-minutes",
-            "Share anonymous usage",
-            "Count this device’s daily listening minutes. No songs or account details.",
+            "Share listening time",
+            "Moosik counts active devices daily. Turn this on to also share listening minutes.",
             &mut share,
         );
     });
