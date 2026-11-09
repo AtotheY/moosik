@@ -1,5 +1,13 @@
 # Moosik UI work
 
+## Default testing workflow
+
+For routine UI work on a Mac, build and drive the full app on the private Linux desktop. From the worktree containing the change, run `./scripts/ui-session start --page library`, or choose another starting page such as `home`, `search` or `settings`. The session includes uncommitted edits. If the runner lives in a different checkout, invoke it there with `--checkout /path/to/feature-worktree`.
+
+Use the returned session ID to navigate through the changed flow and verify the outcome. Inspect screenshots at normal and narrow widths with relevant empty, sparse and populated data. For playback changes, check the reported track and transport state with `media`. Stop the session and power off the idle VM when finished. See the [offscreen testing guide](docs/offscreen-testing.md).
+
+Use focused Rust tests for logic and `./scripts/ui-check queue` for queue widget regressions. For Apple-specific behavior such as Keychain or media keys, use a dedicated macOS session. Ask before using the listener’s active desktop if it’s the only way to verify the change.
+
 ## Local macOS builds
 
 Use `scripts/ark-package.sh` to package local builds and
@@ -22,9 +30,5 @@ unsigned diagnostics against the saved login.
 Before building UI, inspect visual references for Home, Library, and a detail page. Use offscreen captures from the current checkout where available and existing app screenshots for broader design context. Read `crates/moosik/src/theme.rs`, shared `widgets.rs`, and nearby `ui` implementations. Consult relevant visual references first.
 
 Use the existing Inter weights, semantic palette, page/section type sizes, 20pt page inset, 56pt rows, 40pt row artwork, pill filters, Lucide icons, themed menus, and artwork shapes. Prefer shared widgets over stock egui controls. Keep detail in drilldowns, tooltips, or dialogs; do not crowd the primary view with explanatory copy.
-
-Run routine checks in the background. For app changes, use `scripts/ui-session start --checkout <working-tree> --page <page>` to build and drive the full application inside its private desktop. Inspect Home, Library and a detail page there for design context. Exercise the changed flow, then inspect screenshots at normal and narrow widths with relevant empty, sparse and populated data. See [offscreen testing](docs/offscreen-testing.md) for fixtures, keyboard and pointer input, OCR and playback state. Stop sessions and power off the idle VM when done.
-
-Use focused Rust tests for logic and `./scripts/ui-check queue` for the fast queue widget check. Keep accounts and playback isolated when testing. Use a dedicated Mac session for Apple-specific behavior and coordinate with the user when a check actually requires their active desktop.
 
 Check truncation, alignment, spacing, focus/hover states, and reachability of actions. Do not declare completion based only on tests/build success.
