@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run a scenario against the widgets compiled from this checkout.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$root"
+
+usage() { echo "Usage: scripts/ui-check queue | --list | --help"; }
+case "${1:-}" in
+    --list) echo queue; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    queue) test_name=ui::upnext::ui_check::queue ;;
+    *) usage >&2; exit 2 ;;
+esac
+if [[ $# != 1 ]]; then usage >&2; exit 2; fi
+
+cargo_cmd=(cargo)
+if [[ "$(uname -s)" == Darwin && -x ../toolchain/cargo/bin/cargo && -f ../Moosik.app/Contents/Frameworks/libmpv.2.dylib ]]; then
+    cargo_cmd=(./scripts/ark-cargo.sh)
+fi
+mkdir -p target/ui-check
+MOOSIK_UI_CHECK_DIR="$(mktemp -d "$root/target/ui-check/$1.XXXXXX")"
+export MOOSIK_UI_CHECK_DIR
+echo "Screenshots: $MOOSIK_UI_CHECK_DIR"
+"${cargo_cmd[@]}" test --locked -p moosik --features ui-check --lib "$test_name" -- --exact --ignored --nocapture
+# Cargo treats a filter that matches zero tests as success.
+for size in normal narrow; do
+    for state in empty sparse populated; do
+        test -s "$MOOSIK_UI_CHECK_DIR/$size-$state.png" || { echo "Missing $size-$state.png" >&2; exit 1; }
+    done
+done

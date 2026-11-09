@@ -121,13 +121,24 @@ pub(crate) fn art_px(ctx: &egui::Context, points: f32) -> u32 {
     px.next_multiple_of(32).clamp(32, 512)
 }
 
+/// The only backend service needed to paint an artwork-bearing list.
+pub(crate) trait FetchArtwork {
+    fn fetch_image(&self, key: Arc<str>, url: String, px: u32, wide: bool);
+}
+
+impl FetchArtwork for Backend {
+    fn fetch_image(&self, key: Arc<str>, url: String, px: u32, wide: bool) {
+        Backend::fetch_image(self, key, url, px, wide);
+    }
+}
+
 /// Look up — and trigger the fetch of — a cover texture for something drawn `points` across.
 ///
 /// A free function rather than an `App` method so callers can hold a borrow on another `App`
 /// field (e.g. the row being drawn) while it runs.
 pub(crate) fn art_texture<'a>(
     images: &'a mut Images,
-    backend: &Backend,
+    backend: &dyn FetchArtwork,
     ctx: &egui::Context,
     url: Option<&Arc<str>>,
     points: f32,
@@ -146,7 +157,7 @@ pub(crate) fn art_texture<'a>(
 /// wide still and a square cover of the same URL never share an entry.
 pub(crate) fn art_texture_wide<'a>(
     images: &'a mut Images,
-    backend: &Backend,
+    backend: &dyn FetchArtwork,
     ctx: &egui::Context,
     url: Option<&Arc<str>>,
     points: f32,
@@ -546,7 +557,7 @@ pub(crate) fn spec_rows<'d>(
     ui: &mut egui::Ui,
     palette: &theme::Palette,
     images: &mut Images,
-    backend: &Backend,
+    backend: &dyn FetchArtwork,
     stats: &mut crate::stats::Stats,
     liked: &crate::liked::Index,
     count: usize,
@@ -571,7 +582,7 @@ pub(crate) fn spec_rows_with_slot<'d>(
     ui: &mut egui::Ui,
     palette: &theme::Palette,
     images: &mut Images,
-    backend: &Backend,
+    backend: &dyn FetchArtwork,
     stats: &mut crate::stats::Stats,
     liked: &crate::liked::Index,
     count: usize,

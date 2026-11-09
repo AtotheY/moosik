@@ -582,56 +582,14 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
             stats,
             liked,
             upcoming.len(),
-            |i| {
-                let index = upcoming[i];
-                let t = &q.tracks()[index];
-                // No album names: this is what happens next, not where each song is
-                // from.
-                let subtitle = track_subtitle_no_album(t);
-                RowSpec {
-                    number: None,
-                    rank: t.rank.as_deref(),
-                    trend: t.trend,
-                    title: &t.title,
-                    source: Some(t.source_name()),
-                    album_id: t.album_id.as_deref(),
-                    subtitle,
-                    duration: t.duration,
-                    // The subtitle's tail slot: the algorithm's tracks read "Radio" where
-                    // the listener's own keep their play count.
-                    // Manual moves can interleave chosen songs and recommendations.
-                    plays: if radio
-                        .as_ref()
-                        .is_some_and(|r| !r.chosen.contains(&t.video_id))
-                    {
-                        Some("Radio")
-                    } else {
-                        t.plays.as_deref()
-                    },
-                    explicit: t.explicit,
-                    active: is_active(now, &t.video_id),
-                    playing: is_active(now, &t.video_id) && !now.paused,
-                    badge: None,
-                    // Square: the queue shows the cover, not a cropped 16:9 still.
-                    shape: ArtShape::Square,
-                    hide_art: false,
-                    thumbnail: t.thumbnail.as_ref(),
-                    menu: Some(widgets::RowMenu {
-                        track: t,
-                        playlist_id: None,
-                        playlists: &library.playlists.items,
-                        signed_in,
-                        queue_index: Some(index),
-                    }),
-                    like: t.like,
-                    // The queue is a list of what happens next, not a place to
-                    // rate things: a column of thumbs repeated down it is noise.
-                    // Rating a queued song is one click away on the player bar.
-                    show_rating: false,
-                    quiet_like: false,
-                    add_to: None,
-                }
-            },
+            upcoming_rows(
+                q,
+                upcoming,
+                now,
+                radio.as_ref().map(|r| &r.chosen),
+                &library.playlists.items,
+                signed_in,
+            ),
         )
     };
 
@@ -663,3 +621,63 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
         app.queue_scroll_reset = true;
     }
 }
+
+fn upcoming_rows<'a>(
+    queue: &'a crate::queue::PlayQueue,
+    upcoming: &'a [usize],
+    now: &'a crate::player::NowPlaying,
+    chosen: crate::queue::Chosen<'a>,
+    playlists: &'a [crate::model::PlaylistRef],
+    signed_in: bool,
+) -> impl Fn(usize) -> RowSpec<'a> {
+    move |row| {
+        let index = upcoming[row];
+        let t = &queue.tracks()[index];
+        // No album names: this is what happens next, not where each song is
+        // from.
+        let subtitle = track_subtitle_no_album(t);
+        RowSpec {
+            number: None,
+            rank: t.rank.as_deref(),
+            trend: t.trend,
+            title: &t.title,
+            source: Some(t.source_name()),
+            album_id: t.album_id.as_deref(),
+            subtitle,
+            duration: t.duration,
+            // The subtitle's tail slot: the algorithm's tracks read "Radio" where
+            // the listener's own keep their play count.
+            // Manual moves can interleave chosen songs and recommendations.
+            plays: if chosen.is_some_and(|ids| !ids.contains(&t.video_id)) {
+                Some("Radio")
+            } else {
+                t.plays.as_deref()
+            },
+            explicit: t.explicit,
+            active: is_active(now, &t.video_id),
+            playing: is_active(now, &t.video_id) && !now.paused,
+            badge: None,
+            // Square: the queue shows the cover, not a cropped 16:9 still.
+            shape: ArtShape::Square,
+            hide_art: false,
+            thumbnail: t.thumbnail.as_ref(),
+            menu: Some(widgets::RowMenu {
+                track: t,
+                playlist_id: None,
+                playlists,
+                signed_in,
+                queue_index: Some(index),
+            }),
+            like: t.like,
+            // The queue is a list of what happens next, not a place to
+            // rate things: a column of thumbs repeated down it is noise.
+            // Rating a queued song is one click away on the player bar.
+            show_rating: false,
+            quiet_like: false,
+            add_to: None,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "ui-check"))]
+mod ui_check;
