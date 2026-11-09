@@ -409,6 +409,14 @@ fn home_is_stale(loaded_at: Option<Instant>, now: Instant) -> bool {
     loaded_at.is_some_and(|at| now.saturating_duration_since(at) >= HOME_STALE)
 }
 
+fn home_waits_for_youtube(
+    preferred: crate::settings::HomeSource,
+    effective: crate::settings::HomeSource,
+) -> bool {
+    use crate::settings::HomeSource::{Local, Spotify};
+    !matches!((preferred, effective), (Local, Local) | (Spotify, Spotify))
+}
+
 /// How long a playing track's position may go unsaved. A crash loses at most this much of where
 /// you were; pausing, seeking, skipping and quitting all save at once.
 const POSITION_SAVE_EVERY: Duration = Duration::from_secs(30);
@@ -4471,13 +4479,13 @@ impl App {
         }
     }
 
+    pub(crate) fn waiting_for_home_auth(&self) -> bool {
+        matches!(self.auth, crate::auth::AuthState::Checking)
+            && home_waits_for_youtube(self.settings.home_source, self.effective_home_source())
+    }
+
     fn load_home(&mut self) {
-        if matches!(self.auth, crate::auth::AuthState::Checking)
-            && matches!(
-                self.effective_home_source(),
-                crate::settings::HomeSource::Combined | crate::settings::HomeSource::YouTubeMusic
-            )
-        {
+        if self.waiting_for_home_auth() {
             return;
         }
         let sources = self.home_sources();
@@ -10740,6 +10748,21 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn home_waits_for_youtube_when_other_sources_are_only_fallbacks() {
+        use crate::settings::HomeSource::{Combined, Local, Spotify, YouTubeMusic};
+
+        for available in [Combined, Local, Spotify, YouTubeMusic] {
+            assert!(home_waits_for_youtube(Combined, available));
+            assert!(home_waits_for_youtube(YouTubeMusic, available));
+            assert_eq!(
+                home_waits_for_youtube(Spotify, available),
+                available != Spotify
+            );
+            assert_eq!(home_waits_for_youtube(Local, available), available != Local);
+        }
+    }
+
     /// A window restored fullscreen is taken out of it and then resized — in that order, and the
     /// resize only once the window reports it is out. The fullscreen player's own fullscreen is
     /// never touched, nor is a window that was never fullscreen, and a fullscreen that arrives
