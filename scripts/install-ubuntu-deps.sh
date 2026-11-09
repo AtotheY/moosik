@@ -14,8 +14,10 @@ apt=("${prefix[@]}" apt-get -o "Dir::Etc::sourcelist=$sources" -o Dir::Etc::sour
 for mirror in azure.archive.ubuntu.com archive.ubuntu.com; do
   printf 'Types: deb\nURIs: %s://%s/ubuntu\nSuites: noble noble-updates noble-security\nComponents: main universe\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' "$scheme" "$mirror" > "$sources"
   if timeout 120 "${apt[@]}" update && timeout 300 "${apt[@]}" install -y --download-only --no-install-recommends "$@"; then
-    break
+    # --no-download also disables APT's local-file acquisition for the smoke .deb.
+    # Repository packages are cached by the download-only step above.
+    exec "${apt[@]}" install -y --no-install-recommends "$@"
   fi
   echo "::warning::Could not fetch Ubuntu dependencies from $mirror"
 done
-"${apt[@]}" install -y --no-download --no-install-recommends "$@"
+exit 1

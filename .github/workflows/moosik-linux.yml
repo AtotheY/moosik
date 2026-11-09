@@ -49,7 +49,7 @@ jobs:
         run: |
           sha256sum --check moosik-linux-SHA256SUMS.txt
           DEBIAN_FRONTEND=noninteractive ../scripts/install-ubuntu-deps.sh \
-            ./moosik-*-linux-amd64.deb dbus-daemon xvfb xauth libgl1-mesa-dri desktop-file-utils libglib2.0-bin
+            "$PWD"/moosik-*-linux-amd64.deb dbus-daemon xvfb xauth libgl1-mesa-dri desktop-file-utils libglib2.0-bin
           desktop-file-validate /usr/share/applications/moosik.desktop
           /usr/lib/moosik/yt-dlp --version
           useradd -m smoke
