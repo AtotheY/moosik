@@ -163,6 +163,15 @@ fn ticket(ui: &Ui, r: Rect, tier: usize, background: Color32) {
 
 fn pass_details(ui: &Ui, hit: egui::Response, p: &theme::Palette, pass: &ArtistPass) {
     let tier = pass.stamps.len();
+    if tier > 0 {
+        hit.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                hit.enabled(),
+                format!("Open {}’s artist pass and stamp history", pass.name),
+            )
+        });
+    }
     let mut tip = egui::Tooltip::for_enabled(&hit);
     tip.popup = tip.popup.frame(egui::Frame::NONE);
     tip.show(|ui| {
@@ -687,10 +696,13 @@ impl Shelf {
                     return;
                 }
                 super::virtual_rows(ui, theme::ROW_HEIGHT, keys.len(), |ui, i| {
-                    let pass = &c.passes[keys[i]];
+                    let key = keys[i];
+                    let pass = &c.passes[key];
                     let tier = pass.stamps.len();
-                    let (r, hit) = ui.allocate_exact_size(
-                        vec2(ui.available_width(), theme::ROW_HEIGHT),
+                    let (_, r) = ui.allocate_space(vec2(ui.available_width(), theme::ROW_HEIGHT));
+                    let hit = ui.interact(
+                        r,
+                        ui.make_persistent_id(("collection-artist-pass", key)),
                         if tier > 0 {
                             Sense::click()
                         } else {
