@@ -3,7 +3,7 @@
 //! re-arranged with it.
 
 use crate::app::{App, Route};
-use crate::home_feed::OrderRow;
+use crate::home_feed::{OrderRow, OrderSlot};
 use crate::icons::Icon;
 use crate::model::{Provider, default_order_keys};
 use crate::settings::HomeSource;
@@ -32,23 +32,36 @@ fn move_shelf(
     from: &OrderRow,
     to: &OrderRow,
 ) -> Option<Vec<String>> {
-    if from.source != to.source || from.key == to.key {
+    if from.source != to.source
+        || from.key == to.key
+        || from.slot != OrderSlot::Native
+        || to.slot != OrderSlot::Native
+    {
         return None;
     }
-    let mut visible: Vec<_> = rows
+    let group: Vec<_> = rows.iter().filter(|r| r.source == from.source).collect();
+    let mut visible: Vec<_> = group
         .iter()
-        .filter(|r| r.source == from.source)
+        .filter(|r| r.slot == OrderSlot::Native)
         .map(|r| r.key.clone())
         .collect();
     let start = visible.iter().position(|k| *k == from.key)?;
     let end = visible.iter().position(|k| *k == to.key)?;
     let key = visible.remove(start);
     visible.insert(end, key);
-    let mut sorted = visible.iter();
+    let mut moves = visible.into_iter();
+    let ranked: Vec<_> = group
+        .into_iter()
+        .map(|row| match row.slot {
+            OrderSlot::Native => moves.next().expect("one key per native row"),
+            _ => row.key.clone(),
+        })
+        .collect();
+    let mut sorted = ranked.iter();
     let mut result: Vec<_> = saved
         .iter()
         .map(|key| {
-            if visible.contains(key) {
+            if ranked.contains(key) {
                 sorted.next().unwrap_or(key).clone()
             } else {
                 key.clone()
@@ -291,12 +304,15 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
                             .color(p.text),
                     );
                     list.add_space(6.0);
+                    let has_shared = rows.iter().any(|r| r.slot == OrderSlot::Shared);
                     let note = if app.home_filter.is_some() {
                         "Clear the mood filter to reorder Home."
                     } else if app.home_loading && rows.is_empty() {
                         "Loading Home sections…"
                     } else if rows.is_empty() {
                         "No sections to reorder yet."
+                    } else if has_shared {
+                        "Choose a single source to reorder its shared sections."
                     } else if rows.len() == 1 {
                         "One section on Home."
                     } else {
@@ -312,12 +328,14 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
                         return;
                     }
                     for group in HomeSource::ALL {
-                        let group_rows: Vec<_> =
-                            rows.iter().filter(|r| r.source == group).collect();
+                        let group_rows: Vec<_> = rows
+                            .iter()
+                            .filter(|r| r.source == group && r.slot == OrderSlot::Native)
+                            .collect();
                         if group_rows.is_empty() {
                             continue;
                         }
-                        if rows.iter().any(|r| r.source != group) {
+                        if has_shared || rows.iter().any(|r| r.source != group) {
                             list.add_space(8.0);
                             list.label(
                                 egui::RichText::new(group.label())
@@ -385,6 +403,22 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
                                     );
                                 }
                             }
+                        }
+                    }
+                    if has_shared {
+                        list.add_space(8.0);
+                        list.label(
+                            egui::RichText::new("Shared sections")
+                                .font(theme::semibold(12.0))
+                                .color(p.secondary),
+                        );
+                        for row in rows.iter().filter(|r| r.slot == OrderSlot::Shared) {
+                            let (rect, response) = list.allocate_exact_size(
+                                egui::vec2(list.available_width(), ROW_HEIGHT),
+                                egui::Sense::hover(),
+                            );
+                            paint_label(list, &p, rect, &row.title);
+                            response.on_hover_text(&row.title);
                         }
                     }
                     // A long list: carry the scroll along while a row is dragged near an edge.
@@ -617,6 +651,7 @@ mod tests {
     #[test]
     fn moving_live_shelves_keeps_absent_preferences_and_ignores_stale_drops() {
         let row = |key: &str| OrderRow {
+            slot: OrderSlot::Native,
             source: HomeSource::YouTubeMusic,
             key: key.into(),
             title: key.into(),
@@ -626,6 +661,19 @@ mod tests {
             row("fresh finds, old favorites"),
             row("quick picks"),
         ];
+        for slot in [OrderSlot::Shared, OrderSlot::Hidden] {
+            let shared = OrderRow {
+                slot,
+                ..row("new releases")
+            };
+            let group = [rows[0].clone(), shared.clone(), rows[2].clone()];
+            assert_eq!(
+                move_shelf(&[], &group, &group[2], &group[0]).unwrap(),
+                ["quick picks", "new releases", "forgotten favorites"]
+            );
+            assert!(move_shelf(&[], &group, &shared, &group[2]).is_none());
+            assert!(move_shelf(&[], &group, &group[2], &shared).is_none());
+        }
         let saved = [
             "forgotten favorites".into(),
             "long listens".into(),

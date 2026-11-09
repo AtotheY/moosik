@@ -158,8 +158,19 @@ fn merged_groups(shelves: &[Shelf]) -> impl Iterator<Item = (String, Vec<(usize,
     })
 }
 
+/// Only native rows can be moved within a source. Home displays a shared shelf at its first
+/// member; retain the hidden members' source slots when saving unrelated moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OrderSlot {
+    #[default]
+    Native,
+    Shared,
+    Hidden,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OrderRow {
+    pub slot: OrderSlot,
     pub source: crate::settings::HomeSource,
     pub key: String,
     pub title: String,
@@ -169,8 +180,13 @@ pub(crate) fn order_rows(shelves: &[Shelf], combined: bool) -> Vec<OrderRow> {
     let mut merged = HashMap::new();
     if combined {
         for (title, members) in merged_groups(shelves) {
-            for (index, _) in members {
-                merged.insert(index, title.clone());
+            for (position, (index, _)) in members.into_iter().enumerate() {
+                let slot = if position == 0 {
+                    OrderSlot::Shared
+                } else {
+                    OrderSlot::Hidden
+                };
+                merged.insert(index, (slot, title.clone()));
             }
         }
     }
@@ -182,16 +198,18 @@ pub(crate) fn order_rows(shelves: &[Shelf], combined: bool) -> Vec<OrderRow> {
     {
         let source = source(shelf);
         let key = shelf.home_order_key();
+        let (slot, title) = merged
+            .remove(&i)
+            .unwrap_or_else(|| (OrderSlot::Native, shelf.home_order_title().into_owned()));
         if !rows
             .iter()
-            .any(|r: &OrderRow| r.source == source && r.key == key)
+            .any(|r: &OrderRow| r.source == source && r.key == key && r.slot == slot)
         {
             rows.push(OrderRow {
                 source,
                 key,
-                title: merged
-                    .remove(&i)
-                    .unwrap_or_else(|| shelf.home_order_title().into_owned()),
+                slot,
+                title,
             });
         }
     }
@@ -315,8 +333,20 @@ mod tests {
         ];
         let panel = order_rows(&native, true);
         assert_eq!(
-            panel.iter().filter(|r| r.title == "New releases").count(),
-            2
+            panel
+                .iter()
+                .map(|r| (r.title.as_str(), r.slot))
+                .collect::<Vec<_>>(),
+            [
+                ("New releases", OrderSlot::Shared),
+                ("Quick picks", OrderSlot::Native),
+                ("New releases", OrderSlot::Hidden)
+            ]
+        );
+        assert!(
+            order_rows(&native, false)
+                .iter()
+                .all(|r| r.slot == OrderSlot::Native)
         );
         let display = merge_categories(&native, Some(Provider::Spotify));
         let [
