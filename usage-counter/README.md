@@ -6,9 +6,9 @@ Open **Cloudflare → D1 → moosik-usage → Studio → daily_activity**, or ru
 SELECT * FROM daily_activity ORDER BY utc_date DESC LIMIT 30;
 ```
 
-The primary column, `active_devices`, counts profiles using that release once per UTC day. A manual launch, a click, key press, scroll or playback qualifies. An unattended login launch or idle window does not qualify on its own. Multiple devices or profiles can count a person more than once. Older releases and devices that cannot reach the collector may be missing. A null count indicates that only the older listening-time signal was available for that date.
+The primary column, `active_devices`, counts profiles using that release once per UTC day. Opening or reopening the app, a click, key press, scroll or playback qualifies. An unattended login launch or idle window does not qualify on its own. Multiple devices or profiles can count a person more than once. Older releases and devices that cannot reach the collector may be missing. A null count indicates that only the older listening-time signal was available for that date.
 
-The app submits the UTC day and a random daily token to `/v1/active`, independent of the listening switch. Its local receipt allows retries and restarts without counting again. The separate activity token carries no listening data. Set `MOOSIK_DISABLE_ACTIVE_COUNT=1` in the launch environment to disable these requests, including in automated fixtures.
+The app submits the UTC day and a random daily token to `/v1/active`, independent of the listening switch. Profiles keep receipts for today and yesterday in a small local SQLite database. Concurrent launches reuse the same token. Reconnecting can deliver a pending report from yesterday. The separate activity token carries no listening data. Set `MOOSIK_DISABLE_ACTIVE_COUNT=1` in the launch environment to disable these requests, including in automated fixtures.
 
 The remaining columns show opt-in listeners and listening hours. One device qualifies after a full minute of observed playback. Time is rounded down to whole minutes per device. The current and previous day can still receive reports; missing dates have no reports. Do not add daily listener counts to estimate unique people across days.
 

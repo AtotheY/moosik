@@ -3036,6 +3036,9 @@ impl App {
     /// forward — all three want the same thing, and on Wayland all three hit the same protocol
     /// gap (`request_foreground`).
     fn show_window(&mut self, ctx: &egui::Context) {
+        if let Some(counter) = &mut self.active_counter {
+            counter.poll(self.backend.runtime(), true);
+        }
         self.hidden = false;
         set_window_hidden(ctx, false);
         // A visible taskbar-minimized window also needs an explicit restore.
