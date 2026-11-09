@@ -445,7 +445,7 @@ impl Drop for PlaybackReporting {
 }
 
 struct Resources {
-    server: JoinHandle<()>,
+    heartbeat: JoinHandle<()>,
     renderer: RendererLease,
 }
 
@@ -479,9 +479,25 @@ impl RendererOwnership {
 }
 
 struct RendererPool {
-    child: Option<Child>,
+    child: Option<RendererProcess>,
     retirement: Option<JoinHandle<()>>,
     ownership: RendererOwnership,
+}
+
+struct RendererProcess {
+    child: Child,
+    server: RendererServer,
+}
+
+impl RendererProcess {
+    fn load(&mut self, broker: Arc<Broker>) -> io::Result<()> {
+        let prefix = broker.prefix.clone();
+        self.server.active.send_replace(Some(broker));
+        send_renderer(
+            &mut self.child,
+            crate::spotify_drm_child::RendererCommand::Load { prefix },
+        )
+    }
 }
 
 struct RendererLease {
@@ -491,7 +507,7 @@ struct RendererLease {
 }
 
 impl RendererLease {
-    fn acquire(url: &str, handle: &Handle) -> Result<Self> {
+    fn acquire(broker: Arc<Broker>, handle: &Handle) -> Result<Self> {
         let mut pool = RENDERER_POOL
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -502,21 +518,19 @@ impl RendererLease {
         if let Some(retirement) = pool.retirement.take() {
             retirement.abort();
         }
-        let reused = pool.child.as_mut().is_some_and(|child| {
-            child.try_wait().is_ok_and(|status| status.is_none())
-                && send_renderer(
-                    child,
-                    crate::spotify_drm_child::RendererCommand::Load {
-                        url: url.to_owned(),
-                    },
-                )
-                .is_ok()
+        let reused = pool.child.as_mut().is_some_and(|renderer| {
+            !renderer.server.task.is_finished()
+                && renderer
+                    .child
+                    .try_wait()
+                    .is_ok_and(|status| status.is_none())
+                && renderer.load(broker.clone()).is_ok()
         });
         if !reused {
             if let Some(child) = pool.child.take() {
                 retire_renderer(child);
             }
-            match spawn_renderer(url) {
+            match spawn_renderer(broker) {
                 Ok(child) => pool.child = Some(child),
                 Err(error) => {
                     pool.ownership.release(token);
@@ -536,10 +550,13 @@ impl RendererLease {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         pool.ownership.active != Some(self.token)
-            || pool
-                .child
-                .as_mut()
-                .is_none_or(|child| child.try_wait().map_or(true, |status| status.is_some()))
+            || pool.child.as_mut().is_none_or(|renderer| {
+                renderer.server.task.is_finished()
+                    || renderer
+                        .child
+                        .try_wait()
+                        .map_or(true, |status| status.is_some())
+            })
     }
 }
 
@@ -551,10 +568,16 @@ impl Drop for RendererLease {
         if !pool.ownership.release(self.token) {
             return;
         }
-        let Some(child) = pool.child.as_mut() else {
+        let Some(renderer) = pool.child.as_mut() else {
             return;
         };
-        if send_renderer(child, crate::spotify_drm_child::RendererCommand::Stop).is_err() {
+        renderer.server.active.send_replace(None);
+        if send_renderer(
+            &mut renderer.child,
+            crate::spotify_drm_child::RendererCommand::Stop,
+        )
+        .is_err()
+        {
             retire_renderer(pool.child.take().unwrap());
             return;
         }
@@ -602,11 +625,12 @@ fn send_renderer(
     input.flush()
 }
 
-fn spawn_renderer(url: &str) -> Result<Child> {
+fn spawn_renderer(broker: Arc<Broker>) -> Result<RendererProcess> {
+    let server = RendererServer::new()?;
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg(crate::spotify_drm_child::ARG)
-        .arg(url)
+        .arg(&server.page_url)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -615,12 +639,19 @@ fn spawn_renderer(url: &str) -> Result<Child> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
-    command
+    let child = command
         .spawn()
-        .context("Could not start Spotify protected playback")
+        .context("Could not start Spotify protected playback")?;
+    let mut renderer = RendererProcess { child, server };
+    if let Err(error) = renderer.load(broker) {
+        retire_renderer(renderer);
+        return Err(error).context("Could not load Spotify protected playback");
+    }
+    Ok(renderer)
 }
 
-fn retire_renderer(mut child: Child) {
+fn retire_renderer(RendererProcess { mut child, server }: RendererProcess) {
+    drop(server);
     drop(child.stdin.take());
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -637,7 +668,7 @@ fn retire_renderer(mut child: Child) {
 
 impl Drop for Resources {
     fn drop(&mut self) {
-        self.server.abort();
+        self.heartbeat.abort();
     }
 }
 
@@ -788,11 +819,66 @@ struct Broker {
     playback: watch::Receiver<Option<Arc<ValidatedPlayback>>>,
     media: AsyncMutex<JoinSet<Option<CachedAudio>>>,
     prefix: String,
-    origin: String,
     volume: f64,
     start_at: Option<f64>,
     cache_generation: u64,
     handle: Weak<Inner>,
+}
+
+struct RendererServer {
+    page_url: String,
+    active: watch::Sender<Option<Arc<Broker>>>,
+    task: JoinHandle<()>,
+}
+
+struct RendererRoutes {
+    authority: String,
+    origin: String,
+    page: String,
+}
+
+impl RendererServer {
+    fn new() -> Result<Self> {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let listener = TcpListener::from_std(listener)?;
+        let authority = listener.local_addr()?.to_string();
+        let origin = format!("http://{authority}");
+        let page = format!("/{}/", capability());
+        let page_url = format!("{origin}{page}");
+        let routes = Arc::new(RendererRoutes {
+            authority,
+            origin,
+            page,
+        });
+        let (active, receiver) = watch::channel(None);
+        let task = tokio::spawn(async move {
+            let mut requests = JoinSet::new();
+            loop {
+                tokio::select! {
+                    connection = listener.accept(), if requests.len() < 16 => {
+                        let Ok((socket, peer)) = connection else { break };
+                        if !peer.ip().is_loopback() { continue; }
+                        let routes = routes.clone();
+                        let active = receiver.clone();
+                        requests.spawn(async move { let _ = serve(socket, routes, active).await; });
+                    }
+                    _ = requests.join_next(), if !requests.is_empty() => {}
+                }
+            }
+        });
+        Ok(Self {
+            page_url,
+            active,
+            task,
+        })
+    }
+}
+
+impl Drop for RendererServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 struct ValidatedPlayback {
@@ -840,10 +926,17 @@ async fn start(
     let started = Instant::now();
     let cache_generation = CACHE_GENERATION.load(Ordering::SeqCst);
     let prepare = async {
+        let waiting = Instant::now();
         let report_turn = REPORT_TURN.lock().await;
+        let report_wait_ms = waiting.elapsed().as_millis();
         let started = Instant::now();
         let track = transport.prepare_for_playback(uri).await?;
-        Result::<_>::Ok((track, started.elapsed().as_millis(), report_turn))
+        Result::<_>::Ok((
+            track,
+            started.elapsed().as_millis(),
+            report_wait_ms,
+            report_turn,
+        ))
     };
     let service_certificate = async {
         let started = Instant::now();
@@ -853,10 +946,7 @@ async fn start(
             .to_vec();
         Result::<_>::Ok((certificate, started.elapsed().as_millis()))
     };
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-    let origin = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
     let prefix = format!("/{}/", capability());
-    let url = format!("{origin}{prefix}");
     let (validated, playback) = watch::channel(None);
     let uri_key: Arc<str> = Arc::from(uri);
     let mut media = JoinSet::new();
@@ -879,54 +969,25 @@ async fn start(
         playback,
         media: AsyncMutex::new(media),
         prefix,
-        origin,
         volume: crate::player::volume_gain(volume) * 100.0,
         start_at,
         cache_generation,
         handle: Arc::downgrade(&handle.0),
     });
-    let server_broker = broker.clone();
-    let server = tokio::spawn(async move {
-        let mut requests = JoinSet::new();
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
-        loop {
-            tokio::select! {
-                connection = listener.accept() => {
-                    let Ok((socket, peer)) = connection else { break };
-                    if !peer.ip().is_loopback() { continue; }
-                    let broker = server_broker.clone();
-                    requests.spawn(async move { let _ = serve(socket, broker).await; });
-                }
-                _ = requests.join_next(), if !requests.is_empty() => {}
-                _ = heartbeat.tick() => {
-                    let Some(inner) = server_broker.handle.upgrade() else { break };
-                    if inner.canceled.load(Ordering::SeqCst) { break; }
-                    let exited = inner.resources.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|resources| resources.renderer.exited());
-                    if exited {
-                        *inner.error.lock().unwrap_or_else(|e| e.into_inner()) = Some("Spotify protected renderer closed".to_owned());
-                        inner.started.notify_waiters();
-                        inner.ctx.request_repaint();
-                        break;
-                    }
-                }
-            }
-        }
-    });
     let renderer_reused = {
         let mut resources = handle.0.resources.lock().unwrap_or_else(|e| e.into_inner());
-        let renderer = match RendererLease::acquire(&url, &handle) {
-            Ok(renderer) => renderer,
-            Err(error) => {
-                server.abort();
-                return Err(error);
-            }
-        };
+        let active = broker.handle.clone();
+        let renderer = RendererLease::acquire(broker, &handle)?;
         let reused = renderer.reused;
-        *resources = Some(Resources { server, renderer });
+        let heartbeat = tokio::spawn(watch_renderer(active));
+        *resources = Some(Resources {
+            heartbeat,
+            renderer,
+        });
         reused
     };
     let renderer_started = Instant::now();
-    let ((track, prepare_ms, report_turn), (certificate, certificate_ms)) =
+    let ((track, prepare_ms, report_wait_ms, report_turn), (certificate, certificate_ms)) =
         tokio::try_join!(prepare, service_certificate)?;
     if let Some(error) = handle.last_error() {
         bail!(error);
@@ -1066,6 +1127,7 @@ async fn start(
         if handle.0.playing.load(Ordering::SeqCst) {
             tracing::info!(
                 prepare_ms,
+                report_wait_ms,
                 certificate_ms,
                 renderer_reused,
                 renderer_ms = renderer_started.elapsed().as_millis(),
@@ -1090,6 +1152,30 @@ async fn start(
     }
 }
 
+async fn watch_renderer(active: Weak<Inner>) {
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        heartbeat.tick().await;
+        let Some(inner) = active.upgrade() else { break };
+        if inner.canceled.load(Ordering::SeqCst) {
+            break;
+        }
+        let mut resources = inner.resources.lock().unwrap_or_else(|e| e.into_inner());
+        let exited = resources
+            .as_ref()
+            .is_some_and(|resources| resources.renderer.exited());
+        if exited {
+            *inner.error.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some("Spotify protected renderer closed".to_owned());
+            resources.take();
+            drop(resources);
+            inner.started.notify_waiters();
+            inner.ctx.request_repaint();
+            break;
+        }
+    }
+}
+
 async fn read_request_header(input: impl AsyncBufRead + Unpin) -> Result<Vec<u8>> {
     let mut input = input.take(8192);
     let mut request = Vec::new();
@@ -1101,8 +1187,12 @@ async fn read_request_header(input: impl AsyncBufRead + Unpin) -> Result<Vec<u8>
     bail!("Invalid renderer request");
 }
 
-async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
-    let mut input = BufReader::with_capacity(1024, &mut socket);
+async fn serve(
+    socket: TcpStream,
+    routes: Arc<RendererRoutes>,
+    mut active: watch::Receiver<Option<Arc<Broker>>>,
+) -> Result<()> {
+    let mut input = BufReader::with_capacity(1024, socket);
     let request =
         tokio::time::timeout(Duration::from_secs(5), read_request_header(&mut input)).await??;
     let header = std::str::from_utf8(&request)?;
@@ -1112,6 +1202,7 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
     let path = first.next().unwrap_or_default();
     let mut content_len = 0usize;
     let mut origin = None;
+    let mut host = None;
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
             if key.eq_ignore_ascii_case("content-length") {
@@ -1120,36 +1211,60 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             if key.eq_ignore_ascii_case("origin") {
                 origin = Some(value.trim());
             }
+            if key.eq_ignore_ascii_case("host") {
+                host = Some(value.trim());
+            }
         }
     }
-    if !path.starts_with(&broker.prefix) || origin.is_some_and(|value| value != broker.origin) {
-        return respond(&mut socket, 403, "text/plain", b"").await;
+    if host != Some(routes.authority.as_str()) || origin.is_some_and(|value| value != routes.origin)
+    {
+        return respond(input.get_mut(), 403, "text/plain", b"").await;
     }
+    if method == "GET" && path == routes.page {
+        return respond(
+            input.get_mut(),
+            200,
+            "text/html; charset=utf-8",
+            HTML.as_bytes(),
+        )
+        .await;
+    }
+    let broker = active.borrow_and_update().clone();
+    let Some(broker) = broker.filter(|broker| path.starts_with(&broker.prefix)) else {
+        return respond(input.get_mut(), 403, "text/plain", b"").await;
+    };
     ensure!(
         content_len <= 2 * 1024 * 1024,
         "Renderer request exceeds limit"
     );
-    let route = &path[broker.prefix.len()..];
+    tokio::select! {
+        biased;
+        _ = active.changed() => Ok(()),
+        result = async {
+            let mut body = vec![0u8; content_len];
+            if content_len > 0 {
+                tokio::time::timeout(Duration::from_secs(10), input.read_exact(&mut body)).await??;
+            }
+            let route = &path[broker.prefix.len()..];
+            serve_track(input.get_mut(), &broker, method, route, &body).await
+        } => result,
+    }
+}
+
+async fn serve_track(
+    socket: &mut TcpStream,
+    broker: &Broker,
+    method: &str,
+    route: &str,
+    body: &[u8],
+) -> Result<()> {
     let Some(inner) = broker.handle.upgrade() else {
         return Ok(());
     };
     if inner.canceled.load(Ordering::SeqCst) {
         return Ok(());
     }
-    let mut body = vec![0u8; content_len];
-    if content_len > 0 {
-        tokio::time::timeout(Duration::from_secs(10), input.read_exact(&mut body)).await??;
-    }
     match (method, route) {
-        ("GET", "") => {
-            respond(
-                &mut socket,
-                200,
-                "text/html; charset=utf-8",
-                HTML.as_bytes(),
-            )
-            .await
-        }
         ("GET", "meta") => {
             let playback = broker.validated_playback().await?;
             let meta = serde_json::to_vec(&json!({
@@ -1157,12 +1272,12 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
                 "startAt": broker.start_at,
                 "duration": playback.track.metadata.duration_ms.map(|ms| ms as f64 / 1000.0),
             }))?;
-            respond(&mut socket, 200, "application/json", &meta).await
+            respond(socket, 200, "application/json", &meta).await
         }
         ("GET", "certificate") => {
             let playback = broker.validated_playback().await?;
             respond(
-                &mut socket,
+                socket,
                 200,
                 "application/octet-stream",
                 &playback.certificate,
@@ -1174,12 +1289,12 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             let mut response_started = false;
             match tokio::time::timeout(
                 MEDIA_DOWNLOAD_TIMEOUT,
-                serve_media(&mut socket, &broker, &playback.track, &mut response_started),
+                serve_media(socket, broker, &playback.track, &mut response_started),
             )
             .await
             {
                 Ok(Ok(())) => Ok(()),
-                _ if !response_started => respond(&mut socket, 502, "text/plain", b"").await,
+                _ if !response_started => respond(socket, 502, "text/plain", b"").await,
                 Ok(Err(error)) => Err(error),
                 Err(error) => Err(error.into()),
             }
@@ -1187,15 +1302,15 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
         ("POST", "license") => {
             broker.validated_playback().await?;
             let started = Instant::now();
-            match broker.transport.license(&body).await {
+            match broker.transport.license(body).await {
                 Ok(license) => {
                     tracing::info!(
                         elapsed_ms = started.elapsed().as_millis(),
                         "Spotify license ready"
                     );
-                    respond(&mut socket, 200, "application/octet-stream", &license).await
+                    respond(socket, 200, "application/octet-stream", &license).await
                 }
-                Err(_) => respond(&mut socket, 502, "text/plain", b"").await,
+                Err(_) => respond(socket, 502, "text/plain", b"").await,
             }
         }
         ("GET", "commands") => {
@@ -1217,7 +1332,7 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
                 .drain(..)
                 .collect();
             respond(
-                &mut socket,
+                socket,
                 200,
                 "application/json",
                 &serde_json::to_vec(&commands)?,
@@ -1225,10 +1340,10 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             .await
         }
         ("POST", "state") => {
-            let state: BrowserState = serde_json::from_slice(&body)?;
+            let state: BrowserState = serde_json::from_slice(body)?;
             let finished = state.ended || state.error_code.is_some();
             state.update(&inner)?;
-            let result = respond(&mut socket, 200, "text/plain", b"").await;
+            let result = respond(socket, 200, "text/plain", b"").await;
             if finished {
                 inner
                     .resources
@@ -1238,7 +1353,7 @@ async fn serve(mut socket: TcpStream, broker: Arc<Broker>) -> Result<()> {
             }
             result
         }
-        _ => respond(&mut socket, 404, "text/plain", b"").await,
+        _ => respond(socket, 404, "text/plain", b"").await,
     }
 }
 
@@ -1538,6 +1653,39 @@ fn certificate(bytes: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn renderer_server_serves_only_its_page_when_idle() {
+        let server = RendererServer::new().unwrap();
+        let page = url::Url::parse(&server.page_url).unwrap();
+        let authority = format!("127.0.0.1:{}", page.port().unwrap());
+        let request = |path: String, host: String| {
+            let authority = authority.clone();
+            async move {
+                let mut socket = TcpStream::connect(authority).await.unwrap();
+                socket
+                    .write_all(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut response = String::new();
+                socket.read_to_string(&mut response).await.unwrap();
+                response
+            }
+        };
+        let response = request(page.path().into(), authority.clone()).await;
+        assert!(response.starts_with("HTTP/1.1 200 "));
+        assert!(response.contains("window.moosikLoad"));
+        for (path, host) in [
+            (page.path().to_owned(), "example.com".into()),
+            (
+                format!("{}/meta", page.path().trim_end_matches('/')),
+                authority.clone(),
+            ),
+            (format!("/{}/media", capability()), authority.clone()),
+        ] {
+            assert!(request(path, host).await.starts_with("HTTP/1.1 403 "));
+        }
+    }
 
     #[tokio::test]
     async fn renderer_headers_keep_body_bytes_and_enforce_the_size_limit() {

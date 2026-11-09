@@ -57,7 +57,7 @@ fn combined_display(
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     // No "Home" heading: the sidebar already says where you are.
-    if app.home_loading && app.home.is_none() {
+    if app.home.is_none() && (app.home_loading || app.waiting_for_home_auth()) {
         // The first row's distance from the card's top, matching the sides.
         ui.add_space(theme::PAGE_INSET_X);
         home_controls(app, ui);

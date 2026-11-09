@@ -11,6 +11,7 @@
 
 fn main() {
     println!("cargo::rerun-if-changed=moosik.rc");
+    println!("cargo::rerun-if-changed=moosik.manifest");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -25,6 +26,7 @@ fn main() {
     let rc = std::fs::read_to_string("moosik.rc")
         .unwrap()
         .replace("../../", &format!("{manifest_dir}/../../"))
+        .replace("@MANIFEST@", &format!("{manifest_dir}/moosik.manifest"))
         .replace("@VERSION_NUMBERS@", &numbers)
         .replace("@VERSION@", &var("CARGO_PKG_VERSION"));
     let out = std::path::Path::new(&var("OUT_DIR")).join("moosik.rc");
