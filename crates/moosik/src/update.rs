@@ -51,6 +51,14 @@ impl Install {
         detect()
     }
 
+    fn platform(self) -> &'static str {
+        match self {
+            Install::WindowsSetup | Install::WindowsMsi => "windows",
+            Install::AppImage => "linux",
+            Install::Manual => std::env::consts::OS,
+        }
+    }
+
     /// The release file this install updates from. `None` for a manual install, and for a CPU a
     /// package is not built for (there is no ARM64 setup.exe or AppImage).
     fn asset_name(self, version: &str) -> Option<String> {
@@ -268,11 +276,7 @@ impl GhRelease {
         if self.draft || self.prerelease || parse_version(version).is_none() {
             return false;
         }
-        let platform = match install {
-            Install::WindowsSetup | Install::WindowsMsi => "windows",
-            Install::AppImage => "linux",
-            Install::Manual => std::env::consts::OS,
-        };
+        let platform = install.platform();
         let has = |name: &str| {
             self.assets
                 .iter()
@@ -415,7 +419,11 @@ fn pick(release: GhRelease, current: &str, install: Install) -> Option<Release> 
     };
     let download = install.asset_name(&version).and_then(|name| {
         let asset = find(&name)?;
-        let sums = find(&format!("moosik-{version}-SHA256SUMS.txt"))?;
+        let sums = find(&format!(
+            "moosik-{version}-{}-SHA256SUMS.txt",
+            install.platform()
+        ))
+        .or_else(|| find(&format!("moosik-{version}-SHA256SUMS.txt")))?;
         Some(Download {
             url: asset.browser_download_url.clone(),
             size: asset.size,
@@ -852,6 +860,15 @@ mod tests {
         assert!(!partial.published_for(Install::WindowsSetup));
         let mut ready = release("moosik-v0.1.60", &[linux, windows, setup, sums]);
         assert!(ready.published_for(Install::WindowsSetup));
+        let verified = pick(
+            release("moosik-v0.1.60", &[windows, setup]),
+            "0.1.59",
+            Install::WindowsSetup,
+        )
+        .unwrap();
+        if cfg!(target_arch = "x86_64") {
+            assert!(verified.download.unwrap().sums_url.ends_with(windows));
+        }
         ready.prerelease = true;
         assert!(!ready.published_for(Install::WindowsSetup));
     }
