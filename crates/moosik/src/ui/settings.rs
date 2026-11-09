@@ -230,7 +230,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
                     );
                     ui.add_space(4.0);
                     if widgets::outline_button(ui, &p, "Release notes on GitHub").clicked() {
-                        crate::open_url(crate::update::LATEST_PAGE);
+                        crate::open_url(crate::update::RELEASES);
                     }
                 });
             });
