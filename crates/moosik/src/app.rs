@@ -523,6 +523,7 @@ pub enum Route {
     /// What you played, in dated shelves. Signed in only.
     History,
     Listening,
+    Collection,
     Queue,
     Library,
     LikedMusic,
@@ -562,6 +563,7 @@ impl Route {
             "moods" => Some(Route::Moods),
             "history" => Some(Route::History),
             "stats" => Some(Route::Listening),
+            "collection" => Some(Route::Collection),
             "queue" => Some(Route::Queue),
             "library" => Some(Route::Library),
             "liked" => Some(Route::LikedMusic),
@@ -4152,7 +4154,11 @@ impl App {
             Route::Charts(params) => self.load_charts(params),
             Route::Moods => self.load_moods(),
             Route::History => self.load_history(),
-            Route::Search | Route::Settings | Route::Listening | Route::Queue => {}
+            Route::Search
+            | Route::Settings
+            | Route::Listening
+            | Route::Collection
+            | Route::Queue => {}
         }
     }
 
@@ -4802,7 +4808,11 @@ impl App {
                 self.home_shelf_full = None;
                 self.home_shelf_loading = None;
             }
-            Route::Search | Route::Settings | Route::Listening | Route::Queue => return,
+            Route::Search
+            | Route::Settings
+            | Route::Listening
+            | Route::Collection
+            | Route::Queue => return,
         }
         self.scroll_to_top = true;
         self.ensure_route_loaded();
@@ -10183,6 +10193,15 @@ impl eframe::App for App {
             self.stats.enabled = !self.stats.enabled;
         }
         self.reload_custom_themes(&ctx);
+        // The Appearance menu temporarily paints a hovered theme without saving it. If the
+        // listener leaves that tab or page while the menu is open, restore the saved palette
+        // before drawing the shell; the picker itself handles closing the menu in place.
+        if (!matches!(self.current_route(), Route::Settings)
+            || self.settings_tab != ui::settings::SettingsTab::Appearance)
+            && self.palette != self.settings.palette(&ctx, &self.custom_themes)
+        {
+            self.repaint_palette(&ctx);
+        }
         // Login started this run: it is on screen now, so this is the moment to ask. Wayland
         // maps an autostarted window behind whatever already has focus and refuses to raise a
         // window that did not ask; asking on the first frame is also the best chance of getting
@@ -10550,6 +10569,7 @@ impl eframe::App for App {
                             Route::HomeShelf(title) => ui::home::shelf_page(self, ui, &title),
                             Route::History => ui::history::page(self, ui),
                             Route::Listening => ui::listening::page(self, ui),
+                            Route::Collection => ui::listening::collection_page(self, ui),
                             Route::Queue => ui::upnext::page(self, ui),
                             Route::Home => ui::home::page(self, ui),
                             Route::Library => ui::library::page(self, ui),

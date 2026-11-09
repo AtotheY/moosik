@@ -5066,9 +5066,16 @@ pub fn swatch_chip(
 ///
 /// Composed from the same pieces as every other control (the [`pill`] press feel, the
 /// [`menu_item`]-shaped rows, the `egui::Popup` the track menus open through) rather than
-/// egui's stock `ComboBox`, whose visuals would look like a visitor. Returns the index of the
-/// option clicked this frame, if any; the popup toggles on the button and closes on a click
-/// anywhere else.
+/// egui's stock `ComboBox`, whose visuals would look like a visitor. Reports the option clicked
+/// and the option under the pointer (or keyboard focus), so the theme picker can preview without
+/// committing. The popup toggles on the button and closes on a click anywhere else.
+#[derive(Default)]
+pub struct DropdownResult {
+    pub selected: Option<usize>,
+    pub preview: Option<usize>,
+    pub open: bool,
+}
+
 pub fn dropdown(
     ui: &mut Ui,
     palette: &Palette,
@@ -5076,13 +5083,13 @@ pub fn dropdown(
     current_swatch: Color32,
     current: &str,
     options: &[(Color32, &str)],
-) -> Option<usize> {
+) -> DropdownResult {
     let response = swatch_chip(ui, palette, current_swatch, current, false, true);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let mut choice = None;
+    let mut result = DropdownResult::default();
     let popup = egui::Popup::from_response(&response)
         .id(id)
         .kind(egui::PopupKind::Menu)
@@ -5106,14 +5113,18 @@ pub fn dropdown(
             .show(mui, |mui| {
                 for (i, (swatch, label)) in options.iter().enumerate() {
                     let row = dropdown_row(mui, palette, *swatch, label, current == *label);
+                    if row.hovered() || row.has_focus() {
+                        result.preview = Some(i);
+                    }
                     if row.clicked() {
-                        choice = Some(i);
+                        result.selected = Some(i);
                         mui.close();
                     }
                 }
             });
     });
-    choice
+    result.open = result.selected.is_none() && egui::Popup::is_id_open(ui.ctx(), id);
+    result
 }
 
 /// One row inside a [`dropdown`]: a swatch dot, a label, and a tick on the choice in force.

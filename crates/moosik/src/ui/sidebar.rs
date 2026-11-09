@@ -69,6 +69,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         (Route::Queue, Icon::ListMusic, "Queue"),
         (Route::History, Icon::History, "Listening history"),
         (Route::Listening, Icon::TrendingUp, "Listening stats"),
+        (Route::Collection, Icon::Trophy, "Collection"),
     ] {
         if route == Route::NewReleases && !providers.contains(&crate::model::Provider::Spotify) {
             continue;

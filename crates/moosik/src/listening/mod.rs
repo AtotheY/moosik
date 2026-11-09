@@ -1,6 +1,9 @@
 //! Private, append-only listening telemetry. No credentials or stream URLs enter this module.
-//! The UI samples mpv; a single worker owns SQLite and exports. Nothing is uploaded.
+//! The UI samples mpv; one worker owns recording and exports. Optional genre matching sends
+//! online song title and artist to Apple, but never plays, times, or the listening database.
+pub mod awards;
 pub mod collection;
+mod genre;
 pub mod report;
 mod store;
 use crate::model::Track;
@@ -169,7 +172,7 @@ pub enum Export {
 enum Command {
     Records(Vec<Record>),
     Report(Query),
-    Tags(String, String, String, i32),
+    Tags(String, String, String, i32, bool),
     Export(Export, PathBuf, Query),
     Shutdown,
 }
@@ -179,6 +182,7 @@ enum Reply {
     Credits(Vec<collection::Hearing>, Vec<String>),
     PeakWeekMinutes(u32),
     Report(Box<Report>),
+    GenresUpdated,
     Error(String),
     Saved(String),
 }
@@ -516,6 +520,7 @@ impl Ledger {
                     self.report = Some(std::sync::Arc::from(report));
                     self.loading = false;
                 }
+                Reply::GenresUpdated => self.requested = None,
                 Reply::Error(e) => {
                     self.error = Some(e);
                     self.loading = false;
@@ -542,8 +547,17 @@ impl Ledger {
             self.error = Some("Listening database is offline. Restart Moosik.".into());
         }
     }
-    pub fn tags(&mut self, id: String, genres: String, tags: String, rating: i32) {
-        let _ = self.tx.send(Command::Tags(id, genres, tags, rating));
+    pub fn tags(
+        &mut self,
+        id: String,
+        genres: String,
+        tags: String,
+        rating: i32,
+        genre_changed: bool,
+    ) {
+        let _ = self
+            .tx
+            .send(Command::Tags(id, genres, tags, rating, genre_changed));
         self.requested = None;
     }
     pub fn export(&mut self, kind: Export, path: PathBuf, query: Query) {

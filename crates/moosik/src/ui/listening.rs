@@ -20,7 +20,6 @@ enum Tab {
     Genres,
     History,
     Recap,
-    Collection,
 }
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Period {
@@ -49,6 +48,7 @@ pub struct View {
     sort: usize,
     selected: Option<String>,
     genres: String,
+    original_genres: String,
     tags: String,
     rating: i32,
     help: bool,
@@ -136,7 +136,7 @@ const PERIODS: [(Period, &str); 7] = [
     (Period::All, "All time"),
     (Period::Custom, "Custom dates"),
 ];
-const TABS: [(Tab, &str); 8] = [
+const TABS: [(Tab, &str); 7] = [
     (Tab::Overview, "Overview"),
     (Tab::Songs, "Songs"),
     (Tab::Artists, "Artists"),
@@ -144,8 +144,71 @@ const TABS: [(Tab, &str); 8] = [
     (Tab::Genres, "Genres"),
     (Tab::History, "History"),
     (Tab::Recap, "My recap"),
-    (Tab::Collection, "Collection"),
 ];
+
+/// The lifetime shelf has its own route, independent of period and source filters.
+pub fn collection_page(app: &mut App, ui: &mut egui::Ui) {
+    app.listening.poll();
+    let p = app.palette;
+    crate::ui::page_scroll(app, "collection").show(ui, |ui| {
+        ui.add_space((theme::PAGE_INSET_X - theme::PAGE_TITLE_PT * 0.18).max(0.));
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Collection")
+                    .font(theme::bold(theme::PAGE_TITLE_PT))
+                    .color(p.text),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let guide = widgets::outline_button(ui, &p, "How it works");
+                egui::Popup::menu(&guide)
+                    .frame(widgets::menu_frame(ui, &p))
+                    .width(300.)
+                    .show(|ui| {
+                        ui.set_width(280.);
+                        ui.label(
+                            RichText::new("Your listening milestones")
+                                .font(theme::semibold(15.))
+                                .color(p.text),
+                        );
+                        for (title, rule) in [
+                            (
+                                "Artist passes",
+                                "Admit One: 10 different songs or 5 listening days. A day counts after 30 seconds, or half a short song. Regular, Backstage and All Access: 15, 30 and 60 days.",
+                            ),
+                            (
+                                "Song awards",
+                                "Iron 10, Bronze 25, Silver 50, Gold 100, Platinum 250, Diamond 500, Double Platinum 1,000 full listens of one song. A full listen ends after 90% coverage. Listening time also includes partial plays. These are your own awards.",
+                            ),
+                            (
+                                "App finishes",
+                                "Your best Monday–Sunday listening week unlocks a new app icon look every 5 hours. Pick earned looks in Settings → Appearance.",
+                            ),
+                        ] {
+                            ui.add_space(9.);
+                            ui.label(
+                                RichText::new(title)
+                                    .font(theme::semibold(12.))
+                                    .color(p.text),
+                            );
+                            ui.label(
+                                RichText::new(rule)
+                                    .font(theme::regular(12.))
+                                    .color(p.secondary),
+                            );
+                        }
+                    });
+            });
+        });
+        ui.add_space(10.);
+        app.listening_view
+            .collection
+            .sheet(ui, &p, &app.listening, |ui, rect, url| {
+                let tex =
+                    super::art_texture(&mut app.images, &app.backend, ui.ctx(), url, rect.width());
+                widgets::paint_art(ui, &p, rect, tex, widgets::ArtShape::Square);
+            });
+    });
+}
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     app.listening.poll();
@@ -153,8 +216,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "listening-stats-v2").show(ui, |ui| {
         crate::ui::page_title(ui, &p, "Your listening");
         let mut refresh = false;
-        if app.listening_view.tab != Tab::Collection {
-            ui.horizontal_wrapped(|ui| {
+        ui.horizontal_wrapped(|ui| {
                 let period = PERIODS
                     .iter()
                     .find(|(v, _)| *v == app.listening_view.period)
@@ -184,8 +246,8 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                         app.listening_view.help = true;
                     }
                 });
-            });
-            if app.listening_view.period == Period::Custom {
+        });
+        if app.listening_view.period == Period::Custom {
                 if app.listening_view.from.is_empty() {
                     app.listening_view.from =
                         Local::now().date_naive().with_day(1).unwrap().to_string();
@@ -201,7 +263,6 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                     );
                     widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
                 });
-            }
         }
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
@@ -213,21 +274,6 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(GAP);
-        if app.listening_view.tab == Tab::Collection {
-            app.listening_view
-                .collection
-                .sheet(ui, &p, &app.listening, |ui, rect, url| {
-                    let tex = super::art_texture(
-                        &mut app.images,
-                        &app.backend,
-                        ui.ctx(),
-                        url,
-                        rect.width(),
-                    );
-                    widgets::paint_art(ui, &p, rect, tex, widgets::ArtShape::Square);
-                });
-            return;
-        }
         let query = match app.listening_view.query() {
             Ok(q) => q,
             Err(e) => {
@@ -276,7 +322,6 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         } else {
             match app.listening_view.tab {
-                Tab::Collection => unreachable!("lifetime collection rendered above"),
                 Tab::Overview => overview(app, ui, &report),
                 Tab::Songs => songs(app, ui, &report),
                 Tab::Artists => ranking(app, ui, &report, Tab::Artists),
@@ -294,6 +339,11 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                             app.listening_view.atlas.filter(ui, &p, &report);
                         }
                     });
+                    small(
+                        ui,
+                        &p,
+                        "Song and artist names are matched with Apple's catalog; listening times stay here.",
+                    );
                     ui.add_space(12.);
                     if app.listening_view.genre_list {
                         ranking(app, ui, &report, Tab::Genres);
@@ -1070,6 +1120,7 @@ fn row_hover(ui: &egui::Ui, p: &theme::Palette, rect: Rect, response: &egui::Res
 fn select_song(app: &mut App, row: &listening::Row) {
     app.listening_view.selected = Some(row.id.clone());
     app.listening_view.genres = row.genres.clone();
+    app.listening_view.original_genres = row.genres.clone();
     app.listening_view.tags = row.tags.clone();
     app.listening_view.rating = row.rating;
 }
@@ -1192,6 +1243,7 @@ pub(crate) fn regular_song(
 ) {
     use crate::ui::{ListClick, RowSpec, is_active, track_subtitle};
     let signed_in = app.signed_in();
+    let numbered = !matches!(&style, SongRow::Unnumbered);
     let (click, action) = crate::ui::paint_grid_cell(
         ui,
         &app.palette,
@@ -1201,7 +1253,7 @@ pub(crate) fn regular_song(
         rect,
         index,
         RowSpec {
-            number: (!matches!(style, SongRow::Unnumbered)).then_some(index + 1),
+            number: numbered.then_some(index + 1),
             rank: None,
             trend: track.trend,
             title: &track.title,
@@ -1234,6 +1286,40 @@ pub(crate) fn regular_song(
             _ => None,
         },
     );
+    if let Some(collection) = app.listening.collection.as_ref()
+        && let Some(song) = collection.sleeves.get(&track.video_id)
+        && let Some(rank) = crate::listening::awards::SongRank::from_completed(song.completed)
+    {
+        let narrow = rect.width() < 340.;
+        let art_size = if narrow { 32. } else { theme::ART_SIZE };
+        let number_width = if numbered && !narrow {
+            theme::ROW_NUMBER_W
+        } else {
+            0.
+        };
+        let art_rect = Rect::from_center_size(
+            pos2(
+                rect.left() + theme::ROW_LEFT_INSET + number_width + art_size / 2.,
+                rect.center().y,
+            ),
+            vec2(art_size, art_size),
+        );
+        super::keepsakes::rank_badge(ui, art_rect, song.completed, None);
+        let hit = ui.interact(
+            art_rect,
+            ui.id().with(("song-rank-art", &track.video_id, index)),
+            Sense::hover(),
+        );
+        if hit.hovered() {
+            let place = crate::listening::awards::song_position(collection, &track.video_id)
+                .map_or(String::new(), |place| format!("#{place} · "));
+            hit.on_hover_text(format!(
+                "{place}{} · {} full listens",
+                rank.name(),
+                song.completed
+            ));
+        }
+    }
     if let Some(action) = action {
         app.row_action(action);
     }
@@ -1482,10 +1568,14 @@ fn ranking(app: &mut App, ui: &mut egui::Ui, r: &Report, kind: Tab) {
     };
     if kind == Tab::Genres && r.unknown_genre_ms > 0.0 {
         ui.horizontal_wrapped(|ui| {
-            small(ui, &p, format!("{} untagged", clock(r.unknown_genre_ms)));
-            if widgets::outline_button(ui, &p, "Tag songs").clicked() {
+            small(
+                ui,
+                &p,
+                format!("{} without a genre", clock(r.unknown_genre_ms)),
+            );
+            if widgets::outline_button(ui, &p, "Review missing").clicked() {
                 app.listening_view.group =
-                    Some((Tab::Genres, "Unknown".into(), "Untagged songs".into()));
+                    Some((Tab::Genres, "Unknown".into(), "Songs without genres".into()));
                 app.listening_view.tab = Tab::Songs;
                 app.listening_view.search.clear();
             }
@@ -1694,6 +1784,7 @@ fn editor(app: &mut App, ctx: &egui::Context) {
             app.listening_view.genres.clone(),
             app.listening_view.tags.clone(),
             app.listening_view.rating,
+            app.listening_view.genres.trim() != app.listening_view.original_genres.trim(),
         );
         if let Ok(q) = app.listening_view.query() {
             app.listening.request(q, true);
@@ -1942,7 +2033,7 @@ fn help(app: &mut App, ctx: &egui::Context) {
                 ("Listening time","Observed playback in Moosik on this Mac, excluding pauses, buffering, seeks and app mute. System mute and whether you are paying attention cannot be detected."),
                 ("Plays & completion","A play is 30 seconds or half the song, whichever is shorter. Finished means an ended session with at least 90% unique coverage. Replaying one section doesn't inflate coverage."),
                 ("Dates & rankings","Time is clipped to your date range. Plays qualify inside that range; skips and completions use the session end. Artist and genre totals can overlap when a song has multiple credits or tags."),
-                ("Genres & labels","Open a song to edit genres, tags and ratings. Comma-separated genres apply across its history. Untagged music stays Unknown."),
+                ("Genres & labels","Online song and artist names are sent to Apple's catalog to match genres; play counts and listening times are not. Local files use their embedded genre. Open a song to correct a genre, add tags or rate it. Your edits take precedence; unmatched songs stay Unknown."),
                 ("Your data","Recorded locally from when tracking began. Nothing here is published to YouTube. All raw history is retained. Use the ••• menu for CSV, JSON, recap or database exports; JSON and database exports include all dates."),
                 ("Recording details","Samples are saved about every five seconds. A crash can lose the last unsaved seconds. Long observation gaps are excluded. The database uses your Mac account's protection; it is not separately encrypted or automatically backed up.")
             ]{ui.add_space(14.0);ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.text));ui.label(RichText::new(body).font(theme::regular(12.0)).color(p.secondary));}

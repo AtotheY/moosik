@@ -30,8 +30,8 @@ The fork is tested locally on Apple Silicon macOS. Inherited platform support do
 - Listening-time comparisons and rising artists against the previous equal-length period.
 
 Next refinements: richer playlist editing, external-drag auto-scroll through long lists,
-private-playlist export, and broader keyboard selection across paged grids. Historical imports,
-automatic genre enrichment, and cross-device sync need separate design and privacy decisions.
+private-playlist export, and broader keyboard selection across paged grids. Historical imports
+and cross-device sync need separate design and privacy decisions.
 
 ## Broader release work
 

@@ -1,4 +1,4 @@
-//! A local genre atlas of the same tagged listening used by the Genres list.
+//! A local genre atlas of matched and hand-edited genres from the Genres list.
 use super::{App, Report, Tab, art, clock, select_song, small, theme, widgets};
 use crate::listening::{Row, collection::artist_key};
 use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -194,7 +194,7 @@ pub(super) fn show(app: &mut App, ui: &mut Ui, report: &Arc<Report>) {
             ui,
             &app.palette,
             "Your genre map",
-            "Add a genre to a song in your listening history to place it on the map.",
+            "Genres appear as your songs are matched. You can edit missing ones in song details.",
         );
     } else {
         view.map(app, ui, report);
@@ -205,14 +205,14 @@ pub(super) fn show(app: &mut App, ui: &mut Ui, report: &Arc<Report>) {
                 ui,
                 &app.palette,
                 format!(
-                    "{} of {} tagged",
+                    "{} of {} identified",
                     clock(view.tagged),
                     clock(report.listen_ms)
                 ),
             );
-            if widgets::outline_button(ui, &app.palette, "Tag songs").clicked() {
+            if widgets::outline_button(ui, &app.palette, "Review missing").clicked() {
                 app.listening_view.group =
-                    Some((Tab::Genres, "Unknown".into(), "Untagged songs".into()));
+                    Some((Tab::Genres, "Unknown".into(), "Songs without genres".into()));
                 app.listening_view.tab = Tab::Songs;
                 app.listening_view.search.clear();
             }
