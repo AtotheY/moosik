@@ -30,7 +30,7 @@ pub(crate) const LATEST_PAGE: &str = "https://github.com/AtotheY/moosik/releases
 const LATEST: &str = "https://api.github.com/repos/AtotheY/moosik/releases/latest";
 /// Where the project's releases live. A download or page URL outside it is never followed, even
 /// if the API's answer names one.
-const RELEASES: &str = "https://github.com/AtotheY/moosik/releases/";
+pub(crate) const RELEASES: &str = "https://github.com/AtotheY/moosik/releases/";
 const USER_AGENT: &str = concat!("Moosik/", env!("CARGO_PKG_VERSION"));
 
 /// How this copy was installed, which decides whether it can update itself.
