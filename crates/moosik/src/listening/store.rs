@@ -227,12 +227,12 @@ pub(super) fn worker(
         .context("Another Moosik instance is already recording. Close the extra instance.")?;
     let mut db = open(&path)?;
     let mut last_weeks = None;
-    let mut refresh_weeks = |db: &Connection| -> Result<()> {
+    let mut refresh_weeks = |db: &Connection, requested: bool| -> Result<()> {
         let monday = local_monday();
         let best = peak_week_minutes(db)?;
         let current = current_week_minutes(db, monday)?;
         let snapshot = (monday, best, current);
-        if last_weeks != Some(snapshot) {
+        if requested || last_weeks != Some(snapshot) {
             let _ = replies.send(Reply::WeekMinutes {
                 best,
                 monday,
@@ -254,7 +254,7 @@ pub(super) fn worker(
         }
     };
     // The player polls until this startup reply, including when playback is paused.
-    refresh_weeks(&db)?;
+    refresh_weeks(&db, true)?;
     while let Ok(command) = commands.recv() {
         let result: Result<()> = match command {
             Command::Records(records) => {
@@ -270,9 +270,9 @@ pub(super) fn worker(
                         _ => {}
                     }
                 }
-                refresh_weeks(&db)
+                refresh_weeks(&db, false)
             }
-            Command::RefreshWeeks => refresh_weeks(&db),
+            Command::RefreshWeeks => refresh_weeks(&db, true),
             Command::Report(query) => report::build(&db, &query).map(|report| {
                 let _ = replies.send(Reply::Report(Box::new(report)));
             }),

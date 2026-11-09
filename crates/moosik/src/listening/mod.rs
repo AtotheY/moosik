@@ -514,7 +514,9 @@ impl Ledger {
         if monday != self.week_requested {
             self.week_requested = monday;
             self.current_week_minutes = None;
-            let _ = self.tx.send(Command::RefreshWeeks);
+            if self.tx.send(Command::RefreshWeeks).is_err() {
+                self.error = Some("Listening database is offline. Restart Moosik.".into());
+            }
         }
         while let Ok(reply) = self.rx.try_recv() {
             match reply {

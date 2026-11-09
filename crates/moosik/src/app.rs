@@ -3483,7 +3483,7 @@ impl App {
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
-        if self.listening.peak_week_minutes.is_none() {
+        if self.listening.current_week_minutes.is_none() {
             if self.listening.error.is_none() {
                 ctx.request_repaint_after(Duration::from_millis(200));
             }
