@@ -14,8 +14,7 @@ jobs:
       - uses: ./.github/actions/stamp-release
       - name: Install build dependencies
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+          ./scripts/install-ubuntu-deps.sh \
             build-essential cmake pkg-config libmpv-dev libwebkit2gtk-4.1-dev libgtk-3-dev \
             libsoup-3.0-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev \
             libwayland-dev libssl-dev
@@ -40,6 +39,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: ubuntu:24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: moosik-linux
@@ -48,8 +48,7 @@ jobs:
         working-directory: dist
         run: |
           sha256sum --check moosik-linux-SHA256SUMS.txt
-          apt-get -o Acquire::Retries=3 update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive ../scripts/install-ubuntu-deps.sh \
             ./moosik-*-linux-amd64.deb dbus-daemon xvfb xauth libgl1-mesa-dri desktop-file-utils libglib2.0-bin
           desktop-file-validate /usr/share/applications/moosik.desktop
           /usr/lib/moosik/yt-dlp --version

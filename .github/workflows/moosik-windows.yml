@@ -28,7 +28,7 @@ jobs:
       - uses: ./.github/actions/stamp-release
       - name: Install packages
         run: |
-          ./scripts/install-ubuntu-cross-toolchain-deps.sh g++-mingw-w64-x86-64 p7zip-full python3-pil
+          ./scripts/install-ubuntu-deps.sh g++-mingw-w64-x86-64 p7zip-full python3-pil
       - name: Rust target
         run: rustup target add x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
