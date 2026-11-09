@@ -73,6 +73,22 @@ pub(crate) fn take(ctx: &Context) -> Option<Payload> {
 pub(crate) fn clear_selection(ctx: &Context) {
     ctx.data_mut(|d| d.remove::<Selection>(selection_key()));
 }
+/// Session selections use row indices. Discard them before drawing a different ordering.
+pub(crate) fn sync_list_order(ctx: &Context, list: Id, order: Id) {
+    ctx.data_mut(|data| {
+        let key = list.with("song-selection-order");
+        if data.get_temp::<Id>(key) == Some(order) {
+            return;
+        }
+        data.insert_temp(key, order);
+        if data
+            .get_temp::<Selection>(selection_key())
+            .is_some_and(|s| s.list == Some(list))
+        {
+            data.remove::<Selection>(selection_key());
+        }
+    });
+}
 pub(crate) fn selected(ctx: &Context, list: Id, index: usize) -> bool {
     ctx.data(|d| d.get_temp::<Selection>(selection_key()))
         .is_some_and(|s| s.list == Some(list) && s.indices.contains(&index))
@@ -245,6 +261,30 @@ mod tests {
     use super::*;
     use crate::widgets;
     use egui::{pos2, vec2};
+    #[test]
+    fn host_advancing_clears_only_the_changed_session_selection() {
+        let ctx = Context::default();
+        let session = Id::new("session");
+        let before = Id::new([1, 2, 3, 4]);
+        let after = Id::new([2, 3, 4]);
+        sync_list_order(&ctx, session, before);
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                selection_key(),
+                Selection {
+                    list: Some(session),
+                    indices: vec![1, 2],
+                    anchor: 1,
+                },
+            )
+        });
+        sync_list_order(&ctx, session, before);
+        sync_list_order(&ctx, Id::new("other-view"), after);
+        assert_eq!(indices(&ctx, session), [1, 2]);
+        sync_list_order(&ctx, session, after);
+        assert!(indices(&ctx, session).is_empty());
+    }
+
     #[test]
     fn shared_row_modified_clicks_and_drag_do_not_play() {
         let ctx = Context::default();

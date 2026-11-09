@@ -70,6 +70,10 @@ pub(crate) struct Together {
 }
 
 impl Together {
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session.as_ref()?.id.as_deref()
+    }
+
     pub(crate) fn snapshot(&self) -> Option<&Snapshot> {
         self.session.as_ref()?.snapshot.as_ref()
     }

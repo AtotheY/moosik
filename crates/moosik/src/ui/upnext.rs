@@ -366,6 +366,13 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             let list_id = ui.id();
+            let order = room
+                .queue
+                .iter()
+                .fold(egui::Id::new(app.together.session_id()), |id, entry| {
+                    id.with(entry.entry)
+                });
+            super::song_drag::sync_list_order(ui.ctx(), list_id, order);
             if tracks.is_empty() {
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
