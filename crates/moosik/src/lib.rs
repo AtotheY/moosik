@@ -85,6 +85,7 @@ pub mod tray;
 mod trusted_requests;
 pub mod ui;
 pub mod update;
+mod usage;
 pub mod video;
 /// The in-app sign-in window — WebView2 on Windows, WebKitGTK on Linux, WKWebView on macOS; see
 /// the module's own

@@ -376,17 +376,18 @@ impl Ledger {
     pub fn active(&self) -> bool {
         self.active.is_some()
     }
-    pub fn observe(&mut self, sample: Sample) {
+    pub fn observe(&mut self, sample: Sample) -> u64 {
+        let mut credited_ms = 0;
         self.last_sample = Instant::now();
-        let Some(a) = &mut self.active else { return };
+        let Some(a) = &mut self.active else { return 0 };
         if !a.ready {
-            return;
+            return 0;
         }
         // loadfile is asynchronous: do not attribute an outgoing stream's position to the
         // new track. Arm only near this load's requested start.
         if !a.armed {
             if sample.idle || sample.seeking || (sample.position - a.expected_start).abs() > 8.0 {
-                return;
+                return 0;
             }
             a.armed = true;
         }
@@ -429,6 +430,9 @@ impl Ledger {
             let observable = elapsed <= 10.0
                 && (at - wall) >= 0
                 && ((at - wall) as f64 - elapsed * 1000.0).abs() < 2000.0;
+            if observable {
+                credited_ms = listen.round() as u64;
+            }
             let ms = elapsed * 1000.0;
             let coverage = a.coverage.add(
                 sample.position - media / 1000.0,
@@ -486,6 +490,7 @@ impl Ledger {
         if self.last_flush.elapsed() >= Duration::from_secs(5) {
             self.flush();
         }
+        credited_ms
     }
     pub fn finish(&mut self, reason: &str) {
         if let Some(a) = self.active.take() {

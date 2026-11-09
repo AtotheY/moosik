@@ -204,6 +204,22 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         app.activate_update();
     }
 
+    let mut share = app.settings.share_listening_minutes;
+    widgets::setting_group(ui, &p, Some("Privacy"), |ui, g| {
+        toggle_row(
+            g,
+            ui,
+            &p,
+            "share-listening-minutes",
+            "Share anonymous usage",
+            "Count this device’s daily listening minutes. No songs or account details.",
+            &mut share,
+        );
+    });
+    if share != app.settings.share_listening_minutes {
+        app.update_settings(ui.ctx(), |s| s.share_listening_minutes = share);
+    }
+
     if app.logo.is_none() {
         app.logo = crate::logo_texture(ui.ctx());
     }
