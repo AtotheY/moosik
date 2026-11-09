@@ -52,8 +52,10 @@ pub(super) struct RecordCase {
 
 impl RecordCase {
     pub fn from_collection(collection: &Collection) -> Self {
-        let mut case = Self::default();
-        case.songs = collection.sleeves.keys().cloned().collect();
+        let mut case = Self {
+            songs: collection.sleeves.keys().cloned().collect(),
+            ..Self::default()
+        };
         case.songs.sort_by_cached_key(|id| {
             let s = &collection.sleeves[id];
             (s.artist.to_lowercase(), s.title.to_lowercase(), id.clone())
