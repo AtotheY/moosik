@@ -28,6 +28,8 @@ pub(crate) struct Snapshot {
     pub members: Vec<Member>,
     pub queue: Vec<Entry>,
     pub you: u64,
+    #[serde(default)]
+    pub(super) can_pick_entry: bool,
     pub current_by: Option<Member>,
     pub(super) state: Option<Song>,
     pub(super) error: Option<String>,
@@ -55,14 +57,39 @@ struct Addition {
     song: Song,
 }
 
+// A host may make several playback choices between heartbeats. Keep the last choice and
+// the remaining entries below the high-water mark so retries describe the same edit.
+#[derive(Clone, Default, PartialEq)]
+struct Played {
+    through: u64,
+    keep_entries: Vec<u64>,
+    play_entry: Option<u64>,
+}
+
+impl Played {
+    fn consume(&mut self, entry: u64, remaining: &[Entry]) {
+        self.through = self.through.max(entry);
+        self.keep_entries = remaining
+            .iter()
+            .map(|e| e.entry)
+            .take_while(|&id| id <= self.through)
+            .collect();
+        self.play_entry = (entry != self.through).then_some(entry);
+    }
+
+    fn keep(&self, entry: u64) -> bool {
+        entry > self.through || self.keep_entries.contains(&entry)
+    }
+}
+
 #[derive(Default)]
 struct Commands {
     room: String,
     profile: SessionProfile,
     sequence: u64,
     pending: VecDeque<Addition>,
-    played: u64,
-    sent_played: u64,
+    played: Played,
+    sent_played: Played,
     sent_profile: SessionProfile,
 }
 
@@ -77,8 +104,8 @@ impl Outbox {
         if cmd.room != id {
             cmd.room = id.to_owned();
             cmd.pending.clear();
-            cmd.played = 0;
-            cmd.sent_played = 0;
+            cmd.played = Played::default();
+            cmd.sent_played = Played::default();
         }
     }
 
@@ -97,10 +124,10 @@ impl Outbox {
         true
     }
 
-    pub(super) fn played(&self, id: &str, entry: u64) {
+    pub(super) fn played(&self, id: &str, entry: u64, remaining: &[Entry]) {
         let mut cmd = self.0.lock().unwrap();
         if cmd.room == id {
-            cmd.played = entry;
+            cmd.played.consume(entry, remaining);
         }
     }
 
@@ -109,8 +136,9 @@ impl Outbox {
         !cmd.pending.is_empty() || cmd.played != cmd.sent_played || cmd.profile != cmd.sent_profile
     }
 
-    pub(super) fn last_played(&self) -> u64 {
-        self.0.lock().unwrap().played
+    pub(super) fn filter_played(&self, snapshot: &mut Snapshot) {
+        let cmd = self.0.lock().unwrap();
+        snapshot.queue.retain(|e| cmd.played.keep(e.entry));
     }
 
     pub(super) async fn sync(
@@ -118,18 +146,29 @@ impl Outbox {
         request: reqwest::RequestBuilder,
         host_state: Option<&Option<Song>>,
     ) -> anyhow::Result<Snapshot> {
-        let (body, seq, profile) = {
+        let (body, seq, profile, played) = {
             let cmd = self.0.lock().unwrap();
             let mut body = serde_json::to_value(&cmd.profile)?;
             if let Some(state) = host_state {
                 body["state"] = serde_json::to_value(state)?;
-                body["played"] = cmd.played.into();
+                body["played"] = cmd.played.through.into();
+                if !cmd.played.keep_entries.is_empty() {
+                    body["keep_entries"] = serde_json::to_value(&cmd.played.keep_entries)?;
+                }
+                if let Some(entry) = cmd.played.play_entry {
+                    body["play_entry"] = entry.into();
+                }
             }
             let add = cmd.pending.front();
             if let Some(add) = add {
                 body["add"] = serde_json::to_value(add)?;
             }
-            (body, add.map(|a| a.seq), cmd.profile.clone())
+            (
+                body,
+                add.map(|a| a.seq),
+                cmd.profile.clone(),
+                cmd.played.clone(),
+            )
         };
         let res = request
             .header("X-Moosik-Session", "1")
@@ -146,7 +185,7 @@ impl Outbox {
                 && snapshot.queue.iter().all(|e| e.song.valid())
         );
         let mut cmd = self.0.lock().unwrap();
-        cmd.sent_played = body["played"].as_u64().unwrap_or(0);
+        cmd.sent_played = played;
         cmd.sent_profile = profile;
         if let Some(seq) = seq {
             snapshot.added = snapshot.error.is_none();

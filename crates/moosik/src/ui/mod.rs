@@ -573,7 +573,7 @@ pub(crate) fn spec_rows<'d>(
         count,
         spec,
         |_| widgets::RowSlot::Trailing(0.0),
-        |_, _| {},
+        |_, _, _| {},
     )
 }
 
@@ -588,7 +588,7 @@ pub(crate) fn spec_rows_with_slot<'d>(
     count: usize,
     spec: impl Fn(usize) -> RowSpec<'d>,
     slot: impl Fn(usize) -> widgets::RowSlot,
-    mut paint_slot: impl FnMut(&mut egui::Ui, usize),
+    mut paint_slot: impl FnMut(&mut egui::Ui, &mut Images, usize),
 ) -> ListOutcome {
     let mut clicked = None;
     let mut action = None;
@@ -646,23 +646,6 @@ pub(crate) fn spec_rows_with_slot<'d>(
             },
             placement,
         );
-        if let Some(rect) = slot_rect {
-            let mut slot_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .id(ui.id().with(("row-slot", i)))
-                    .max_rect(rect)
-                    .layout(match placement {
-                        widgets::RowSlot::Trailing(_) => {
-                            egui::Layout::right_to_left(egui::Align::Center)
-                        }
-                        widgets::RowSlot::Subtitle(_) => {
-                            egui::Layout::left_to_right(egui::Align::Center)
-                        }
-                    }),
-            );
-            slot_ui.set_clip_rect(ui.clip_rect().intersect(rect));
-            paint_slot(&mut slot_ui, i);
-        }
         if hit.response.drag_started()
             && let Some(menu) = spec(i).menu
         {
@@ -737,6 +720,23 @@ pub(crate) fn spec_rows_with_slot<'d>(
                     );
                 }
             }
+        }
+        if let Some(rect) = slot_rect {
+            let mut slot_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id(ui.id().with(("row-slot", i)))
+                    .max_rect(rect)
+                    .layout(match placement {
+                        widgets::RowSlot::Trailing(_) => {
+                            egui::Layout::right_to_left(egui::Align::Center)
+                        }
+                        widgets::RowSlot::Subtitle(_) => {
+                            egui::Layout::left_to_right(egui::Align::Center)
+                        }
+                    }),
+            );
+            slot_ui.set_clip_rect(ui.clip_rect().intersect(rect));
+            paint_slot(&mut slot_ui, images, i);
         }
     });
     stats.rows(drawn.len(), count);

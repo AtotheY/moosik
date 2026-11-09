@@ -18,8 +18,12 @@ function publicMember({ id, name, avatar }) {
 
 export function syncRoom(room, token, host, body, now) {
   if (!body || typeof body !== 'object' || typeof body.name !== 'string' || body.name.length > 128
-    || (host ? !validState(body.state) : ('state' in body || 'played' in body))
+    || (host ? !validState(body.state) : ('state' in body || 'played' in body || 'keep_entries' in body || 'play_entry' in body))
     || (body.played !== undefined && (!Number.isSafeInteger(body.played) || body.played < 0))
+    || (body.keep_entries !== undefined && (!Array.isArray(body.keep_entries) || body.keep_entries.length > maxQueue
+      || !body.keep_entries.every(id => Number.isSafeInteger(id) && id > 0 && id <= body.played)))
+    || (body.play_entry !== undefined && (!Number.isSafeInteger(body.play_entry) || body.play_entry < 1
+      || !(body.play_entry <= body.played)))
     || (body.add !== undefined && (!body.add || !Number.isSafeInteger(body.add.seq)
       || body.add.seq < 1 || !body.add.song || !validState(body.add.song)))) return { status: 400 };
   if (!host && !room.session) return { status: 409 };
@@ -42,10 +46,13 @@ export function syncRoom(room, token, host, body, now) {
   if (host) {
     room.state = publicState(body.state);
     room.seen = now;
-    if (body.played > 0 && s.queue[0]?.entry <= body.played) {
-      const current = s.queue.find(item => item.entry === body.played);
-      s.current = current && { id: current.song.id, by: current.by };
-      s.queue = s.queue.filter(item => item.entry > body.played);
+    const current = body.played && s.queue.find(item => item.entry === (body.play_entry ?? body.played));
+    if (body.played > 0) {
+      const keep = new Set(body.keep_entries);
+      s.queue = s.queue.filter(item => item.entry > body.played || keep.has(item.entry));
+    }
+    if (current) {
+      s.current = { id: current.song.id, by: current.by };
     } else if (room.state?.id !== s.current?.id) {
       delete s.current;
     }
@@ -68,6 +75,6 @@ export function syncRoom(room, token, host, body, now) {
   const currentBy = room.state && room.state.id === s.current?.id ? s.current.by : null;
   return { status: 200, value: {
     state: playback(room, now), members, queue: s.queue, current_by: currentBy,
-    you: member.id, error: body.add ? member.error : undefined,
+    can_pick_entry: true, you: member.id, error: body.add ? member.error : undefined,
   } };
 }

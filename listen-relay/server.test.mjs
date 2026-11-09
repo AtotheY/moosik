@@ -74,6 +74,19 @@ test('session members share an attributed FIFO queue, while only the host contro
   assert.deepEqual(after.members, [{ id: 0, name: 'DJ' }]);
   assert.deepEqual(after.queue[0].by, view.queue[1].by);
   assert.deepEqual(await (await fetch(room)).json(), song);
+  // Play a later occurrence, keep the earlier one, then advance back to it. Retries
+  // retain the contributor credit even when both occurrences have the same video ID.
+  const pick = { name: 'DJ', state: song, played: 3, keep_entries: [2] };
+  assert.equal(after.can_pick_entry, true);
+  assert.equal((await sync(alice, { name: 'Alice', keep_entries: [2] })).status, 400);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const picked = await (await sync(host, pick)).json();
+    assert.deepEqual(picked.queue.map(e => e.entry), [2]);
+    assert.equal(picked.current_by.name, 'DJ');
+  }
+  const remaining = await (await sync(host, { name: 'DJ', state: song, played: 3, play_entry: 2 })).json();
+  assert.deepEqual(remaining.queue, []);
+  assert.deepEqual(remaining.current_by, view.queue[1].by);
   now += 46000;
   assert.equal((await sync(alice, first)).status, 404);
 });

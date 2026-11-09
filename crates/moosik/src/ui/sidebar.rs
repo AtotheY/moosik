@@ -87,14 +87,24 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             super::organizer::apply(app, action);
         }
         if route == Route::Queue
-            && let Some(tracks) = super::song_drag::target(
-                ui,
-                &app.palette,
-                response.rect,
-                super::song_drag::payload(ui.ctx()).is_some_and(|d| !d.queue),
-            )
+            && let Some(drag) = super::song_drag::payload(ui.ctx())
         {
-            app.row_action(super::RowAction::PageQueue(tracks));
+            let session_queue = app.following() && app.room_snapshot().is_some();
+            let accepts = if session_queue {
+                drag.session_eligible()
+            } else {
+                !drag.queue
+            };
+            if let Some(tracks) = super::song_drag::target(ui, &app.palette, response.rect, accepts)
+            {
+                if session_queue {
+                    for track in tracks {
+                        app.add_session_song(&track);
+                    }
+                } else {
+                    app.row_action(super::RowAction::PageQueue(tracks));
+                }
+            }
         }
         if response.clicked() {
             app.navigate(route);
@@ -462,15 +472,8 @@ fn rail_list(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 };
                 let accepts = !is_liked
                     && p.editable
-                    && super::song_drag::payload(ui.ctx()).is_some_and(|d| {
-                        if p.id.starts_with("private:") {
-                            true
-                        } else if p.source == crate::model::PlaylistSource::Local {
-                            d.tracks.iter().all(|t| t.local_path.is_some())
-                        } else {
-                            signed_in && d.tracks.iter().all(|t| t.local_path.is_none())
-                        }
-                    });
+                    && super::song_drag::payload(ui.ctx())
+                        .is_some_and(|d| d.accepts_playlist(&p.id, p.source, signed_in));
                 if let Some(tracks) = super::song_drag::target(ui, palette, response.rect, accepts)
                 {
                     dropped = Some((p.id.clone(), tracks));

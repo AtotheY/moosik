@@ -57,19 +57,8 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         suggestions(app, ui);
         if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
             let id = pl.id.clone();
-            let accepts = super::song_drag::payload(ui.ctx()).is_some_and(|d| {
-                d.playlist.as_deref() != Some(id.as_str())
-                    && (id.starts_with("private:")
-                        || if pl.source == crate::model::PlaylistSource::Local {
-                            d.tracks.iter().all(|t| t.local_path.is_some())
-                        } else {
-                            pl.source == crate::model::PlaylistSource::YouTube
-                                && app.signed_in()
-                                && d.tracks
-                                    .iter()
-                                    .all(|t| t.local_path.is_none() && !t.is_spotify())
-                        })
-            });
+            let accepts = super::song_drag::payload(ui.ctx())
+                .is_some_and(|d| d.accepts_playlist(&id, pl.source, app.signed_in()));
             if accepts {
                 let (rect, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 56.0),

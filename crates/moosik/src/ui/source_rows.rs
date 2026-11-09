@@ -268,7 +268,7 @@ pub(super) fn draw_with_options(
                     _ => widgets::RowSlot::Trailing(0.0),
                 }
             },
-            |ui, index| {
+            |ui, _, index| {
                 let group = &state.groups[index];
                 let entry = &group.variants[selected[index]];
                 let provider = entry_provider(entry);

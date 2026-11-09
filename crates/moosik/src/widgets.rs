@@ -3462,7 +3462,7 @@ fn row_menu_with_button(
                 choice = Some(RowAction::AddToQueue(t.clone()));
                 mui.close();
             }
-            if t.local_path.is_none()
+            if t.can_share_in_session()
                 && session_host.is_some()
                 && menu_item(mui, palette, Icon::ListPlus, "Add to session queue", None).clicked()
             {
