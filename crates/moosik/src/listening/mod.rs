@@ -506,6 +506,7 @@ impl Ledger {
                         for track in completed {
                             if let Some(sleeve) = collection.sleeves.get_mut(&track) {
                                 sleeve.completed += 1;
+                                collection.revision += 1;
                             }
                         }
                     }

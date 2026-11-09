@@ -5,6 +5,7 @@ use crate::{
     listening::{self, Export, Group, Query, Report},
     theme, widgets,
 };
+mod atlas;
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use egui::{Align2, Rect, RichText, Sense, pos2, vec2};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ enum Tab {
     Genres,
     History,
     Recap,
-    Passes,
+    Collection,
 }
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Period {
@@ -34,6 +35,9 @@ enum Period {
 }
 #[derive(Default)]
 pub struct View {
+    collection: super::keepsakes::Shelf,
+    atlas: atlas::View,
+    genre_list: bool,
     tab: Tab,
     period: Period,
     from: String,
@@ -140,7 +144,7 @@ const TABS: [(Tab, &str); 8] = [
     (Tab::Genres, "Genres"),
     (Tab::History, "History"),
     (Tab::Recap, "My recap"),
-    (Tab::Passes, "Artist passes"),
+    (Tab::Collection, "Collection"),
 ];
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
@@ -149,7 +153,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "listening-stats-v2").show(ui, |ui| {
         crate::ui::page_title(ui, &p, "Your listening");
         let mut refresh = false;
-        if app.listening_view.tab != Tab::Passes {
+        if app.listening_view.tab != Tab::Collection {
             ui.horizontal_wrapped(|ui| {
                 let period = PERIODS
                     .iter()
@@ -209,16 +213,19 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(GAP);
-        if app.listening_view.tab == Tab::Passes {
-            super::keepsakes::sheet(
-                ui,
-                &p,
-                app.listening.collection.as_ref(),
-                app.listening.error.as_deref().or(app
-                    .listening
-                    .collection_unavailable
-                    .then_some("Artist passes are unavailable for this listening history.")),
-            );
+        if app.listening_view.tab == Tab::Collection {
+            app.listening_view
+                .collection
+                .sheet(ui, &p, &app.listening, |ui, rect, url| {
+                    let tex = super::art_texture(
+                        &mut app.images,
+                        &app.backend,
+                        ui.ctx(),
+                        url,
+                        rect.width(),
+                    );
+                    widgets::paint_art(ui, &p, rect, tex, widgets::ArtShape::Square);
+                });
             return;
         }
         let query = match app.listening_view.query() {
@@ -269,12 +276,31 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         } else {
             match app.listening_view.tab {
-                Tab::Passes => unreachable!("lifetime collection rendered above"),
+                Tab::Collection => unreachable!("lifetime collection rendered above"),
                 Tab::Overview => overview(app, ui, &report),
                 Tab::Songs => songs(app, ui, &report),
                 Tab::Artists => ranking(app, ui, &report, Tab::Artists),
                 Tab::Albums => ranking(app, ui, &report, Tab::Albums),
-                Tab::Genres => ranking(app, ui, &report, Tab::Genres),
+                Tab::Genres => {
+                    ui.horizontal_wrapped(|ui| {
+                        for (list, label) in [(false, "Map"), (true, "List")] {
+                            if widgets::chip(ui, &p, label, app.listening_view.genre_list == list)
+                                .clicked()
+                            {
+                                app.listening_view.genre_list = list;
+                            }
+                        }
+                        if !app.listening_view.genre_list {
+                            app.listening_view.atlas.filter(ui, &p, &report);
+                        }
+                    });
+                    ui.add_space(12.);
+                    if app.listening_view.genre_list {
+                        ranking(app, ui, &report, Tab::Genres);
+                    } else {
+                        atlas::show(app, ui, &report);
+                    }
+                }
                 Tab::History => history(app, ui, &report),
                 Tab::Recap => recap(app, ui, &report),
             }
