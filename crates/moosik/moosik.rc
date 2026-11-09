@@ -1,4 +1,5 @@
 1 ICON "../../assets/icons/app/moosik.ico"
+1 24 "@MANIFEST@"
 
 // Filled in by build.rs from Cargo's version.
 1 VERSIONINFO

@@ -3519,6 +3519,14 @@ impl App {
         // it off `now` rather than reaching for the player directly.
         self.now.paused = state.paused;
         self.release_paused_spotify(ctx, state);
+        if let Some(mpv) = self
+            .player
+            .as_mut()
+            .and_then(|player| player.take_idle_mpv(ctx))
+        {
+            self.video = None;
+            self.backend.runtime().spawn_blocking(move || drop(mpv));
+        }
         // Restore the saved position once its track is loaded, and keep `playback.json` fresh.
         self.poll_playback(ctx, &state);
         if self.playback_started {

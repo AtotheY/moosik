@@ -17,6 +17,7 @@ let volumeChanged = false;
 let pendingSeek = null;
 let seekChanged = false;
 let waitingForSeek = false;
+let mediaSource = null;
 let sourceUrl = null;
 let mediaLoaded = false;
 let mediaComplete = false;
@@ -24,6 +25,7 @@ let declaredDuration = 0;
 let progressTimer = null;
 let sendingState = false;
 let queuedState = null;
+let terminalStateQueued = false;
 let firstPlayedAt = null;
 let audioStartedAt = null;
 let audioEndedAt = null;
@@ -62,6 +64,8 @@ function snapshot() {
 }
 
 function publish() {
+  if (terminalStateQueued) return;
+  terminalStateQueued = stopped || errorCode !== null;
   queuedState = snapshot();
   if (queuedState.playing) {
     if (progressTimer === null) {
@@ -108,6 +112,7 @@ function fail(code) {
   requests.abort();
   audio.pause();
   publish();
+  releaseMedia();
 }
 
 async function request(path, options = {}) {
@@ -174,12 +179,27 @@ function stop() {
   buffering = false;
   requests.abort();
   audio.pause();
+  publish();
+  releaseMedia();
+}
+
+function releaseMedia() {
+  if (mediaSource && mediaSource.readyState !== 'closed') {
+    for (const buffer of Array.from(mediaSource.sourceBuffers)) {
+      try { mediaSource.removeSourceBuffer(buffer); } catch (_) {}
+    }
+  }
+  mediaSource = null;
   audio.removeAttribute('src');
   audio.load();
-  if (sourceUrl) URL.revokeObjectURL(sourceUrl);
+  if (sourceUrl) {
+    URL.revokeObjectURL(sourceUrl);
+    sourceUrl = null;
+  }
   for (const session of sessions) void session.close().catch(() => {});
   sessions.clear();
-  publish();
+  initDataSeen.clear();
+  if (audio.mediaKeys) void audio.setMediaKeys(null).catch(() => {});
 }
 
 async function commands() {
@@ -272,6 +292,7 @@ async function begin() {
       return;
     }
     const keys = await access.createMediaKeys();
+    requests.signal.throwIfAborted();
     await audio.setMediaKeys(keys);
     const [meta, certificate] = await configuration;
     if (stopped) return;
@@ -293,7 +314,7 @@ async function begin() {
           for (const status of session.keyStatuses.values()) {
             if (['expired', 'released', 'output-restricted', 'internal-error'].includes(status)) fail(10);
           }
-        });
+        }, {signal: requests.signal});
         session.addEventListener('message', async event => {
           if (stopped || errorCode !== null) return;
           try {
@@ -302,35 +323,53 @@ async function begin() {
           } catch (_) {
             if (!stopped) fail(10);
           }
-        });
+        }, {signal: requests.signal});
         await session.generateRequest(event.initDataType, event.initData);
       } catch (_) {
         if (!stopped) fail(10);
       }
-    });
+    }, {signal: requests.signal});
     if (!await keys.setServerCertificate(certificate)) throw new Error();
-    const reader = (await media).body.getReader();
-    if (stopped || errorCode !== null) return;
+    const response = await media;
+    requests.signal.throwIfAborted();
     const source = new MediaSource();
+    mediaSource = source;
     sourceUrl = URL.createObjectURL(source);
     const opened = new Promise((resolve, reject) => {
+      const cancel = () => reject(requests.signal.reason);
+      requests.signal.addEventListener('abort', cancel, {once: true});
       source.addEventListener('sourceopen', () => {
+        requests.signal.removeEventListener('abort', cancel);
         try {
           resolve(source.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"'));
         } catch (_) { reject(new Error()); }
-      }, {once: true});
+      }, {once: true, signal: requests.signal});
     });
     audio.src = sourceUrl;
     const buffer = await opened;
-    while (!stopped && errorCode === null) {
-      const {done, value} = await reader.read();
-      if (done || stopped || errorCode !== null) break;
-      await new Promise((resolve, reject) => {
-        buffer.onupdateend = resolve;
-        buffer.onerror = reject;
-        buffer.appendBuffer(value);
-      });
-      startWhenBuffered();
+    requests.signal.throwIfAborted();
+    const reader = response.body.getReader();
+    let abortAppend = null;
+    const cancelAppend = () => abortAppend?.(requests.signal.reason);
+    requests.signal.addEventListener('abort', cancelAppend, {once: true});
+    try {
+      while (!stopped && errorCode === null) {
+        const {done, value} = await reader.read();
+        if (done || stopped || errorCode !== null) break;
+        await new Promise((resolve, reject) => {
+          abortAppend = reject;
+          buffer.onupdateend = resolve;
+          buffer.onerror = reject;
+          buffer.appendBuffer(value);
+        });
+        abortAppend = null;
+        startWhenBuffered();
+      }
+    } finally {
+      requests.signal.removeEventListener('abort', cancelAppend);
+      buffer.onupdateend = null;
+      buffer.onerror = null;
+      reader.releaseLock();
     }
     if (stopped || errorCode !== null) return;
     mediaComplete = true;
@@ -347,4 +386,5 @@ void commands();
 void begin();
 publish();
 window.addEventListener('beforeunload', stop);
+window.addEventListener('pagehide', stop);
 </script>

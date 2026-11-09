@@ -15,7 +15,6 @@ pub(crate) struct State {
     revision: Option<(u64, bool)>,
     groups: Vec<Group>,
     labels: Vec<String>,
-    tracks: Vec<crate::model::Track>,
 }
 
 impl State {
@@ -77,14 +76,23 @@ impl State {
     }
 
     pub(crate) fn set_tracks(&mut self, tracks: &[crate::model::Track], enabled: bool) {
-        if self.tracks == tracks
+        if self
+            .revision
+            .is_some_and(|(_, previous)| previous == enabled)
             && self
-                .revision
-                .is_some_and(|(_, previous)| previous == enabled)
+                .groups
+                .iter()
+                .map(|group| group.indices.len())
+                .sum::<usize>()
+                == tracks.len()
+            && self.groups.iter().all(|group| {
+                group.indices.iter().zip(&group.variants).all(|(&index, entry)| {
+                    matches!(entry, Entry::Song(track) if tracks.get(index) == Some(track))
+                })
+            })
         {
             return;
         }
-        self.tracks = tracks.to_vec();
         let entries: Vec<_> = tracks.iter().cloned().map(Entry::Song).collect();
         let revision = self
             .revision
@@ -431,8 +439,11 @@ mod tests {
         state.set_tracks(&tracks, true);
         assert_eq!(state.groups.len(), 2);
         let revision = state.revision;
+        let first = state.groups[0].key.clone();
+        state.sort_playlist(PlaylistSort::Reverse, Provider::YouTubeMusic);
         state.set_tracks(&tracks, true);
         assert_eq!(state.revision, revision);
+        assert_eq!(state.groups[1].key, first);
         let mut changed = tracks.clone();
         changed[0].title = "Different edition".to_owned();
         state.set_tracks(&changed, true);

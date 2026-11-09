@@ -9,11 +9,14 @@
 //! queue without waiting, for one thing only: its own error messages, which go to the log.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use libmpv2::Mpv;
 
 use crate::model::Track;
+
+const MPV_REUSE_GRACE: Duration = Duration::from_secs(5);
 
 /// A snapshot of what mpv is doing, read once per frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -34,9 +37,9 @@ pub enum PlaybackHandle {
 pub struct Player {
     /// Built on the first `handle()`, not at startup. An idle mpv context still maps libav*
     /// and runs its own playloop/demuxer/ao threads (~10–15 MB); a session that only browses
-    /// never needs any of it. `None` also means "nothing has ever been loaded", which is why
-    /// `state()` reports idle in that case — the same as a fresh eager context did.
+    /// never needs any of it. With no context, `state()` reports idle.
     mpv: Option<Arc<Mpv>>,
+    mpv_idle_since: Option<Instant>,
     active: Option<PlaybackHandle>,
     reported_error: Option<String>,
     volume: f64,
@@ -70,6 +73,7 @@ impl Player {
     pub fn new() -> Self {
         Self {
             mpv: None,
+            mpv_idle_since: None,
             active: None,
             reported_error: None,
             volume: 70.0,
@@ -228,14 +232,36 @@ impl Player {
         self.reported_error = None;
         let handle = if spotify {
             self.init_error = None;
+            if self.mpv.is_some() {
+                self.mpv_idle_since.get_or_insert_with(Instant::now);
+            }
             PlaybackHandle::Spotify(crate::spotify_drm::Handle::new(ctx))
         } else {
+            self.mpv_idle_since = None;
             crate::spotify_drm::retire_idle_renderer();
             PlaybackHandle::Mpv(self.handle()?)
         };
         self.volume = volume.clamp(0.0, 100.0);
         self.active = Some(handle.clone());
         Some(handle)
+    }
+
+    pub(crate) fn take_idle_mpv(&mut self, ctx: &egui::Context) -> Option<Arc<Mpv>> {
+        let remaining = MPV_REUSE_GRACE.saturating_sub(self.mpv_idle_since?.elapsed());
+        if !remaining.is_zero() {
+            ctx.request_repaint_after(remaining);
+            return None;
+        }
+        if self
+            .mpv
+            .as_ref()
+            .is_some_and(|mpv| Arc::strong_count(mpv) > 1)
+        {
+            ctx.request_repaint_after(Duration::from_secs(1));
+            return None;
+        }
+        self.mpv_idle_since = None;
+        self.mpv.take()
     }
 
     pub fn take_error(&mut self) -> Option<String> {
@@ -605,7 +631,10 @@ pub struct NowPlaying {
 
 #[cfg(test)]
 mod tests {
-    use super::{Player, gain_db, load, load_video, mpv_volume, redact, volume_gain};
+    use super::{
+        Arc, Instant, MPV_REUSE_GRACE, Player, gain_db, load, load_video, mpv_volume, redact,
+        volume_gain,
+    };
 
     #[test]
     fn volume_gain_preserves_silence_and_full_volume() {
@@ -655,6 +684,37 @@ mod tests {
         let silent = player.listening_sample();
         assert_eq!(silent.volume, 0.0);
         assert!(silent.muted);
+    }
+
+    #[test]
+    fn spotify_retires_mpv_after_the_reuse_window_and_pending_jobs() {
+        let mut player = Player::new();
+        let ctx = egui::Context::default();
+        let first = Arc::downgrade(&player.handle().unwrap());
+
+        player.playback_handle(true, ctx.clone(), 70.0).unwrap();
+        assert!(player.take_idle_mpv(&ctx).is_none());
+        player.playback_handle(false, ctx.clone(), 70.0).unwrap();
+        assert!(Arc::ptr_eq(
+            player.mpv.as_ref().unwrap(),
+            &first.upgrade().unwrap()
+        ));
+
+        player.playback_handle(true, ctx.clone(), 70.0).unwrap();
+        let due = Instant::now() - MPV_REUSE_GRACE;
+        player.mpv_idle_since = Some(due);
+        player.playback_handle(true, ctx.clone(), 70.0).unwrap();
+        assert_eq!(player.mpv_idle_since, Some(due));
+
+        let pending = first.upgrade().unwrap();
+        assert!(player.take_idle_mpv(&ctx).is_none());
+        drop(pending);
+
+        let retired = player.take_idle_mpv(&ctx).unwrap();
+        assert!(Arc::ptr_eq(&retired, &first.upgrade().unwrap()));
+        assert!(player.take_idle_mpv(&ctx).is_none());
+        player.playback_handle(false, ctx, 70.0).unwrap();
+        assert!(!Arc::ptr_eq(player.mpv.as_ref().unwrap(), &retired));
     }
 
     #[test]

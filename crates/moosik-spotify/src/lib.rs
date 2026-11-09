@@ -1,9 +1,11 @@
+mod artwork;
 mod browse;
 mod model;
 mod transport;
 mod verification;
 mod web_auth;
 
+pub use artwork::sized_artwork_url;
 pub use browse::{
     Album, AlbumSummary, Artist, ArtistCredit, ArtistSummary, CatalogItem, CatalogTrack,
     LibrarySection, Page, Playlist, PlaylistSummary, SearchKind, Section, library_start_cursor,

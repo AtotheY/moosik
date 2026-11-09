@@ -754,6 +754,15 @@ async fn fetch_bytes(http: &reqwest::Client, url: &str) -> anyhow::Result<bytes:
         .await?)
 }
 
+async fn fetch_cover(
+    http: &reqwest::Client,
+    url: &str,
+    px: u32,
+) -> anyhow::Result<(egui::ColorImage, [u8; 3])> {
+    let bytes = fetch_bytes(http, url).await?;
+    images::decode(&bytes, px)
+}
+
 /// LRCLIB's synced lyrics for a track, if it has them. No auth, one GET. `None` on any miss —
 /// the caller falls back to InnerTube's plain text.
 async fn lrclib(http: &reqwest::Client, track: &Track) -> Option<crate::model::Lyrics> {
@@ -3793,22 +3802,25 @@ impl Backend {
     pub fn fetch_image(&self, key: Arc<str>, url: String, px: u32, wide: bool) {
         let (tx, ctx, http) = (self.tx.clone(), self.ctx.clone(), self.http.clone());
         self.rt.spawn(async move {
-            let event = match fetch_bytes(&http, &url).await {
-                Ok(bytes) => match images::decode(&bytes, px) {
-                    Ok((image, dominant)) => Event::ImageReady(Box::new(images::Loaded {
-                        url: key,
-                        px,
-                        wide,
-                        image,
-                        dominant,
-                    })),
-                    Err(e) => {
-                        debug!(%url, error = %e, "cover decode failed");
-                        Event::ImageFailed(key, px, wide)
-                    }
-                },
+            let alternate = moosik_spotify::sized_artwork_url(&key, px);
+            let loaded = if let Some(alternate) = alternate {
+                match fetch_cover(&http, &alternate, px).await {
+                    Ok(cover) => Ok(cover),
+                    Err(_) => fetch_cover(&http, &url, px).await,
+                }
+            } else {
+                fetch_cover(&http, &url, px).await
+            };
+            let event = match loaded {
+                Ok((image, dominant)) => Event::ImageReady(Box::new(images::Loaded {
+                    url: key,
+                    px,
+                    wide,
+                    image,
+                    dominant,
+                })),
                 Err(e) => {
-                    debug!(%url, error = %e, "cover fetch failed");
+                    debug!(%url, error = %e, "cover load failed");
                     Event::ImageFailed(key, px, wide)
                 }
             };

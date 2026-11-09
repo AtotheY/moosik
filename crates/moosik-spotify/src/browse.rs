@@ -8,7 +8,7 @@ use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Error, Result, TrackMetadata, Transport};
+use crate::{Error, Result, TrackMetadata, Transport, artwork::image};
 
 const PAGE_SIZE: u64 = 50;
 const PLAYLIST_HASH: &str = "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf";
@@ -546,18 +546,6 @@ fn saved(value: &Value) -> bool {
         .as_bool()
         .or_else(|| value["isSaved"].as_bool())
         .unwrap_or(false)
-}
-
-fn image(value: &Value) -> Option<String> {
-    array(value)
-        .iter()
-        .filter_map(|item| {
-            let url = url::Url::parse(item["url"].as_str()?).ok()?;
-            (url.scheme() == "https" && url.username().is_empty() && url.password().is_none())
-                .then(|| (item["width"].as_u64().unwrap_or(0), url.to_string()))
-        })
-        .max_by_key(|(width, _)| *width)
-        .map(|(_, url)| url)
 }
 
 fn credits(value: &Value) -> Vec<ArtistCredit> {
