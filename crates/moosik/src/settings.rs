@@ -17,7 +17,7 @@ pub const YOUTUBE_CACHE_MAX_MIB: u64 = 128;
 pub const SPOTIFY_CACHE_MIN_MIB: u64 = 1;
 pub const SPOTIFY_CACHE_MAX_MIB: u64 = 1_048_576;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HomeSource {
     #[default]
@@ -360,6 +360,8 @@ pub struct Settings {
     /// The order of Home's sections, as [`crate::model::HomeSection::key`]s. Read through
     /// [`crate::model::normalise_order`], which makes any saved list complete.
     pub home_order: Vec<String>,
+    /// Exact shelf titles ordered by the listener, separately for each provider.
+    pub home_shelf_orders: crate::home_feed::ShelfOrders,
     pub home_source: HomeSource,
     pub home_primary_provider: Option<crate::model::Provider>,
     /// Spend more of Home's load following the feed until the sections ranked highest have
@@ -431,6 +433,7 @@ impl Default for Settings {
             queue_click_keeps_order: false,
             fullscreen_lyrics: true,
             home_order: crate::model::default_order_keys(),
+            home_shelf_orders: Default::default(),
             home_source: HomeSource::Combined,
             home_primary_provider: None,
             home_strict_order: false,

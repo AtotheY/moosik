@@ -545,15 +545,17 @@ async fn measure_home(api: &Api, runs: usize) {
             Err(e) => println!("run {run}: ordinary load failed: {e:#}"),
         }
         for (name, saved) in &orders {
-            let fetch = HomeFetch::strict(&normalise_order(saved));
+            let fetch = HomeFetch::strict(&normalise_order(saved), &[]);
             let HomeFetch::Strict { wanted, .. } = &fetch else {
                 continue;
             };
             let started = Instant::now();
             match api.home(None, &fetch).await {
                 Ok(feed) => {
-                    let seen: Vec<_> = feed.shelves.iter().map(|s| s.home_section()).collect();
-                    let missing: Vec<_> = wanted.iter().filter(|w| !seen.contains(w)).collect();
+                    let missing: Vec<_> = wanted
+                        .iter()
+                        .filter(|w| !w.present(&feed.shelves))
+                        .collect();
                     println!(
                         "run {run}: strict, {name:<24} {:>5} ms, {:>2} shelves, more after: {}, missing {missing:?}",
                         started.elapsed().as_millis(),

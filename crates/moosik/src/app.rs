@@ -2784,6 +2784,7 @@ impl App {
             crate::spotify_drm::set_cache_limit_mb(self.settings.spotify_cache_limit_mb);
         }
         if self.settings.home_source != before.home_source
+            || (!before.home_shelf_orders.is_empty() && self.settings.home_shelf_orders.is_empty())
             || (self.settings.home_strict_order != before.home_strict_order
                 && self.home_filter.is_none())
         {
@@ -2792,6 +2793,7 @@ impl App {
             self.scroll_to_top = true;
             self.load_home();
         } else if (self.settings.home_order != before.home_order
+            || self.settings.home_shelf_orders != before.home_shelf_orders
             || self.settings.home_primary_provider != before.home_primary_provider)
             && self.home_filter.is_none()
         {
@@ -4377,9 +4379,14 @@ impl App {
     /// ordinary few pages.
     fn home_fetch(&self) -> crate::model::HomeFetch {
         if self.settings.home_strict_order && self.home_filter.is_none() {
-            crate::model::HomeFetch::strict(&crate::model::normalise_order(
-                &self.settings.home_order,
-            ))
+            crate::model::HomeFetch::strict(
+                &crate::model::normalise_order(&self.settings.home_order),
+                self.settings
+                    .home_shelf_orders
+                    .get(&crate::settings::HomeSource::YouTubeMusic)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            )
         } else {
             crate::model::HomeFetch::Quick
         }
@@ -7999,6 +8006,7 @@ impl App {
             crate::home_feed::arrange(
                 shelves,
                 &crate::model::normalise_order(&self.settings.home_order),
+                &self.settings.home_shelf_orders,
                 self.effective_home_source() == crate::settings::HomeSource::Combined,
                 self.settings.home_primary_provider,
             );

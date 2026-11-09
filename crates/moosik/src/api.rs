@@ -1216,8 +1216,7 @@ impl Api {
             if token.is_none() {
                 break model::HomeStop::FeedEnded;
             }
-            let seen: Vec<_> = shelves.iter().map(model::Shelf::home_section).collect();
-            if let Some(why) = model::home_fetch_stop(fetch, pages, &seen, started.elapsed()) {
+            if let Some(why) = model::home_fetch_stop(fetch, pages, &shelves, started.elapsed()) {
                 break why;
             }
             let next = token.clone().unwrap_or_default();
@@ -1252,8 +1251,7 @@ impl Api {
             shelves.extend(more);
         };
         if let model::HomeFetch::Strict { wanted, .. } = fetch {
-            let seen: Vec<_> = shelves.iter().map(model::Shelf::home_section).collect();
-            let missing: Vec<_> = wanted.iter().filter(|w| !seen.contains(w)).collect();
+            let missing: Vec<_> = wanted.iter().filter(|w| !w.present(&shelves)).collect();
             tracing::info!(
                 pages,
                 shelves = shelves.len(),
