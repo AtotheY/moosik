@@ -4,9 +4,10 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-usage() { echo "Usage: scripts/ui-check queue | --list | --help"; }
+usage() { echo "Usage: scripts/ui-check queue | app <command> | --list | --help"; }
 case "${1:-}" in
-    --list) echo queue; exit 0 ;;
+    --list) printf '%s\n' queue app; exit 0 ;;
+    app) shift; exec ./scripts/ui-session "$@" ;;
     -h|--help) usage; exit 0 ;;
     queue) test_name=ui::upnext::ui_check::queue ;;
     *) usage >&2; exit 2 ;;

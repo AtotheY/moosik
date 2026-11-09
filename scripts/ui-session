@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Control a full Moosik window on a private Linux desktop."""
+
+import argparse
+import fcntl
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent / "ui-desktop"
+PROJECT = TOOLS.parents[2] if (TOOLS.parents[2] / "toolchain").is_dir() else TOOLS.parents[1] / "target"
+STATE = Path(os.environ.get("MOOSIK_UI_VM_HOME", PROJECT / "toolchain/vm")).resolve()
+NAME = "moosik-test"
+LIMA = shutil.which("limactl") or str(PROJECT / "toolchain/lima/bin/limactl")
+SSH = ["ssh", "-T", "-F", str(STATE / NAME / "ssh.config"), f"lima-{NAME}"]
+
+
+def guest(*args, **options):
+    return subprocess.run([*SSH, shlex.join([str(arg) for arg in args])], check=True, **options)
+
+
+def lima(*args, **options):
+    return subprocess.run(
+        [LIMA, "--tty=false", *args], env={**os.environ, "LIMA_HOME": str(STATE)}, check=True, **options
+    )
+
+
+@contextmanager
+def vm_lock():
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / ".moosik-boot.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def start_vm():
+    if not Path(LIMA).is_file():
+        sys.exit("Install Lima 2.x (brew install lima), then run this command again.")
+    if (STATE / NAME / "lima.yaml").exists():
+        lima("start", NAME, stdout=sys.stderr)
+    else:
+        lima("start", "--name", NAME, str(TOOLS / "vm.yaml"), stdout=sys.stderr)
+    guest("sh", "-ec", "command -v Xvfb >/dev/null && pkg-config --exists mpv webkit2gtk-4.1")
+
+
+def ship_tools(session):
+    with tempfile.TemporaryFile() as bundle:
+        with tarfile.open(fileobj=bundle, mode="w") as tar:
+            for name in ("build.sh", "session.py", "control.py"):
+                tar.add(TOOLS / name, arcname=name)
+        bundle.seek(0)
+        guest("tar", "-xf", "-", "-C", session, stdin=bundle)
+
+
+def build(checkout, session):
+    # Include uncommitted build inputs. Never traverse a worktree's .git link, target or profiles.
+    files = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            checkout,
+            "ls-files",
+            "-co",
+            "--exclude-standard",
+            "-z",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+            ".cargo/config*",
+            "rust-toolchain*",
+            "crates",
+            "assets",
+            "packaging",
+            "release-notes",
+        ]
+    )
+    with tempfile.TemporaryFile() as bundle:
+        with tarfile.open(fileobj=bundle, mode="w") as tar:
+            for item in files.split(b"\0"):
+                name = os.fsdecode(item)
+                path = checkout / name
+                if name and (path.is_file() or path.is_symlink()):
+                    tar.add(path, arcname=name, recursive=False)
+        bundle.seek(0)
+        guest("bash", f"{session}/build.sh", session, stdin=bundle, stdout=sys.stderr)
+
+
+def start(args):
+    checkout = args.checkout.resolve()
+    if not (checkout / "crates/moosik/Cargo.toml").is_file():
+        sys.exit("Pass --checkout with the path to the Moosik source tree you are testing.")
+    token = uuid.uuid4().hex[:12]
+    session = "/tmp/moosik-ui-" + token
+    with vm_lock():
+        start_vm()
+        guest("mkdir", "-m", "700", session)
+    try:
+        ship_tools(session)
+        build(checkout, session)
+        guest(
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--collect",
+            "--unit",
+            "moosik-ui-" + token,
+            "--property",
+            "StandardOutput=append:" + session + "/app.log",
+            "--property",
+            "StandardError=append:" + session + "/app.log",
+            "dbus-run-session",
+            "--",
+            "xvfb-run",
+            "-a",
+            "-s",
+            "-screen 0 1920x1200x24 -nolisten tcp",
+            "python3",
+            session + "/session.py",
+            args.fixture,
+            "--page",
+            args.page,
+        )
+        guest("timeout", "45", "python3", session + "/control.py", "ready")
+    except (subprocess.CalledProcessError, KeyboardInterrupt):
+        subprocess.run(
+            [
+                *SSH,
+                f"tail -40 {session}/app.log 2>/dev/null; systemctl --user stop moosik-ui-{token} 2>/dev/null; rm -rf {session}",
+            ],
+            stdout=sys.stderr,
+            check=False,
+        )
+        raise
+    print(token)
+
+
+def token(value):
+    if not re.fullmatch(r"[0-9a-f]{12}", value):
+        raise argparse.ArgumentTypeError("expected the session ID printed by start")
+    return value
+
+
+def positive(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected a positive number")
+    return number
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    boot = sub.add_parser("start", help="build a checkout and launch it on its own X display")
+    boot.add_argument("--checkout", type=Path, default=Path.cwd())
+    boot.add_argument(
+        "--page", default="home", help="any Moosik route, e.g. settings or playlist:local:studio"
+    )
+    boot.add_argument("--fixture", choices=["demo", "empty"], default="demo")
+    sub.add_parser("list", help="list session IDs in the test VM")
+    sub.add_parser("poweroff", help="stop the test VM when it has no active sessions")
+    for name in (
+        "shot",
+        "size",
+        "click",
+        "right-click",
+        "move",
+        "drag",
+        "scroll",
+        "key",
+        "type",
+        "resize",
+        "read",
+        "click-text",
+        "media",
+        "log",
+        "stop",
+    ):
+        cmd = sub.add_parser(name)
+        cmd.add_argument("session", type=token)
+        if name in ("click", "right-click", "move", "drag", "scroll"):
+            cmd.add_argument("x", type=int)
+            cmd.add_argument("y", type=int)
+        if name == "drag":
+            cmd.add_argument("to_x", type=int)
+            cmd.add_argument("to_y", type=int)
+        if name == "scroll":
+            cmd.add_argument("direction", choices=["up", "down"])
+            cmd.add_argument("count", type=positive, nargs="?", default=3)
+        if name == "key":
+            cmd.add_argument("keys", nargs="+", help="X key names, e.g. ctrl+a Return")
+        if name in ("type", "click-text"):
+            cmd.add_argument("text")
+        if name == "resize":
+            cmd.add_argument("width", type=positive)
+            cmd.add_argument("height", type=positive)
+        if name == "shot":
+            cmd.add_argument("output", type=Path)
+    args = parser.parse_args()
+    if args.command == "start":
+        start(args)
+        return
+    if args.command in ("list", "poweroff"):
+        with vm_lock():
+            if not (STATE / NAME / "ha.pid").exists():
+                return
+            result = guest(
+                "find",
+                "/tmp",
+                "-maxdepth",
+                "1",
+                "-user",
+                str(os.getuid()),
+                "-type",
+                "d",
+                "-name",
+                "moosik-ui-*",
+                "-printf",
+                "%f\n",
+                capture_output=True,
+            )
+            sessions = sorted(
+                s[10:]
+                for s in result.stdout.decode().splitlines()
+                if re.fullmatch("moosik-ui-[0-9a-f]{12}", s)
+            )
+            if args.command == "list":
+                for session in sessions:
+                    print(session)
+            elif sessions:
+                sys.exit("Stop these UI sessions before powering off the VM: " + " ".join(sessions))
+            else:
+                lima("stop", NAME)
+        return
+    unit = "moosik-ui-" + args.session
+    session = "/tmp/" + unit
+    if args.command == "stop":
+        guest(
+            "bash",
+            "-c",
+            'set -eu; if systemctl --user is-active --quiet "$1"; then systemctl --user stop "$1"; fi; rm -rf -- "$2"',
+            "_",
+            unit,
+            session,
+        )
+    elif args.command == "log":
+        guest("tail", "-n", "100", session + "/app.log")
+    else:
+        control = ("python3", session + "/control.py", args.command)
+        if args.command == "shot":
+            png = guest(*control, capture_output=True).stdout
+            if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                sys.exit("The virtual display did not return a PNG.")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(png)
+            print(args.output.resolve())
+        else:
+            operands = [v for k, v in vars(args).items() if k not in ("command", "session")]
+            if args.command == "key":
+                operands = args.keys
+            guest(*control, *operands)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr.decode(errors="replace"), file=sys.stderr)
+        sys.exit(error.returncode or 1)

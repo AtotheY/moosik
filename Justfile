@@ -34,9 +34,10 @@ release args="":
 stats args="":
     cargo run -p moosik --bin moosik -- --stats {{args}}
 
-# Run an offscreen UI scenario and save screenshots.
-ui-check scenario="queue":
-    ./scripts/ui-check {{quote(scenario)}}
+# Check a widget or drive the full app on the private desktop.
+[positional-arguments]
+ui-check *args="queue":
+    ./scripts/ui-check "$@"
 
 # Unit tests.
 test:
