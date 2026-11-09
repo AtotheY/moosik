@@ -1,5 +1,6 @@
 //! Private, append-only listening telemetry. No credentials or stream URLs enter this module.
 //! The UI samples mpv; a single worker owns SQLite and exports. Nothing is uploaded.
+pub mod collection;
 pub mod report;
 mod store;
 use crate::model::Track;
@@ -173,6 +174,9 @@ enum Command {
     Shutdown,
 }
 enum Reply {
+    Collection(collection::Collection),
+    CollectionUnavailable,
+    Credits(Vec<collection::Hearing>, Vec<String>),
     PeakWeekMinutes(u32),
     Report(Box<Report>),
     Error(String),
@@ -255,6 +259,8 @@ pub struct Ledger {
     last_flush: Instant,
     last_sample: Instant,
     nonce: u64,
+    pub collection: Option<collection::Collection>,
+    pub collection_unavailable: bool,
     pub peak_week_minutes: Option<u32>,
     pub report: Option<std::sync::Arc<Report>>,
     pub error: Option<String>,
@@ -291,6 +297,8 @@ impl Ledger {
             last_flush: Instant::now(),
             last_sample: Instant::now(),
             nonce: 0,
+            collection: None,
+            collection_unavailable: false,
             peak_week_minutes: None,
             report: None,
             error,
@@ -488,6 +496,20 @@ impl Ledger {
     pub fn poll(&mut self) {
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
+                Reply::CollectionUnavailable => self.collection_unavailable = true,
+                Reply::Collection(collection) => self.collection = Some(collection),
+                Reply::Credits(hearings, completed) => {
+                    if let Some(collection) = &mut self.collection {
+                        for hearing in hearings {
+                            collection.hear(hearing);
+                        }
+                        for track in completed {
+                            if let Some(sleeve) = collection.sleeves.get_mut(&track) {
+                                sleeve.completed += 1;
+                            }
+                        }
+                    }
+                }
                 Reply::PeakWeekMinutes(peak) => self.peak_week_minutes = Some(peak),
                 Reply::Report(report) => {
                     self.report = Some(std::sync::Arc::from(report));

@@ -103,9 +103,9 @@ fn peak_week_minutes(db: &Connection) -> Result<u32> {
         |row| row.get(0),
     )?)
 }
-fn record(db: &mut Connection, records: Vec<Record>) -> Result<()> {
+fn record(db: &mut Connection, records: impl AsRef<[Record]>) -> Result<()> {
     let tx = db.transaction()?;
-    for record in records {
+    for record in records.as_ref() {
         match record {
             Record::Start {
                 id,
@@ -114,10 +114,10 @@ fn record(db: &mut Connection, records: Vec<Record>) -> Result<()> {
                 context,
             } => {
                 tx.execute("INSERT INTO sessions(id,track_id,title,metadata,context,source,started_ms,last_ms,duration) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,?8)",
-                    params![id,track.id,track.title,serde_json::to_string(&track)?,serde_json::to_string(&context)?,context.source,at,track.duration])?;
+                    params![id,track.id,track.title,serde_json::to_string(track)?,serde_json::to_string(context)?,context.source,at,track.duration])?;
                 tx.execute(
                     "INSERT INTO events(session_id,at_ms,kind,payload) VALUES (?1,?2,'start',?3)",
-                    params![id, at, serde_json::to_string(&context)?],
+                    params![id, at, serde_json::to_string(context)?],
                 )?;
             }
             Record::Event {
@@ -128,7 +128,7 @@ fn record(db: &mut Connection, records: Vec<Record>) -> Result<()> {
             } => {
                 tx.execute(
                     "INSERT INTO events(session_id,at_ms,kind,payload) VALUES (?1,?2,?3,?4)",
-                    params![id, at, kind, serde_json::to_string(&payload)?],
+                    params![id, at, kind, serde_json::to_string(payload)?],
                 )?;
             }
             Record::End { id, at, reason } => {
@@ -187,13 +187,32 @@ pub(super) fn worker(
         .context("Another Moosik instance is already recording. Close the extra instance.")?;
     let mut db = open(&path)?;
     let mut peak = peak_week_minutes(&db)?;
+    let collection_ready = match collection::Collection::load(&db) {
+        Ok(collection) => {
+            let _ = replies.send(Reply::Collection(collection));
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not load listening keepsakes");
+            let _ = replies.send(Reply::CollectionUnavailable);
+            false
+        }
+    };
+    // The player polls until this startup reply, including when playback is paused.
     let _ = replies.send(Reply::PeakWeekMinutes(peak));
     while let Ok(command) = commands.recv() {
         let result:Result<()> = match command {
             Command::Records(records) => {
                 // Failed writes stop the recorder rather than silently dropping samples and
                 // continuing with plausible-looking totals. UI displays the failure persistently.
-                record(&mut db,records).context("Could not save listening data")?;
+                record(&mut db,&records).context("Could not save listening data")?;
+                if collection_ready {
+                    match collection::updates(&db, &records) {
+                        Ok((days, songs)) if !days.is_empty() || !songs.is_empty() => { let _ = replies.send(Reply::Credits(days,songs)); }
+                        Err(e) => tracing::warn!(%e, "could not refresh listening keepsakes"),
+                        _ => {}
+                    }
+                }
                 let minutes = peak_week_minutes(&db)?;
                 if minutes != peak {
                     peak = minutes;

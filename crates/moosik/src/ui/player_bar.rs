@@ -493,6 +493,21 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         BAR_ART_PT,
     );
     widgets::paint_art(ui, &p, art, bar_art, widgets::ArtShape::Square);
+    let collection = app.listening.collection.as_ref();
+    let sleeve = app
+        .now
+        .track
+        .as_ref()
+        .and_then(|track| collection?.sleeves.get(&track.video_id));
+    if let Some(sleeve) = sleeve {
+        super::keepsakes::sleeve(ui, art, sleeve.completed);
+    }
+    let artist_pass = app.now.track.as_ref().and_then(|track| {
+        let artist = track.artists.first()?;
+        let key = crate::listening::collection::artist_key(&artist.name, artist.id.as_deref());
+        let pass = collection?.passes.get(&key)?;
+        (!pass.stamps.is_empty()).then_some(key)
+    });
     // A failure replaces the credits; otherwise the credits are the same linked pieces a row
     // draws, which is what makes *every* artist here clickable rather than only the first.
     // Loading keeps them: the ring on the play button says it, and the artist is what you look
@@ -591,7 +606,10 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .now
         .track
         .as_ref()
-        .map(|t| widgets::subtitle_width(ui, &crate::ui::track_subtitle(t), None))
+        .map(|t| {
+            widgets::subtitle_width(ui, &crate::ui::track_subtitle(t), None)
+                + if artist_pass.is_some() { 20.0 } else { 0.0 }
+        })
         .unwrap_or(0.0)
         .max(
             widgets::text_width(ui, &title, &theme::medium(13.0))
@@ -651,6 +669,12 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     )
     .unwrap_or_else(|| ui.interact(title_rect, ui.id().with("np-title-hit"), Sense::click()));
     let art_hit = ui.interact(art, ui.id().with("np-art-hit"), Sense::click());
+    if let Some(sleeve) = sleeve.filter(|s| s.completed >= 5) {
+        art_hit.clone().on_hover_text(format!(
+            "Your copy · {} full listens\nFirst heard {}",
+            sleeve.completed, sleeve.first_day
+        ));
+    }
     // Hovering the playing song's cover offers the fullscreen view: the cover dims and an expand
     // glyph appears on it. A primary click opens it; the right-click menu is unchanged.
     if app.now.track.is_some() {
@@ -712,11 +736,34 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
                 && field_w > 4.0
             {
                 let subtitle = crate::ui::track_subtitle(track);
+                let mut credit_pos = baseline;
+                let mut credit_width = field_w;
+                if let Some(key) = &artist_pass
+                    && let Some(pass) = app
+                        .listening
+                        .collection
+                        .as_ref()
+                        .and_then(|c| c.passes.get(key))
+                    && field_w >= 46.0
+                {
+                    let after_name = track.artists.len() == 1 && track.album.is_none();
+                    let width = widgets::subtitle_width(ui, &subtitle, None).min(field_w - 20.);
+                    let at = if after_name {
+                        baseline + vec2(width + 2., 0.)
+                    } else {
+                        baseline
+                    };
+                    super::keepsakes::player_pass(ui, &p, at, pass, key);
+                    if !after_name {
+                        credit_pos.x += 20.;
+                    }
+                    credit_width -= 20.;
+                }
                 if let Some(link) = widgets::paint_subtitle_marquee(
                     ui,
                     &p,
-                    baseline,
-                    field_w,
+                    credit_pos,
+                    credit_width,
                     &subtitle,
                     None,
                     "np-subtitle",
