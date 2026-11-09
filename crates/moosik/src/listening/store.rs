@@ -1,6 +1,6 @@
 use super::*;
 use anyhow::{Context as _, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::io::Write;
 
 pub(super) fn open(path: &std::path::Path) -> Result<Connection> {
@@ -50,18 +50,49 @@ pub(super) fn open(path: &std::path::Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS events_session ON events(session_id,at_ms);
         CREATE TABLE IF NOT EXISTS track_tags (
             track_id TEXT PRIMARY KEY,genres TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '',
-            rating INTEGER NOT NULL DEFAULT 0,updated_ms INTEGER NOT NULL);
+            rating INTEGER NOT NULL DEFAULT 0,updated_ms INTEGER NOT NULL,
+            genres_override INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS tag_edits (
             id INTEGER PRIMARY KEY, track_id TEXT NOT NULL, genres TEXT NOT NULL, tags TEXT NOT NULL,
             rating INTEGER NOT NULL, at_ms INTEGER NOT NULL);
         CREATE TRIGGER IF NOT EXISTS tags_insert_history AFTER INSERT ON track_tags BEGIN
             INSERT INTO tag_edits(track_id,genres,tags,rating,at_ms) VALUES (new.track_id,new.genres,new.tags,new.rating,new.updated_ms);
         END;
-        CREATE TRIGGER IF NOT EXISTS tags_update_history AFTER UPDATE ON track_tags BEGIN
-            INSERT INTO tag_edits(track_id,genres,tags,rating,at_ms) VALUES (new.track_id,new.genres,new.tags,new.rating,new.updated_ms);
-        END;
         PRAGMA user_version=1;
         COMMIT;")?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS auto_genres (
+            track_id TEXT PRIMARY KEY, genres TEXT NOT NULL,
+            source TEXT NOT NULL, checked_ms INTEGER NOT NULL);",
+    )?;
+    // Older ledgers have the same track_tags table without this additive column. A final blank
+    // genre after an earlier nonblank edit is an identifiable explicit clear. Keep that clear,
+    // while a row that has only ever held tags/rating remains eligible for catalog matching.
+    let has_genres_override = db
+        .prepare("PRAGMA table_info(track_tags)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "genres_override");
+    if !has_genres_override {
+        db.execute_batch(
+            "BEGIN;
+             DROP TRIGGER IF EXISTS tags_update_history;
+             ALTER TABLE track_tags ADD COLUMN genres_override INTEGER NOT NULL DEFAULT 0;
+             UPDATE track_tags SET genres_override=1
+             WHERE genres='' AND EXISTS (
+                 SELECT 1 FROM tag_edits e
+                 WHERE e.track_id=track_tags.track_id AND trim(e.genres)!='');
+             COMMIT;",
+        )?;
+    }
+    // The migration's metadata update is not a user edit, so recreate the audit trigger after it.
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS tags_update_history AFTER UPDATE ON track_tags BEGIN
+            INSERT INTO tag_edits(track_id,genres,tags,rating,at_ms)
+            VALUES (new.track_id,new.genres,new.tags,new.rating,new.updated_ms);
+        END;",
+    )?;
     // A crash never earns the missing time. Preserve the committed samples and mark the attempt.
     db.execute_batch("BEGIN;
         INSERT INTO events(session_id,at_ms,kind,payload)
@@ -186,6 +217,7 @@ pub(super) fn worker(
     lock.try_lock()
         .context("Another Moosik instance is already recording. Close the extra instance.")?;
     let mut db = open(&path)?;
+    let _genre_job = genre::Job::start(path.clone(), replies.clone());
     let mut peak = peak_week_minutes(&db)?;
     let collection_ready = match collection::Collection::load(&db) {
         Ok(collection) => {
@@ -201,14 +233,16 @@ pub(super) fn worker(
     // The player polls until this startup reply, including when playback is paused.
     let _ = replies.send(Reply::PeakWeekMinutes(peak));
     while let Ok(command) = commands.recv() {
-        let result:Result<()> = match command {
+        let result: Result<()> = match command {
             Command::Records(records) => {
                 // Failed writes stop the recorder rather than silently dropping samples and
                 // continuing with plausible-looking totals. UI displays the failure persistently.
-                record(&mut db,&records).context("Could not save listening data")?;
+                record(&mut db, &records).context("Could not save listening data")?;
                 if collection_ready {
                     match collection::updates(&db, &records) {
-                        Ok((days, songs)) if !days.is_empty() || !songs.is_empty() => { let _ = replies.send(Reply::Credits(days,songs)); }
+                        Ok((days, songs)) if !days.is_empty() || !songs.is_empty() => {
+                            let _ = replies.send(Reply::Credits(days, songs));
+                        }
                         Err(e) => tracing::warn!(%e, "could not refresh listening keepsakes"),
                         _ => {}
                     }
@@ -220,11 +254,19 @@ pub(super) fn worker(
                 }
                 Ok(())
             }
-            Command::Report(query) => report::build(&db,&query).map(|report| { let _=replies.send(Reply::Report(Box::new(report))); }),
-            Command::Tags(id,genres,tags,rating) => db.execute("INSERT INTO track_tags(track_id,genres,tags,rating,updated_ms) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(track_id) DO UPDATE SET genres=excluded.genres,tags=excluded.tags,rating=excluded.rating,updated_ms=excluded.updated_ms",
-                params![id,clean_list(&genres),clean_list(&tags),rating.clamp(0,5),now_ms()]).map(|_|()).map_err(Into::into),
-            Command::Export(kind,path,query) => export(&db,kind,&path,&query).map(|()| { let _=replies.send(Reply::Saved(format!("Saved {}",path.display()))); }),
-            Command::Shutdown => { db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?; break; }
+            Command::Report(query) => report::build(&db, &query).map(|report| {
+                let _ = replies.send(Reply::Report(Box::new(report)));
+            }),
+            Command::Tags(id, genres, tags, rating, genre_changed) => {
+                save_tags(&db, &id, &genres, &tags, rating, genre_changed)
+            }
+            Command::Export(kind, path, query) => export(&db, kind, &path, &query).map(|()| {
+                let _ = replies.send(Reply::Saved(format!("Saved {}", path.display())));
+            }),
+            Command::Shutdown => {
+                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                break;
+            }
         };
         if let Err(e) = result {
             let _ = replies.send(Reply::Error(format!("Listening operation failed: {e:#}")));
@@ -232,6 +274,47 @@ pub(super) fn worker(
     }
     Ok(())
 }
+
+fn save_tags(
+    db: &Connection,
+    id: &str,
+    genres: &str,
+    tags: &str,
+    rating: i32,
+    genre_changed: bool,
+) -> Result<()> {
+    let previous: Option<(String, i64)> = db
+        .query_row(
+            "SELECT genres,genres_override FROM track_tags WHERE track_id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    // A catalog match can arrive while the editor is open. Only an edit to its genre field
+    // may replace or suppress that match; saving tags/rating preserves the manual row.
+    let (genres, genres_override) = if genre_changed {
+        (clean_list(genres), 1)
+    } else {
+        previous.unwrap_or_default()
+    };
+    db.execute(
+        "INSERT INTO track_tags(track_id,genres,tags,rating,updated_ms,genres_override)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(track_id) DO UPDATE SET genres=excluded.genres,tags=excluded.tags,
+             rating=excluded.rating,updated_ms=excluded.updated_ms,
+             genres_override=excluded.genres_override",
+        params![
+            id,
+            genres,
+            clean_list(tags),
+            rating.clamp(0, 5),
+            now_ms(),
+            genres_override
+        ],
+    )?;
+    Ok(())
+}
+
 fn export(db: &Connection, kind: Export, path: &std::path::Path, query: &Query) -> Result<()> {
     let live = super::path()?;
     if path == live || (path.exists() && path.canonicalize().ok() == live.canonicalize().ok()) {
@@ -330,7 +413,11 @@ fn export(db: &Connection, kind: Export, path: &std::path::Path, query: &Query) 
                     ),
                     (
                         "track_tags",
-                        "SELECT json_object('track_id',track_id,'genres',genres,'tags',tags,'rating',rating,'updated_ms',updated_ms) FROM track_tags ORDER BY track_id",
+                        "SELECT json_object('track_id',track_id,'genres',genres,'tags',tags,'rating',rating,'updated_ms',updated_ms,'genres_override',genres_override) FROM track_tags ORDER BY track_id",
+                    ),
+                    (
+                        "auto_genres",
+                        "SELECT json_object('track_id',track_id,'genres',genres,'source',source,'checked_ms',checked_ms) FROM auto_genres ORDER BY track_id",
                     ),
                 ] {
                     write!(out, ",\"{table}\":[")?;
@@ -466,6 +553,90 @@ mod tests {
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn legacy_genre_clears_survive_migration_without_suppressing_rating_only_rows() {
+        let dir = temp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite3");
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE track_tags (
+                track_id TEXT PRIMARY KEY,genres TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',rating INTEGER NOT NULL DEFAULT 0,
+                updated_ms INTEGER NOT NULL);
+             CREATE TABLE tag_edits (
+                id INTEGER PRIMARY KEY,track_id TEXT NOT NULL,genres TEXT NOT NULL,
+                tags TEXT NOT NULL,rating INTEGER NOT NULL,at_ms INTEGER NOT NULL);
+             CREATE TRIGGER tags_insert_history AFTER INSERT ON track_tags BEGIN
+                INSERT INTO tag_edits(track_id,genres,tags,rating,at_ms)
+                VALUES (new.track_id,new.genres,new.tags,new.rating,new.updated_ms);
+             END;
+             CREATE TRIGGER tags_update_history AFTER UPDATE ON track_tags BEGIN
+                INSERT INTO tag_edits(track_id,genres,tags,rating,at_ms)
+                VALUES (new.track_id,new.genres,new.tags,new.rating,new.updated_ms);
+             END;
+             INSERT INTO track_tags VALUES ('test','Jazz','Evening',4,100000);
+             INSERT INTO track_tags VALUES ('cleared','Soul','',0,100000);
+             UPDATE track_tags SET genres='',updated_ms=100001 WHERE track_id='cleared';
+             INSERT INTO track_tags VALUES ('rated','','Focus',4,100000);",
+        )
+        .unwrap();
+        drop(old);
+        let db = open(&path).unwrap();
+        let flags = db
+            .prepare("SELECT track_id,genres,genres_override FROM track_tags ORDER BY track_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            flags,
+            vec![
+                ("cleared".into(), "".into(), 1),
+                ("rated".into(), "".into(), 0),
+                ("test".into(), "Jazz".into(), 0),
+            ]
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM tag_edits", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            4,
+            "migration must not invent a user edit"
+        );
+        db.execute("UPDATE track_tags SET rating=5 WHERE track_id='rated'", [])
+            .unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM tag_edits", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            5,
+            "the audit trigger must remain active"
+        );
+        drop(db);
+        let db = open(&path).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT genres_override FROM track_tags WHERE track_id='cleared'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "reopening must not reset the migration"
+        );
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn exports_preserve_the_ledger_and_live_backup_is_consistent() {
         let dir = temp();
@@ -511,18 +682,32 @@ mod tests {
             ],
         )
         .unwrap();
-        db.execute("INSERT INTO track_tags(track_id,genres,tags,rating,updated_ms) VALUES ('test','Jazz','Evening',5,100000)",[]).unwrap();
-        db.execute(
-            "UPDATE track_tags SET genres='Soul',updated_ms=100001 WHERE track_id='test'",
-            [],
-        )
-        .unwrap();
         let query = Query {
             from: 0,
             to: 200000,
             source: String::new(),
             label: "Test recap".into(),
         };
+        // Editing only tags/rating before a catalog match keeps automatic genre lookup active.
+        save_tags(&db, "test", "", "Evening", 5, false).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT genres_override FROM track_tags WHERE track_id='test'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        db.execute("INSERT INTO auto_genres(track_id,genres,source,checked_ms) VALUES ('test','Rock','apple',100000)",[]).unwrap();
+        assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "Rock");
+        // The editor may still hold a blank value from before the match arrived.
+        save_tags(&db, "test", "", "Focus", 5, false).unwrap();
+        assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "Rock");
+        // Clearing the visible match is an explicit empty override.
+        save_tags(&db, "test", "", "Focus", 5, true).unwrap();
+        assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "");
+        save_tags(&db, "test", "Soul", "Focus", 5, true).unwrap();
         for (kind, name) in [
             (Export::Json, "data.json"),
             (Export::Csv, "songs.csv"),
@@ -537,7 +722,9 @@ mod tests {
         assert_eq!(data["selected_report"]["completed"], 1);
         assert_eq!(data["sessions"].as_array().unwrap().len(), 1);
         assert_eq!(data["segments"].as_array().unwrap().len(), 1);
-        assert_eq!(data["tag_edits"].as_array().unwrap().len(), 2);
+        assert_eq!(data["tag_edits"].as_array().unwrap().len(), 4);
+        assert_eq!(data["auto_genres"][0]["genres"], "Rock");
+        assert_eq!(data["track_tags"][0]["genres_override"], 1);
         assert_eq!(data["selected_report"]["genres"][0]["name"], "Soul");
         let backup = Connection::open(dir.join("backup.sqlite3")).unwrap();
         assert_eq!(

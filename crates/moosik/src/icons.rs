@@ -72,6 +72,7 @@ icons! {
     ThumbsDownFilled => "thumbs-down-filled",
     ThumbsUp => "thumbs-up",
     ThumbsUpFilled => "thumbs-up-filled",
+    Trophy => "trophy",
     Trash2 => "trash-2",
     TrendingDown => "trending-down",
     TrendingUp => "trending-up",

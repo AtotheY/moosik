@@ -587,9 +587,26 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         .track
         .as_ref()
         .and_then(|track| collection?.sleeves.get(&track.video_id));
-    if let Some(sleeve) = sleeve {
-        super::keepsakes::sleeve(ui, art, sleeve.completed);
-    }
+    let completed = sleeve.map(|song| song.completed);
+    let song_position = app.now.track.as_ref().and_then(|track| {
+        let collection = collection?;
+        let cache_id = ui.id().with("now-playing-song-position");
+        ui.data_mut(|data| {
+            if let Some((revision, track_id, place)) =
+                data.get_temp::<(u64, String, usize)>(cache_id)
+                && revision == collection.revision
+                && track_id == track.video_id
+            {
+                return Some(place);
+            }
+            let place = crate::listening::awards::song_position(collection, &track.video_id)?;
+            data.insert_temp(
+                cache_id,
+                (collection.revision, track.video_id.clone(), place),
+            );
+            Some(place)
+        })
+    });
     let artist_pass = app.now.track.as_ref().and_then(|track| {
         let artist = track.artists.first()?;
         let key = crate::listening::collection::artist_key(&artist.name, artist.id.as_deref());
@@ -764,10 +781,15 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     )
     .unwrap_or_else(|| ui.interact(title_rect, ui.id().with("np-title-hit"), Sense::click()));
     let art_hit = ui.interact(art, ui.id().with("np-art-hit"), Sense::click());
-    if let Some(sleeve) = sleeve.filter(|s| s.completed >= 5) {
+    if let Some(sleeve) = sleeve
+        && let Some(rank) = crate::listening::awards::SongRank::from_completed(sleeve.completed)
+    {
+        let position = song_position.map_or_else(String::new, |place| format!("#{place} · "));
         art_hit.clone().on_hover_text(format!(
-            "Your copy · {} full listens\nFirst heard {}",
-            sleeve.completed, sleeve.first_day
+            "{position}{} · {} full listens\nFirst heard {}",
+            rank.name(),
+            sleeve.completed,
+            sleeve.first_day
         ));
     }
     // Hovering the playing song's cover offers the fullscreen view: the cover dims and an expand
@@ -793,6 +815,9 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
             let ctx = ui.ctx().clone();
             app.fs_enter(&ctx);
         }
+    }
+    if let Some(completed) = completed {
+        super::keepsakes::rank_badge(ui, art, completed, song_position);
     }
     if app.now.track.as_ref().is_some_and(|t| t.album_id.is_some()) && title_hit.hovered() {
         // The same hover treatment a row's artist link gets: a pointing hand and a hairline

@@ -6,6 +6,7 @@ pub mod artist;
 pub mod artist_liked;
 pub mod artist_sources;
 pub mod charts;
+mod collection_gallery;
 pub mod crash;
 pub mod explore;
 pub mod fullscreen;
@@ -26,6 +27,7 @@ pub mod player_bar;
 pub mod playlist;
 pub mod profile;
 pub(crate) mod queue_edit;
+mod record_display;
 pub mod releases;
 #[cfg(target_os = "macos")]
 pub(crate) mod scroll_gesture;

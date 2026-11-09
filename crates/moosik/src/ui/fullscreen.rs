@@ -461,6 +461,12 @@ pub fn view(app: &mut App, ui: &mut egui::Ui) {
                     .cloned()
             });
             widgets::paint_art(ui, &p, cover, texture.as_ref(), widgets::ArtShape::Square);
+            if let Some(collection) = app.listening.collection.as_ref()
+                && let Some(song) = collection.sleeves.get(&video_id)
+            {
+                let place = crate::listening::awards::song_position(collection, &video_id);
+                super::keepsakes::rank_badge(ui, cover, song.completed, place);
+            }
         }
     }
     if let Some(info) = lay.info {

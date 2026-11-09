@@ -349,6 +349,7 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
         Some(t) => (t.palette().accent, t.name.as_str()),
         None => (app.palette.accent, "Classic (built-in)"),
     };
+    let mut theme_picker = widgets::DropdownResult::default();
 
     widgets::setting_group(ui, &p, Some("Colours"), |ui, g| {
         // Chips are laid out right to left, so the last option goes in first.
@@ -364,15 +365,16 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
                 }
             },
         );
-        g.row(ui, "Theme", "The colours used in this mode.", |ui| {
-            if let Some(i) = widgets::dropdown(
+        g.row(ui, "Theme", "Hover to preview; click to keep.", |ui| {
+            theme_picker = widgets::dropdown(
                 ui,
                 &p,
                 ui.id().with("scheme-dropdown"),
                 current_swatch,
                 current_label,
                 &options,
-            ) {
+            );
+            if let Some(i) = theme_picker.selected {
                 let name = offered[i].name.clone();
                 if dark {
                     dark_choice = name;
@@ -504,6 +506,21 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
         );
     });
 
+    // Resolve the hovered theme before mutating Settings, while `offered` still borrows the
+    // loaded theme list. The palette itself is a copy and never becomes a saved choice.
+    let preview_palette = if theme_picker.open {
+        theme_picker
+            .preview
+            .and_then(|i| offered.get(i))
+            .map(|theme| {
+                theme
+                    .palette()
+                    .with_opacity(Opacity::new(sheer))
+                    .with_card_outline(card_outline)
+            })
+    } else {
+        None
+    };
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| {
         s.opacity = Opacity::new(sheer);
@@ -515,6 +532,24 @@ fn appearance(app: &mut App, ui: &mut egui::Ui) {
         s.card_outline = card_outline;
         s.scroll_fades = scroll_fades;
     });
+
+    // A hovered choice repaints the actual shell while the menu stays open. The saved choice
+    // only changes on click; closing the menu restores it. Keep the last preview through the
+    // few pixels between rows so the shell does not flash back while moving down the list.
+    let palette = if let Some(palette) = preview_palette {
+        Some(palette)
+    } else if theme_picker.open {
+        None
+    } else {
+        Some(app.settings.palette(&ctx, &app.custom_themes))
+    };
+    if let Some(palette) = palette
+        && app.palette != palette
+    {
+        app.palette = palette;
+        theme::apply(&ctx, &palette);
+        ctx.request_repaint();
+    }
 }
 
 fn playback(app: &mut App, ui: &mut egui::Ui) {

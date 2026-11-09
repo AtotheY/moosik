@@ -338,9 +338,12 @@ pub(crate) fn build(db: &Connection, q: &Query) -> Result<Report> {
         coalesce(sum(g.listen_ms*({FACTOR})),0),coalesce(sum(g.media_ms*({FACTOR})),0),
         coalesce(sum(g.paused_ms*({FACTOR})),0),coalesce(sum(g.buffer_ms*({FACTOR})),0),
         coalesce(sum(g.muted_ms*({FACTOR})),0),coalesce(sum(g.unobserved_ms*({FACTOR})),0),
-        coalesce(t.genres,''),coalesce(t.tags,''),coalesce(t.rating,0)
+        CASE WHEN coalesce(t.genres_override,0)!=0 THEN t.genres
+             ELSE coalesce(nullif(t.genres,''),a.genres,'') END,
+        coalesce(t.tags,''),coalesce(t.rating,0)
         FROM sessions s LEFT JOIN segments g ON g.session_id=s.id AND g.end_ms>?1 AND g.start_ms<?2
         LEFT JOIN track_tags t ON t.track_id=s.track_id
+        LEFT JOIN auto_genres a ON a.track_id=s.track_id
         WHERE s.started_ms<?2 AND s.last_ms>=?1 AND (?3='' OR s.source=?3)
         GROUP BY s.id ORDER BY s.started_ms DESC");
     let mut stmt = db.prepare(&sql)?;

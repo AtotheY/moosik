@@ -32,8 +32,33 @@ Shift-click for a group, and use Undo to reverse an edit. See [Queue controls](q
 Use Today, 7 days, 30 days, This month, This year, All time, or inclusive custom
 calendar dates. You can filter YouTube, downloaded YouTube tracks, or local files.
 The dashboard refreshes about every ten seconds; ••• → Refresh requests an immediate
-snapshot. Genres are user-assigned: missing source metadata stays **Unknown**.
-No artist-name lookups or listening-history uploads to an enrichment service occur.
+snapshot. Local files use embedded genre tags. For online songs without a genre edit,
+Moosik matches the song title and artist against Apple's song catalog in the background.
+Only those names are sent to Apple, never play counts, listening times, or the database.
+Matches and misses are cached locally; ambiguous or unmatched songs stay **Unknown**.
+Your genre edits take precedence over automatic matches.
+
+## Collection
+
+**Collection** in the sidebar shows lifetime milestones from this installation's
+listening history. Its **How it works** menu explains each threshold in the app.
+An artist pass earns **Admit One** after 10 different songs by that artist or
+5 listening days. Only a qualified play credits an artist day; later pass stamps
+unlock at 15, 30, and 60 listening days. The song named on a pass stamp was
+playing when that artist milestone was earned.
+
+Songs are ranked by lifetime completed listens. Their personal records progress
+through **Iron** (10), **Bronze** (25), **Silver** (50), **Gold** (100),
+**Platinum** (250), **Double Platinum** (500), and **Diamond** (1,000). The
+Collection shelf shows the top songs as tier-specific album trophies and includes
+their full-listen counts and total listening time. Listening time also includes
+partial plays. A sparkle on song artwork shows the earned tier and, where space
+allows, the song's position in the lifetime ranking. These are Moosik keepsakes,
+not sales certifications.
+
+Selectable app icon finishes unlock from the best Monday–Sunday listening week
+at five hour intervals; choose them in Settings → Appearance. The shelf and
+its progress are independent of the period and source filters in Listening stats.
 
 ## Listening history and rediscovery (0.1.16)
 
@@ -114,6 +139,7 @@ Tables retained without automatic pruning:
 | `events` | Starts/ends, observed pause/resume/seek/buffering/volume changes, retries, video/audio reloads, gaps, and recovery events |
 | `track_tags` | Current user genres, mood tags, and rating |
 | `tag_edits` | Append-only history of local label/rating changes |
+| `auto_genres` | Cached catalog or embedded-file genre matches and lookup status |
 
 No Google cookies, credentials, signed stream URLs, or raw authenticated API
 responses are stored here. Local tracks retain their app track identifier, which
@@ -127,7 +153,8 @@ The database is local; it is not a backup unless you export/copy it safely.
   not export filters.
 - **My recap:** selected range as editable Markdown.
 - **Everything JSON:** the selected report plus the **entire** raw sessions,
-  segments, events, current tags, and tag-edit history, schema version 1.
+  segments, events, current tags, tag-edit history, and automatic genre cache,
+  schema version 1.
 - **Database backup:** a consistent SQLite snapshot including committed WAL data.
   Use this button instead of copying only the live main database file.
 
