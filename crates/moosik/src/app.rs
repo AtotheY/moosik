@@ -1880,6 +1880,7 @@ pub struct App {
     profile_ids: std::collections::HashSet<String>,
     /// Live counters behind `--stats`; free when off.
     pub(crate) stats: Stats,
+    usage: Option<crate::usage::Reporter>,
     pub(crate) listening: crate::listening::Ledger,
     pub(crate) listening_view: crate::ui::listening::View,
     pub(crate) history_view: crate::ui::history::View,
@@ -2000,7 +2001,10 @@ impl Drop for App {
         if self.listening.active()
             && let Some(player) = &self.player
         {
-            self.listening.observe(player.listening_sample());
+            let ms = self.listening.observe(player.listening_sample());
+            if let Some(usage) = &mut self.usage {
+                usage.credit(ms);
+            }
         }
         #[cfg(target_os = "windows")]
         {
@@ -2418,6 +2422,10 @@ impl App {
             toast: None,
             autoplay,
             images: Images::new(),
+            usage: settings
+                .share_listening_minutes
+                .then(crate::usage::Reporter::open)
+                .flatten(),
             settings,
             accounts: Vec::new(),
             profile: ui::profile::State::default(),
@@ -2755,6 +2763,14 @@ impl App {
         change(&mut self.settings);
         if self.settings == before {
             return;
+        }
+        if self.settings.share_listening_minutes != before.share_listening_minutes {
+            if self.settings.share_listening_minutes {
+                self.usage = crate::usage::Reporter::open();
+            } else {
+                self.usage = None;
+                crate::usage::Reporter::forget();
+            }
         }
         if !self.settings.spotify_autoplay
             && let Some(autoplay) = &mut self.spotify_autoplay
@@ -3491,6 +3507,9 @@ impl App {
         let state = self.read_player_state();
         self.player_state = state;
         self.listening.poll();
+        if let Some(usage) = &mut self.usage {
+            usage.poll(self.backend.runtime());
+        }
         if self.listening.current_week_minutes.is_none() {
             if self.listening.error.is_none() {
                 ctx.request_repaint_after(Duration::from_millis(200));
@@ -3509,7 +3528,10 @@ impl App {
             && self.listening.due()
             && let Some(player) = &self.player
         {
-            self.listening.observe(player.listening_sample());
+            let ms = self.listening.observe(player.listening_sample());
+            if let Some(usage) = &mut self.usage {
+                usage.credit(ms);
+            }
         }
         if self.spotify_pause != SpotifyPause::Released && self.listening.active() {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -3701,7 +3723,10 @@ impl App {
             ctx.request_repaint_after(Duration::from_secs(1));
             return;
         }
-        self.listening.observe(sample);
+        let ms = self.listening.observe(sample);
+        if let Some(usage) = &mut self.usage {
+            usage.credit(ms);
+        }
         self.listening.suspend(sample.position, "paused");
         self.q.set_resume(Some((index, sample.position)));
         self.playback_started = false;
@@ -7657,7 +7682,10 @@ impl App {
             if self.listening.active()
                 && let Some(sample) = outgoing
             {
-                self.listening.observe(sample);
+                let ms = self.listening.observe(sample);
+                if let Some(usage) = &mut self.usage {
+                    usage.credit(ms);
+                }
             }
             let source = if track.is_spotify() {
                 "spotify"

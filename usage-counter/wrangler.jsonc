@@ -1,0 +1,11 @@
+{
+  "name": "moosik-usage",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-09",
+  "workers_dev": false,
+  "routes": [{ "pattern": "usage.moosik.dev", "custom_domain": true }],
+  "d1_databases": [{ "binding": "DB", "database_name": "moosik-usage", "database_id": "7feac36d-dc4e-4da8-bf85-4a67dd3628d4" }],
+  "ratelimits": [{ "name": "LIMIT", "namespace_id": "60264", "simple": { "limit": 60, "period": 60 } }],
+  "triggers": { "crons": ["5 0 * * *"] },
+  "observability": { "enabled": false }
+}

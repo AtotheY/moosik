@@ -308,6 +308,7 @@ pub use playlist_layout::{LibraryItem, PlaylistLayout};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub share_listening_minutes: bool,
     pub app_icon: crate::app_icon::AppIcon,
     pub theme: Theme,
     /// The colour theme painted in dark mode: a file name from the themes folder (see
@@ -446,6 +447,7 @@ impl Default for Settings {
             start_on_boot: false,
             hide_tray_on_close: false,
             discord_rich_presence: true,
+            share_listening_minutes: false,
             discord_host_listen_along: true,
             session_name: String::new(),
             local_folders: Vec::new(),
