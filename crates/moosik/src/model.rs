@@ -589,21 +589,6 @@ impl HomeSection {
             HomeSection::Everything => "Everything else",
         }
     }
-
-    /// A line under the name where the name alone would not say what lands there.
-    pub fn hint(self) -> Option<&'static str> {
-        match self {
-            HomeSection::Discover => Some("YouTube calls it \"Your daily discover\""),
-            HomeSection::Trending => Some("\"Trending songs for you\""),
-            HomeSection::ForgottenFavorites => Some("Also \"Fresh finds, old favorites\""),
-            HomeSection::SimilarTo => Some("Shelves headed \"Similar to\" an artist"),
-            HomeSection::Themed => {
-                Some("Shelves with a headline above them, like \"Throwback to…\"")
-            }
-            HomeSection::Everything => Some("Genre shelves, and anything new or unrecognised"),
-            _ => None,
-        }
-    }
 }
 
 /// The saved keys as a complete order: unknown keys and repeats dropped, and any section the list
@@ -658,17 +643,45 @@ pub enum HomeFetch {
     /// Pages until every section in `wanted` has appeared, the feed ends, or the `budget` or the
     /// `max_pages` cap is spent — whichever comes first.
     Strict {
-        wanted: Vec<HomeSection>,
+        wanted: Vec<HomeTarget>,
         budget: std::time::Duration,
         max_pages: usize,
     },
 }
 
+/// Existing category preferences still guide strict loading until the listener orders actual shelves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeTarget {
+    Category(HomeSection),
+    Shelf(String),
+}
+
+impl HomeTarget {
+    pub fn present(&self, shelves: &[Shelf]) -> bool {
+        shelves.iter().any(|s| match self {
+            Self::Category(section) => s.home_section() == *section,
+            Self::Shelf(key) => s.home_order_key() == *key,
+        })
+    }
+}
+
 impl HomeFetch {
     /// The strict plan for a listener's order: wait for their top [`STRICT_HOME_SECTIONS`].
-    pub fn strict(order: &[HomeSection]) -> Self {
+    pub fn strict(order: &[HomeSection], shelves: &[String]) -> Self {
         Self::Strict {
-            wanted: wanted_sections(order, STRICT_HOME_SECTIONS),
+            wanted: if shelves.is_empty() {
+                wanted_sections(order, STRICT_HOME_SECTIONS)
+                    .into_iter()
+                    .map(HomeTarget::Category)
+                    .collect()
+            } else {
+                shelves
+                    .iter()
+                    .take(STRICT_HOME_SECTIONS)
+                    .cloned()
+                    .map(HomeTarget::Shelf)
+                    .collect()
+            },
             budget: STRICT_HOME_BUDGET,
             max_pages: STRICT_HOME_PAGES,
         }
@@ -707,7 +720,7 @@ pub fn wanted_sections(order: &[HomeSection], n: usize) -> Vec<HomeSection> {
 pub fn home_fetch_stop(
     fetch: &HomeFetch,
     pages_done: usize,
-    seen: &[HomeSection],
+    seen: &[Shelf],
     elapsed: std::time::Duration,
 ) -> Option<HomeStop> {
     match fetch {
@@ -717,7 +730,7 @@ pub fn home_fetch_stop(
             budget,
             max_pages,
         } => {
-            if wanted.iter().all(|w| seen.contains(w)) {
+            if wanted.iter().all(|w| w.present(seen)) {
                 Some(HomeStop::Enough)
             } else if elapsed >= *budget {
                 Some(HomeStop::Budget)
@@ -743,6 +756,20 @@ pub fn order_home(shelves: &mut [Shelf], order: &[HomeSection]) {
 }
 
 impl Shelf {
+    /// Keep the artist with "Similar to"; omit incidental straplines such as the account name.
+    pub fn home_order_title(&self) -> std::borrow::Cow<'_, str> {
+        match self.strapline.as_deref().map(str::trim) {
+            Some(line) if self.home_section() == HomeSection::SimilarTo => {
+                format!("{line} {}", self.title.trim()).into()
+            }
+            _ => self.title.trim().into(),
+        }
+    }
+
+    pub fn home_order_key(&self) -> String {
+        self.home_order_title().to_lowercase()
+    }
+
     /// Whether this shelf is a list of playable songs rather than a grid of cards.
     ///
     /// "Top songs" and "Quick picks" are lists; "Albums", "New releases" and "Videos" are
@@ -1399,19 +1426,27 @@ mod tests {
     #[test]
     fn the_strict_stop_rule_follows_found_then_clock_then_pages() {
         use std::time::Duration;
-        let wanted = vec![HomeSection::ListenAgain, HomeSection::QuickPicks];
+        let wanted = vec![
+            HomeTarget::Category(HomeSection::ListenAgain),
+            HomeTarget::Shelf("quick picks".into()),
+        ];
         let strict = HomeFetch::Strict {
             wanted: wanted.clone(),
             budget: Duration::from_secs(6),
             max_pages: 12,
         };
         let secs = Duration::from_secs;
-        let one = [HomeSection::ListenAgain];
+        let one = [shelf("Listen again", None)];
         // Missing one wanted section, with time and pages to spare: keep going.
         assert_eq!(home_fetch_stop(&strict, 2, &one, secs(1)), None);
         // All wanted in: stop, even with time left, and even before any page.
         assert_eq!(
-            home_fetch_stop(&strict, 0, &wanted, secs(0)),
+            home_fetch_stop(
+                &strict,
+                0,
+                &[shelf("Listen again", None), shelf("Quick picks", None)],
+                secs(0)
+            ),
             Some(HomeStop::Enough)
         );
         // Still missing one: the clock stops it, and so does the page cap.

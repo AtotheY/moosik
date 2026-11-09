@@ -3,11 +3,13 @@
 //! re-arranged with it.
 
 use crate::app::{App, Route};
+use crate::home_feed::OrderRow;
 use crate::icons::Icon;
-use crate::model::{HomeSection, Provider, default_order_keys, normalise_order};
+use crate::model::{Provider, default_order_keys};
 use crate::settings::HomeSource;
 use crate::theme;
 use crate::widgets;
+use std::sync::{Arc, Weak};
 
 const ROW_HEIGHT: f32 = 44.0;
 const WIDTH: f32 = 440.0;
@@ -21,18 +23,58 @@ const EDGE_SPEED: f32 = 9.0;
 /// what exists and sends it in batches, and a late section goes below what is already showing.
 pub(crate) const DISCLAIMER: &str = "Sources choose which feeds appear on Home. Mood filters \
 apply to YouTube Music only. Providers send sections in batches; a section that arrives late \
-is added below the sections already shown. Your section order applies within each provider. \
-Unlisted sections use Everything else.";
+is added below the sections already shown. Your section order applies within each provider.";
 
-/// The order after dragging row `from` onto row `to`: the row is taken out and put in `to`'s
-/// place, which is what the drop line shown while dragging promises.
-pub(crate) fn moved(order: &[HomeSection], from: usize, to: usize) -> Vec<HomeSection> {
-    let mut out = order.to_vec();
-    if from < out.len() && to < out.len() && from != to {
-        let item = out.remove(from);
-        out.insert(to, item);
+/// Move only the visible shelf keys. Keep saved slots for shelves that aren't in this feed.
+fn move_shelf(
+    saved: &[String],
+    rows: &[OrderRow],
+    from: &OrderRow,
+    to: &OrderRow,
+) -> Option<Vec<String>> {
+    if from.source != to.source || from.key == to.key {
+        return None;
     }
-    out
+    let mut visible: Vec<_> = rows
+        .iter()
+        .filter(|r| r.source == from.source)
+        .map(|r| r.key.clone())
+        .collect();
+    let start = visible.iter().position(|k| *k == from.key)?;
+    let end = visible.iter().position(|k| *k == to.key)?;
+    let key = visible.remove(start);
+    visible.insert(end, key);
+    let mut sorted = visible.iter();
+    let mut result: Vec<_> = saved
+        .iter()
+        .map(|key| {
+            if visible.contains(key) {
+                sorted.next().unwrap_or(key).clone()
+            } else {
+                key.clone()
+            }
+        })
+        .collect();
+    result.extend(sorted.cloned());
+    Some(result)
+}
+
+fn current_rows(ui: &egui::Ui, app: &App) -> Arc<Vec<OrderRow>> {
+    let Some(home) = &app.home else {
+        return Arc::default();
+    };
+    let combined = app.effective_home_source() == HomeSource::Combined;
+    let id = ui.id().with(("home-order-rows", combined));
+    type Cache = (Weak<Vec<crate::model::Shelf>>, Arc<Vec<OrderRow>>);
+    let feed = Arc::downgrade(home);
+    if let Some((cached, rows)) = ui.data(|d| d.get_temp::<Cache>(id))
+        && feed.ptr_eq(&cached)
+    {
+        return rows;
+    }
+    let rows = Arc::new(crate::home_feed::order_rows(home, combined));
+    ui.data_mut(|d| d.insert_temp(id, (feed, rows.clone())));
+    rows
 }
 
 fn panel_header(ui: &mut egui::Ui, p: &theme::Palette) -> (bool, egui::Vec2) {
@@ -118,7 +160,7 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     let p = app.palette;
-    let order = normalise_order(&app.settings.home_order);
+    let rows = current_rows(ui, app);
     let available = app.available_providers();
     let mut source = app.effective_home_source();
     let mut primary = app
@@ -148,7 +190,7 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
 
     let mut close = false;
     let mut drag_delta = egui::Vec2::ZERO;
-    let mut reorder: Option<(usize, usize)> = None;
+    let mut reorder = None;
     let mut reset = false;
     let shown = egui::Window::new("Customize Home")
         .id(window_id)
@@ -249,70 +291,104 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
                             .color(p.text),
                     );
                     list.add_space(6.0);
+                    let note = if app.home_filter.is_some() {
+                        "Clear the mood filter to reorder Home."
+                    } else if app.home_loading && rows.is_empty() {
+                        "Loading Home sections…"
+                    } else if rows.is_empty() {
+                        "No sections to reorder yet."
+                    } else if rows.len() == 1 {
+                        "One section on Home."
+                    } else {
+                        "Drag a section to move it within its source."
+                    };
                     list.label(
-                        egui::RichText::new("Drag a section to move it within each provider.")
+                        egui::RichText::new(note)
                             .font(theme::regular(12.0))
                             .color(p.secondary),
                     );
                     list.add_space(8.0);
-                    for (i, section) in order.iter().enumerate() {
-                        let (rect, response) = list.allocate_exact_size(
-                            egui::vec2(list.available_width(), ROW_HEIGHT),
-                            egui::Sense::click_and_drag(),
-                        );
-                        if let Some(hint) = section.hint() {
-                            response.clone().on_hover_text(hint);
+                    if app.home_filter.is_some() || source_changed {
+                        return;
+                    }
+                    for group in HomeSource::ALL {
+                        let group_rows: Vec<_> =
+                            rows.iter().filter(|r| r.source == group).collect();
+                        if group_rows.is_empty() {
+                            continue;
                         }
-                        if response.drag_started() {
-                            egui::DragAndDrop::set_payload(list.ctx(), i);
+                        if rows.iter().any(|r| r.source != group) {
+                            list.add_space(8.0);
+                            list.label(
+                                egui::RichText::new(group.label())
+                                    .font(theme::semibold(12.0))
+                                    .color(p.secondary),
+                            );
                         }
-                        let dragging_this = egui::DragAndDrop::payload::<usize>(list.ctx())
-                            .is_some_and(|from| *from == i);
-                        if response.hovered() || dragging_this {
-                            list.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius::same(theme::RADIUS),
-                                if dragging_this {
-                                    p.surface_active
+                        let can_drag = group_rows.len() > 1;
+                        for (i, row) in group_rows.iter().copied().enumerate() {
+                            let (rect, response) = list.allocate_exact_size(
+                                egui::vec2(list.available_width(), ROW_HEIGHT),
+                                if can_drag {
+                                    egui::Sense::click_and_drag()
                                 } else {
-                                    p.surface_hover
+                                    egui::Sense::hover()
                                 },
                             );
-                            list.ctx().set_cursor_icon(if dragging_this {
-                                egui::CursorIcon::Grabbing
-                            } else {
-                                egui::CursorIcon::Grab
-                            });
-                        }
-                        paint_grip(list, rect, p.dim);
-                        paint_label(list, &p, rect, *section);
-                        // The drop lands on the row under the pointer; the line shows which edge
-                        // of it, flipping with the direction exactly as the playlist rail does
-                        // (`remove` then `insert` puts a row after the target going down, before
-                        // it going up).
-                        if egui::DragAndDrop::has_payload_of_type::<usize>(list.ctx())
-                            && response.contains_pointer()
-                        {
-                            if list.ctx().input(|inp| inp.pointer.any_released()) {
-                                if let Some(from) =
-                                    egui::DragAndDrop::take_payload::<usize>(list.ctx())
-                                {
-                                    reorder = Some((*from, i));
-                                }
-                            } else {
-                                let from = egui::DragAndDrop::payload::<usize>(list.ctx());
-                                let up = from.is_some_and(|from| i < *from);
-                                let y = if up { rect.top() } else { rect.bottom() };
-                                list.painter().hline(
-                                    egui::Rangef::new(rect.left() + 8.0, rect.right() - 8.0),
-                                    y,
-                                    egui::Stroke::new(2.0, p.accent),
+                            response.clone().on_hover_text(&row.title);
+                            if response.drag_started() {
+                                egui::DragAndDrop::set_payload(list.ctx(), row.clone());
+                            }
+                            let payload = egui::DragAndDrop::payload::<OrderRow>(list.ctx());
+                            let dragging_this = payload.as_deref() == Some(row);
+                            if can_drag && (response.hovered() || dragging_this) {
+                                list.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(theme::RADIUS),
+                                    if dragging_this {
+                                        p.surface_active
+                                    } else {
+                                        p.surface_hover
+                                    },
                                 );
+                                list.ctx().set_cursor_icon(if dragging_this {
+                                    egui::CursorIcon::Grabbing
+                                } else {
+                                    egui::CursorIcon::Grab
+                                });
+                            }
+                            if can_drag {
+                                paint_grip(list, rect, p.dim);
+                            }
+                            paint_label(list, &p, rect, &row.title);
+                            // The drop lands on the row under the pointer; the line shows which edge
+                            // of it, flipping with the direction exactly as the playlist rail does
+                            // (`remove` then `insert` puts a row after the target going down, before
+                            // it going up).
+                            if let Some(from) = payload.as_deref()
+                                && from.source == group
+                                && response.contains_pointer()
+                            {
+                                if list.ctx().input(|inp| inp.pointer.any_released()) {
+                                    egui::DragAndDrop::take_payload::<OrderRow>(list.ctx());
+                                    reorder = Some((from.clone(), row.clone()));
+                                } else {
+                                    let up = group_rows
+                                        .iter()
+                                        .position(|r| r.key == from.key)
+                                        .is_some_and(|start| i < start);
+                                    let y = if up { rect.top() } else { rect.bottom() };
+                                    list.painter().hline(
+                                        egui::Rangef::new(rect.left() + 8.0, rect.right() - 8.0),
+                                        y,
+                                        egui::Stroke::new(2.0, p.accent),
+                                    );
+                                }
                             }
                         }
                     }
                     // A long list: carry the scroll along while a row is dragged near an edge.
-                    if egui::DragAndDrop::has_payload_of_type::<usize>(list.ctx())
+                    if egui::DragAndDrop::has_payload_of_type::<OrderRow>(list.ctx())
                         && let Some(pos) = list.ctx().pointer_hover_pos()
                     {
                         let clip = list.clip_rect();
@@ -385,6 +461,7 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
             s.home_source = HomeSource::Combined;
             s.home_primary_provider = None;
             s.home_order = default_order_keys();
+            s.home_shelf_orders.clear();
         });
     } else {
         app.update_settings(&ctx, |s| {
@@ -394,11 +471,18 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
             if primary_changed {
                 s.home_primary_provider = primary;
             }
-            if let Some((from, to)) = reorder {
-                let next = moved(&order, from, to);
-                if next != order {
-                    s.home_order = next.iter().map(|x| x.key().to_owned()).collect();
-                }
+            if let Some((from, to)) = reorder
+                && let Some(order) = move_shelf(
+                    s.home_shelf_orders
+                        .get(&from.source)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    &rows,
+                    &from,
+                    &to,
+                )
+            {
+                s.home_shelf_orders.insert(from.source, order);
             }
         });
     }
@@ -407,13 +491,13 @@ pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-fn paint_label(ui: &egui::Ui, p: &theme::Palette, row: egui::Rect, section: HomeSection) {
+fn paint_label(ui: &egui::Ui, p: &theme::Palette, row: egui::Rect, title: &str) {
     let x = row.left() + 38.0;
     let width = (row.right() - x - 12.0).max(0.0);
     ui.painter().text(
         egui::pos2(x, row.center().y),
         egui::Align2::LEFT_CENTER,
-        widgets::truncate_to(ui, section.label(), theme::medium(13.0), width),
+        widgets::truncate_to(ui, title, theme::medium(13.0), width),
         theme::medium(13.0),
         p.text,
     );
@@ -531,33 +615,43 @@ mod tests {
     }
 
     #[test]
-    fn dragging_a_row_down_puts_it_after_the_target() {
-        use HomeSection::*;
-        let order = vec![ListenAgain, QuickPicks, MixedForYou];
-        assert_eq!(moved(&order, 0, 2), [QuickPicks, MixedForYou, ListenAgain]);
-    }
-
-    #[test]
-    fn dragging_a_row_up_puts_it_before_the_target() {
-        use HomeSection::*;
-        let order = vec![ListenAgain, QuickPicks, MixedForYou];
-        assert_eq!(moved(&order, 2, 0), [MixedForYou, ListenAgain, QuickPicks]);
-    }
-
-    #[test]
-    fn dropping_a_row_on_itself_or_off_the_list_changes_nothing() {
-        use HomeSection::*;
-        let order = vec![ListenAgain, QuickPicks];
-        assert_eq!(moved(&order, 1, 1), order);
-        assert_eq!(moved(&order, 0, 9), order);
-        assert_eq!(moved(&order, 9, 0), order);
-    }
-
-    /// The note names the two real reasons and the fallback group, in plain words.
-    #[test]
-    fn the_note_explains_batches_late_sections_and_the_fallback() {
-        assert!(DISCLAIMER.contains("batches"));
-        assert!(DISCLAIMER.contains("arrives late"));
-        assert!(DISCLAIMER.contains("Everything else"));
+    fn moving_live_shelves_keeps_absent_preferences_and_ignores_stale_drops() {
+        let row = |key: &str| OrderRow {
+            source: HomeSource::YouTubeMusic,
+            key: key.into(),
+            title: key.into(),
+        };
+        let rows = [
+            row("forgotten favorites"),
+            row("fresh finds, old favorites"),
+            row("quick picks"),
+        ];
+        let saved = [
+            "forgotten favorites".into(),
+            "long listens".into(),
+            "quick picks".into(),
+        ];
+        assert_eq!(
+            move_shelf(&saved, &rows, &rows[1], &rows[0]).unwrap(),
+            [
+                "fresh finds, old favorites",
+                "long listens",
+                "forgotten favorites",
+                "quick picks"
+            ]
+        );
+        assert!(move_shelf(&saved, &rows, &row("gone"), &rows[0]).is_none());
+        assert!(
+            move_shelf(
+                &saved,
+                &rows,
+                &rows[0],
+                &OrderRow {
+                    source: HomeSource::Spotify,
+                    ..rows[1].clone()
+                }
+            )
+            .is_none()
+        );
     }
 }

@@ -47,14 +47,43 @@ pub fn local_shelves(tracks: &[Track], playlists: &[PlaylistRef]) -> Vec<Shelf> 
     shelves
 }
 
+pub type ShelfOrders = HashMap<crate::settings::HomeSource, Vec<String>>;
+
+fn source(shelf: &Shelf) -> crate::settings::HomeSource {
+    use crate::settings::HomeSource;
+    match shelf_provider(shelf) {
+        Some(Provider::YouTubeMusic) => HomeSource::YouTubeMusic,
+        Some(Provider::Spotify) => HomeSource::Spotify,
+        Some(Provider::Local) => HomeSource::Local,
+        None => HomeSource::Combined,
+    }
+}
+
+/// Preferences for concrete shelves take precedence; all others keep their legacy category order.
+fn sort_provider(shelves: &mut [Shelf], categories: &[HomeSection], orders: &ShelfOrders) {
+    crate::model::order_home(shelves, categories);
+    if !orders.is_empty() {
+        shelves.sort_by_cached_key(|s| {
+            orders
+                .get(&source(s))
+                .and_then(|order| {
+                    let key = s.home_order_key();
+                    order.iter().position(|k| *k == key)
+                })
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
 pub fn arrange(
     shelves: &mut Vec<Shelf>,
     order: &[HomeSection],
+    exact: &ShelfOrders,
     combined: bool,
     primary: Option<Provider>,
 ) {
     if !combined {
-        crate::model::order_home(shelves, order);
+        sort_provider(shelves, order, exact);
         return;
     }
     let mut providers: Vec<_> = Provider::ALL.into_iter().map(Some).collect();
@@ -75,7 +104,7 @@ pub fn arrange(
     let mut buckets: Vec<VecDeque<Shelf>> = buckets
         .into_iter()
         .map(|mut bucket| {
-            crate::model::order_home(&mut bucket, order);
+            sort_provider(&mut bucket, order, exact);
             bucket.into()
         })
         .collect();
@@ -101,7 +130,8 @@ pub(crate) enum DisplayShelf {
     Hidden,
 }
 
-pub(crate) fn merge_categories(shelves: &[Shelf], primary: Option<Provider>) -> Vec<DisplayShelf> {
+/// Native members and the single title Home shows for each merged group.
+fn merged_groups(shelves: &[Shelf]) -> impl Iterator<Item = (String, Vec<(usize, Provider)>)> {
     let mut groups: HashMap<_, Vec<_>> = HashMap::new();
     for (index, shelf) in shelves.iter().enumerate() {
         if let Some(key) = category_key(shelf)
@@ -110,16 +140,67 @@ pub(crate) fn merge_categories(shelves: &[Shelf], primary: Option<Provider>) -> 
             groups.entry(key).or_default().push((index, provider));
         }
     }
-    let mut display: Vec<_> = shelves.iter().map(|_| DisplayShelf::Native).collect();
-    for ((title, _, _), members) in groups {
+    groups.into_iter().filter_map(|((title, _, _), members)| {
         let mut providers = HashSet::new();
         if members.len() < 2
             || !members
                 .iter()
                 .all(|&(_, provider)| providers.insert(provider))
         {
-            continue;
+            return None;
         }
+        let title = if title == "new releases" {
+            HomeSection::NewReleases.label().to_owned()
+        } else {
+            shelves[members[0].0].title.clone()
+        };
+        Some((title, members))
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderRow {
+    pub source: crate::settings::HomeSource,
+    pub key: String,
+    pub title: String,
+}
+
+pub(crate) fn order_rows(shelves: &[Shelf], combined: bool) -> Vec<OrderRow> {
+    let mut merged = HashMap::new();
+    if combined {
+        for (title, members) in merged_groups(shelves) {
+            for (index, _) in members {
+                merged.insert(index, title.clone());
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for (i, shelf) in shelves
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.items.is_empty())
+    {
+        let source = source(shelf);
+        let key = shelf.home_order_key();
+        if !rows
+            .iter()
+            .any(|r: &OrderRow| r.source == source && r.key == key)
+        {
+            rows.push(OrderRow {
+                source,
+                key,
+                title: merged
+                    .remove(&i)
+                    .unwrap_or_else(|| shelf.home_order_title().into_owned()),
+            });
+        }
+    }
+    rows
+}
+
+pub(crate) fn merge_categories(shelves: &[Shelf], primary: Option<Provider>) -> Vec<DisplayShelf> {
+    let mut display: Vec<_> = shelves.iter().map(|_| DisplayShelf::Native).collect();
+    for (title, members) in merged_groups(shelves) {
         let index = members[0].0;
         let first = &shelves[index];
         let mut items = members
@@ -128,11 +209,7 @@ pub(crate) fn merge_categories(shelves: &[Shelf], primary: Option<Provider>) -> 
             .collect();
         crate::source_groups::prioritize_entries(&mut items, primary);
         display[index] = DisplayShelf::Merged(Shelf {
-            title: if title == "new releases" {
-                HomeSection::NewReleases.label().to_owned()
-            } else {
-                first.title.clone()
-            },
+            title,
             strapline: first.strapline.clone(),
             items,
             more_params: None,
@@ -236,6 +313,11 @@ mod tests {
             shelf(Provider::YouTubeMusic, "Quick picks", "unrelated"),
             spotify,
         ];
+        let panel = order_rows(&native, true);
+        assert_eq!(
+            panel.iter().filter(|r| r.title == "New releases").count(),
+            2
+        );
         let display = merge_categories(&native, Some(Provider::Spotify));
         let [
             DisplayShelf::Merged(releases),
@@ -289,6 +371,66 @@ mod tests {
     }
 
     #[test]
+    fn customizer_lists_real_shelves_and_reorders_the_reported_pair_independently() {
+        use crate::settings::HomeSource;
+        let yt = Provider::YouTubeMusic;
+        let mut empty = shelf(yt, "Long listens", "empty");
+        empty.items.clear();
+        let mut similar = shelf(yt, "Artist A", "artist");
+        similar.strapline = Some("Similar to".into());
+        let mut feed = vec![
+            shelf(yt, "Forgotten favorites", "forgotten"),
+            shelf(yt, "Fresh finds, old favorites", "fresh"),
+            empty,
+            similar,
+            shelf(yt, "Unexpected shelf", "custom"),
+        ];
+        let titles = |feed: &[Shelf]| {
+            order_rows(feed, false)
+                .into_iter()
+                .map(|r| r.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&feed),
+            [
+                "Forgotten favorites",
+                "Fresh finds, old favorites",
+                "Similar to Artist A",
+                "Unexpected shelf"
+            ]
+        );
+        let exact = ShelfOrders::from([(
+            HomeSource::YouTubeMusic,
+            vec![
+                "fresh finds, old favorites".into(),
+                "unexpected shelf".into(),
+                "forgotten favorites".into(),
+            ],
+        )]);
+        let categories = HomeSection::DEFAULT;
+        arrange(&mut feed, &categories, &exact, false, None);
+        assert_eq!(
+            titles(&feed),
+            [
+                "Fresh finds, old favorites",
+                "Unexpected shelf",
+                "Forgotten favorites",
+                "Similar to Artist A"
+            ]
+        );
+        let fetch = crate::model::HomeFetch::strict(&categories, &exact[&HomeSource::YouTubeMusic]);
+        assert!(
+            crate::model::home_fetch_stop(&fetch, 0, &feed[1..], std::time::Duration::ZERO)
+                .is_none()
+        );
+        assert_eq!(
+            crate::model::home_fetch_stop(&fetch, 0, &feed, std::time::Duration::ZERO),
+            Some(crate::model::HomeStop::Enough)
+        );
+    }
+
+    #[test]
     fn balanced_home_interleaves_sources_without_changing_their_rank() {
         let mut shelves = vec![
             shelf(Provider::Local, "Local second", "local2"),
@@ -298,7 +440,13 @@ mod tests {
             shelf(Provider::Local, "Local first", "local1"),
             shelf(Provider::Spotify, "Spotify second", "sp2"),
         ];
-        arrange(&mut shelves, &[HomeSection::Everything], true, None);
+        arrange(
+            &mut shelves,
+            &[HomeSection::Everything],
+            &ShelfOrders::new(),
+            true,
+            None,
+        );
         assert_eq!(
             labels(&shelves),
             ["yt2", "sp1", "local2", "yt1", "sp2", "local1"]
@@ -322,6 +470,7 @@ mod tests {
         arrange(
             &mut shelves,
             &[HomeSection::Everything],
+            &ShelfOrders::new(),
             true,
             Some(Provider::Spotify),
         );
@@ -352,6 +501,7 @@ mod tests {
                 HomeSection::ListenAgain,
                 HomeSection::Everything,
             ],
+            &ShelfOrders::new(),
             true,
             None,
         );
@@ -435,7 +585,13 @@ mod tests {
             Some(Provider::Local),
         ] {
             let mut shelves = original.clone();
-            arrange(&mut shelves, &[HomeSection::Everything], true, primary);
+            arrange(
+                &mut shelves,
+                &[HomeSection::Everything],
+                &ShelfOrders::new(),
+                true,
+                primary,
+            );
             assert_eq!(shelves.len(), original.len());
             for shelf in &original {
                 assert_eq!(
@@ -467,11 +623,18 @@ mod tests {
                 })
                 .collect();
             let mut balanced = original.clone();
-            arrange(&mut balanced, &[HomeSection::Everything], true, None);
+            arrange(
+                &mut balanced,
+                &[HomeSection::Everything],
+                &ShelfOrders::new(),
+                true,
+                None,
+            );
             let mut preferred = original;
             arrange(
                 &mut preferred,
                 &[HomeSection::Everything],
+                &ShelfOrders::new(),
                 true,
                 Some(absent),
             );
@@ -493,6 +656,7 @@ mod tests {
                 HomeSection::ListenAgain,
                 HomeSection::Everything,
             ],
+            &ShelfOrders::new(),
             false,
             Some(Provider::Spotify),
         );
