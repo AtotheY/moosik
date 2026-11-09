@@ -1,6 +1,5 @@
-//! The "Order of homepage" window: Home's sections in the order the listener wants them, moved by
-//! dragging. Opened from Settings; every move is saved at once and the feed already loaded is
-//! re-arranged with it.
+//! Home section customization, opened from Home or Appearance settings.
+//! Moving a section saves its order and rearranges the loaded feed.
 
 use crate::app::{App, Route};
 use crate::icons::Icon;
@@ -104,6 +103,12 @@ fn panel_header(ui: &mut egui::Ui, p: &theme::Palette) -> (bool, egui::Vec2) {
             egui::Vec2::ZERO
         },
     )
+}
+
+pub(super) fn open(app: &mut App) {
+    app.set_home_filter(None);
+    app.navigate(Route::Home);
+    app.home_order_open = true;
 }
 
 pub(crate) fn window(app: &mut App, ui: &mut egui::Ui) {
