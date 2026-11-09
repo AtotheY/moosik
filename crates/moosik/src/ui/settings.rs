@@ -1625,8 +1625,10 @@ fn app_icon_picker(app: &mut App, ui: &mut egui::Ui) {
                                 None => " ".to_owned(),
                             };
                             if let Some(texture) = icon.texture(ui.ctx()) {
-                                let image =
-                                    egui::Image::new((texture.id(), egui::vec2(86.0, 86.0)));
+                                let image = egui::Image::new((
+                                    texture.id(),
+                                    egui::Vec2::splat(AppIcon::PREVIEW_POINTS),
+                                ));
                                 let response = ui.add_enabled(
                                     unlocked,
                                     egui::Button::new(image)

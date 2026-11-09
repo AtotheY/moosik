@@ -189,16 +189,26 @@ impl AppIcon {
             rgba: image.into_raw(),
         }))
     }
+    pub(crate) const PREVIEW_POINTS: f32 = 86.0;
+
     pub fn texture(self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         let id = egui::Id::new(("moosik-icon", self.label()));
-        if let Some(texture) = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        let edge = (Self::PREVIEW_POINTS * ctx.pixels_per_point())
+            .ceil()
+            .clamp(1.0, 512.0) as u32;
+        let size = [edge as usize; 2];
+        if let Some(texture) = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(id))
+            && texture.size() == size
+        {
             return Some(texture);
         }
-        let img = self.image().ok()?;
-        let color = egui::ColorImage::from_rgba_unmultiplied(
-            [img.width() as usize, img.height() as usize],
-            img.as_raw(),
-        );
+        let image = self.image().ok()?;
+        let image = if image.dimensions() == (edge, edge) {
+            image
+        } else {
+            image::imageops::resize(&image, edge, edge, image::imageops::FilterType::Triangle)
+        };
+        let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
         let texture = ctx.load_texture(
             format!("moosik-icon-{}", self.label()),
             color,
@@ -272,6 +282,26 @@ impl AppIcon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_use_display_pixels_and_reuse_the_current_size() {
+        let ctx = egui::Context::default();
+        for scale in [1.0, 2.0] {
+            ctx.set_pixels_per_point(scale);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let preview = AppIcon::Ceramic.texture(ui.ctx()).unwrap();
+                let reused = AppIcon::Ceramic.texture(ui.ctx()).unwrap();
+                assert_eq!(
+                    preview.size(),
+                    [(AppIcon::PREVIEW_POINTS * scale) as usize; 2]
+                );
+                assert_eq!(preview.id(), reused.id());
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(AppIcon::Ceramic.window_data().unwrap().width, 512);
+    }
+
     #[test]
     fn existing_and_future_settings_keep_other_preferences() {
         for value in [
