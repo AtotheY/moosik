@@ -1,9 +1,6 @@
-//! Private, append-only listening telemetry. No credentials or stream URLs enter this module.
-//! The UI samples mpv; one worker owns recording and exports. Optional genre matching sends
-//! online song title and artist to Apple, but never plays, times, or the listening database.
+//! Private listening history, recording and exports.
 pub mod awards;
 pub mod collection;
-mod genre;
 pub mod report;
 mod store;
 use crate::model::Track;
@@ -169,10 +166,18 @@ pub enum Export {
     Recap,
     Database,
 }
+fn local_monday() -> chrono::NaiveDate {
+    Local::now()
+        .date_naive()
+        .week(chrono::Weekday::Mon)
+        .first_day()
+}
+
 enum Command {
+    RefreshWeeks,
     Records(Vec<Record>),
     Report(Query),
-    Tags(String, String, String, i32, bool),
+    Tags(String, String, i32),
     Export(Export, PathBuf, Query),
     Shutdown,
 }
@@ -180,9 +185,12 @@ enum Reply {
     Collection(collection::Collection),
     CollectionUnavailable,
     Credits(Vec<collection::Hearing>, Vec<String>),
-    PeakWeekMinutes(u32),
+    WeekMinutes {
+        best: u32,
+        monday: chrono::NaiveDate,
+        current: u32,
+    },
     Report(Box<Report>),
-    GenresUpdated,
     Error(String),
     Saved(String),
 }
@@ -266,6 +274,8 @@ pub struct Ledger {
     pub collection: Option<collection::Collection>,
     pub collection_unavailable: bool,
     pub peak_week_minutes: Option<u32>,
+    pub current_week_minutes: Option<u32>,
+    week_requested: chrono::NaiveDate,
     pub report: Option<std::sync::Arc<Report>>,
     pub error: Option<String>,
     pub notice: Option<String>,
@@ -304,6 +314,8 @@ impl Ledger {
             collection: None,
             collection_unavailable: false,
             peak_week_minutes: None,
+            current_week_minutes: None,
+            week_requested: local_monday(),
             report: None,
             error,
             notice: None,
@@ -498,6 +510,12 @@ impl Ledger {
         self.last_flush = Instant::now();
     }
     pub fn poll(&mut self) {
+        let monday = local_monday();
+        if monday != self.week_requested {
+            self.week_requested = monday;
+            self.current_week_minutes = None;
+            let _ = self.tx.send(Command::RefreshWeeks);
+        }
         while let Ok(reply) = self.rx.try_recv() {
             match reply {
                 Reply::CollectionUnavailable => self.collection_unavailable = true,
@@ -515,12 +533,20 @@ impl Ledger {
                         }
                     }
                 }
-                Reply::PeakWeekMinutes(peak) => self.peak_week_minutes = Some(peak),
+                Reply::WeekMinutes {
+                    best,
+                    monday,
+                    current,
+                } => {
+                    self.peak_week_minutes = Some(best);
+                    if self.week_requested == monday {
+                        self.current_week_minutes = Some(current);
+                    }
+                }
                 Reply::Report(report) => {
                     self.report = Some(std::sync::Arc::from(report));
                     self.loading = false;
                 }
-                Reply::GenresUpdated => self.requested = None,
                 Reply::Error(e) => {
                     self.error = Some(e);
                     self.loading = false;
@@ -547,17 +573,8 @@ impl Ledger {
             self.error = Some("Listening database is offline. Restart Moosik.".into());
         }
     }
-    pub fn tags(
-        &mut self,
-        id: String,
-        genres: String,
-        tags: String,
-        rating: i32,
-        genre_changed: bool,
-    ) {
-        let _ = self
-            .tx
-            .send(Command::Tags(id, genres, tags, rating, genre_changed));
+    pub fn tags(&mut self, id: String, tags: String, rating: i32) {
+        let _ = self.tx.send(Command::Tags(id, tags, rating));
         self.requested = None;
     }
     pub fn export(&mut self, kind: Export, path: PathBuf, query: Query) {
