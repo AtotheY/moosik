@@ -840,10 +840,17 @@ async fn start(
     let started = Instant::now();
     let cache_generation = CACHE_GENERATION.load(Ordering::SeqCst);
     let prepare = async {
+        let waiting = Instant::now();
         let report_turn = REPORT_TURN.lock().await;
+        let report_wait_ms = waiting.elapsed().as_millis();
         let started = Instant::now();
         let track = transport.prepare_for_playback(uri).await?;
-        Result::<_>::Ok((track, started.elapsed().as_millis(), report_turn))
+        Result::<_>::Ok((
+            track,
+            started.elapsed().as_millis(),
+            report_wait_ms,
+            report_turn,
+        ))
     };
     let service_certificate = async {
         let started = Instant::now();
@@ -926,7 +933,7 @@ async fn start(
         reused
     };
     let renderer_started = Instant::now();
-    let ((track, prepare_ms, report_turn), (certificate, certificate_ms)) =
+    let ((track, prepare_ms, report_wait_ms, report_turn), (certificate, certificate_ms)) =
         tokio::try_join!(prepare, service_certificate)?;
     if let Some(error) = handle.last_error() {
         bail!(error);
@@ -1066,6 +1073,7 @@ async fn start(
         if handle.0.playing.load(Ordering::SeqCst) {
             tracing::info!(
                 prepare_ms,
+                report_wait_ms,
                 certificate_ms,
                 renderer_reused,
                 renderer_ms = renderer_started.elapsed().as_millis(),

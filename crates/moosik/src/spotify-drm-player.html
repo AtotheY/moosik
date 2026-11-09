@@ -113,7 +113,7 @@ function fail(code) {
 async function request(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    signal: path === 'media' || path === 'meta'
+    signal: path === 'media' || path === 'meta' || path === 'certificate'
       ? requests.signal
       : AbortSignal.any([requests.signal, AbortSignal.timeout(30000)]),
   });
@@ -253,6 +253,11 @@ async function begin() {
     }
     const media = request('media');
     void media.catch(() => {});
+    const configuration = Promise.all([
+      request('meta').then(response => response.json()),
+      request('certificate').then(response => response.arrayBuffer()),
+    ]);
+    void configuration.catch(() => {});
     let access;
     try {
       access = await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
@@ -268,7 +273,7 @@ async function begin() {
     }
     const keys = await access.createMediaKeys();
     await audio.setMediaKeys(keys);
-    const meta = await (await request('meta')).json();
+    const [meta, certificate] = await configuration;
     if (stopped) return;
     if (Number.isFinite(meta.duration) && meta.duration > 0 && meta.duration <= 86400) declaredDuration = meta.duration;
     if (!volumeChanged && Number.isFinite(meta.volume)) desiredVolume = Math.max(0, Math.min(100, meta.volume));
@@ -303,8 +308,7 @@ async function begin() {
         if (!stopped) fail(10);
       }
     });
-    const certificate = await request('certificate');
-    if (!await keys.setServerCertificate(await certificate.arrayBuffer())) throw new Error();
+    if (!await keys.setServerCertificate(certificate)) throw new Error();
     const reader = (await media).body.getReader();
     if (stopped || errorCode !== null) return;
     const source = new MediaSource();
