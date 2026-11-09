@@ -390,25 +390,13 @@ impl View {
         // Pins are positioned inside the active region. Only draw a bridge for
         // a credited artist actually present in a second visible genre.
         let home = islands[selected - start];
-        let limit = if home.width() > 230. && home.height() > 240. {
-            3
-        } else if home.height() > 122. {
-            1
-        } else {
-            0
-        };
-        let mut pins: Vec<_> = (0..group.artists.len().min(limit)).collect();
+        let offsets = pin_offsets(home, group.artists.len());
+        let mut pins: Vec<_> = (0..offsets.len()).collect();
         if !pins.is_empty() && !pins.contains(&artist) {
             *pins.last_mut().unwrap() = artist;
         }
-        for (n, &ai) in pins.iter().enumerate() {
+        for (ai, &(dx, dy)) in pins.into_iter().zip(offsets) {
             let a = &group.artists[ai];
-            let spread = home.width() > 265. && pins.len() > 1;
-            let (dx, dy) = if spread {
-                [(-0.14, 0.025), (0.17, 0.15), (-0.07, 0.285)][n]
-            } else {
-                (0., 0.08)
-            };
             let center = home.center() + vec2(dx * home.width(), dy * home.height());
             let width = widgets::text_width(ui, &a.name, &theme::medium(12.)) + 46.;
             let slot = Rect::from_center_size(center, vec2(width.min(home.width() * 0.70), 32.));
@@ -507,6 +495,17 @@ fn artist_detail(
     }
     *active_artist = artist;
 }
+fn pin_offsets(region: Rect, artists: usize) -> &'static [(f32, f32)] {
+    let slots: &[(f32, f32)] = if artists > 1 && region.width() > 230. && region.height() > 240. {
+        &[(-0.14, 0.), (0.17, 0.15), (-0.07, 0.30)]
+    } else if region.height() > 122. {
+        &[(0., 0.08)]
+    } else {
+        &[]
+    };
+    &slots[..artists.min(slots.len())]
+}
+
 // Reserve room for labels at the smallest sizes; distribute all remaining area by time.
 // Selection never moves the regions, so the map stays legible while exploring.
 fn layout(r: Rect, times: &[f64], compact: bool) -> Vec<Rect> {
@@ -547,6 +546,18 @@ fn layout(r: Rect, times: &[f64], compact: bool) -> Vec<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn three_pins_in_a_narrow_genre_have_separate_hit_targets() {
+        let canvas = Rect::from_min_size(pos2(0., 0.), vec2(700., 330.));
+        let region = layout(canvas, &[65., 35.], false)[1].shrink(2.);
+        let slots = pin_offsets(region, 3);
+        assert_eq!(slots.len(), 3);
+        for pair in slots.windows(2) {
+            // Even the longest artist labels have disjoint 32-point-high hit targets.
+            assert!((pair[1].1 - pair[0].1) * region.height() > 32.);
+        }
+    }
+
     #[test]
     fn shared_artists_and_tags_do_not_duplicate_time_or_tracks() {
         let make = |name: &str, genres: &str, time: f64, plays: u64| Row {
