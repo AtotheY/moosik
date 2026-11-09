@@ -34,5 +34,45 @@
   "bloom": {
     "path": "bloom-master.png",
     "prompt": "Use case: style-transfer. Edit the attached production Moosik Eclipse icon into the bloom finish. Change ONLY colors and material to: soft satin blush-pink ceramic disc, rich burgundy crescent aperture, deep wine-red tile, tasteful soft bevel. Preserve the EXACT silhouette, proportions, front-facing orientation, round disc, sharp black inward crescent cut at its right edge, rounded-square tile, tile position, equal transparent margin and square canvas of the reference. This is one production macOS app icon, not a board. Keep 80% canvas tile coverage. Genuine alpha transparency everywhere outside the tile, no outer shadows, no floating pixels, no speckles, no objects outside tile. All tile interior opaque except material effect on disc stays backed by opaque tile. Clean premium Arc-level craftsmanship, legible at small sizes. No text, no labels, no extra design elements."
+  },
+  "pearl": {
+    "path": "pearl.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: luminous ivory mother-of-pearl with broad pink and jade nacre reflections, on deep peacock teal enamel."
+  },
+  "vinyl": {
+    "path": "vinyl.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: a near-black vinyl record face with fine tightly-spaced concentric grooves and two soft radial reflection bands, on vivid vermilion lacquer. No record label or spindle hole."
+  },
+  "amethyst": {
+    "path": "amethyst.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: translucent saturated purple amethyst glass on pale lilac with a deep violet aperture."
+  },
+  "matcha": {
+    "path": "matcha.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: pale yellow-green satin matcha glaze on warm dark umber, subtle speckles."
+  },
+  "solar": {
+    "path": "solar.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: a brilliant polished yellow brass sun with fine radial brushing, strongly contrasting rich ultramarine blue tile."
+  },
+  "denim": {
+    "path": "denim.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: soft ecru woven disc on indigo denim tile with fine diagonal twill, no stitches, no seams."
+  },
+  "marble": {
+    "path": "marble.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: cool white Carrara marble with a few elegant graphite veins on solid charcoal."
+  },
+  "lagoon": {
+    "path": "lagoon.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: translucent bright turquoise sea glass on deep ocean petrol blue, luminous frosted rim."
+  },
+  "cherry": {
+    "path": "cherry.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: glossy candy-apple red enamel on pale seashell pink tile, oxblood crescent."
+  },
+  "carbon": {
+    "path": "carbon.png",
+    "prompt": "Use case: style-transfer. Edit the attached Moosik Eclipse app icon into a single finished production asset. Exactly match the reference front-facing disc, deep sharply tapered inward crescent cut on its right edge, rounded square tile occupying 81% of the square canvas, centred alignment and equal transparent margins. Change only materials and colors. All tile interior opaque. No floating shadows around tile, text, extra elements or decoration. Legible at 32px. Finish: a restrained dark carbon-fibre weave disc on a flat acid-chartreuse tile, dark graphite crescent with a reflected lime rim."
   }
 }

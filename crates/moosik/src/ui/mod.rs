@@ -13,6 +13,7 @@ pub mod help;
 pub mod history;
 pub mod home;
 pub mod home_order;
+mod keepsakes;
 pub mod library;
 pub(crate) mod liked_music;
 pub mod listening;

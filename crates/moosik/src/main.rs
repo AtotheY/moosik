@@ -263,7 +263,7 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(egui::IconData::default());
         None
     } else {
-        settings.app_icon.window_data().ok()
+        settings.app_icon.available_at(0).window_data().ok()
     };
     if let Some(icon) = &startup_icon {
         viewport = viewport.with_icon(std::sync::Arc::clone(icon));

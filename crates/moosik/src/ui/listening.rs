@@ -19,6 +19,7 @@ enum Tab {
     Genres,
     History,
     Recap,
+    Passes,
 }
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Period {
@@ -131,7 +132,7 @@ const PERIODS: [(Period, &str); 7] = [
     (Period::All, "All time"),
     (Period::Custom, "Custom dates"),
 ];
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 8] = [
     (Tab::Overview, "Overview"),
     (Tab::Songs, "Songs"),
     (Tab::Artists, "Artists"),
@@ -139,6 +140,7 @@ const TABS: [(Tab, &str); 7] = [
     (Tab::Genres, "Genres"),
     (Tab::History, "History"),
     (Tab::Recap, "My recap"),
+    (Tab::Passes, "Artist passes"),
 ];
 
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
@@ -147,52 +149,55 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "listening-stats-v2").show(ui, |ui| {
         crate::ui::page_title(ui, &p, "Your listening");
         let mut refresh = false;
-        ui.horizontal_wrapped(|ui| {
-            let period = PERIODS
-                .iter()
-                .find(|(v, _)| *v == app.listening_view.period)
-                .unwrap()
-                .1;
-            if let Some(i) = dropdown(ui, &p, "stats-period", period, &PERIODS.map(|(_, s)| s)) {
-                app.listening_view.period = PERIODS[i].0;
-                refresh = true;
-            }
-            source_filter(app, ui, &p, &mut refresh);
-            if widgets::outline_button(ui, &p, "Share my week").clicked() {
-                app.listening_view.period = Period::Week;
-                app.listening_view.source.clear();
-                app.listening_view.tab = Tab::Recap;
-                app.listening_view.share_feedback = None;
-                app.listening_view.share = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let more = widgets::icon_button(ui, &p, Icon::Ellipsis, 20.0, false)
-                    .on_hover_text("Export and more");
-                utility_menu(app, ui, &more, &mut refresh);
-                if widgets::icon_button(ui, &p, Icon::Info, 18.0, false)
-                    .on_hover_text("About your stats")
-                    .clicked()
-                {
-                    app.listening_view.help = true;
-                }
-            });
-        });
-        if app.listening_view.period == Period::Custom {
-            if app.listening_view.from.is_empty() {
-                app.listening_view.from =
-                    Local::now().date_naive().with_day(1).unwrap().to_string();
-                app.listening_view.to = Local::now().date_naive().to_string();
-            }
-            ui.add_space(8.0);
+        if app.listening_view.tab != Tab::Passes {
             ui.horizontal_wrapped(|ui| {
-                widgets::text_input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
-                ui.label(
-                    RichText::new("to")
-                        .font(theme::regular(12.0))
-                        .color(p.secondary),
-                );
-                widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
+                let period = PERIODS
+                    .iter()
+                    .find(|(v, _)| *v == app.listening_view.period)
+                    .unwrap()
+                    .1;
+                if let Some(i) = dropdown(ui, &p, "stats-period", period, &PERIODS.map(|(_, s)| s))
+                {
+                    app.listening_view.period = PERIODS[i].0;
+                    refresh = true;
+                }
+                source_filter(app, ui, &p, &mut refresh);
+                if widgets::outline_button(ui, &p, "Share my week").clicked() {
+                    app.listening_view.period = Period::Week;
+                    app.listening_view.source.clear();
+                    app.listening_view.tab = Tab::Recap;
+                    app.listening_view.share_feedback = None;
+                    app.listening_view.share = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let more = widgets::icon_button(ui, &p, Icon::Ellipsis, 20.0, false)
+                        .on_hover_text("Export and more");
+                    utility_menu(app, ui, &more, &mut refresh);
+                    if widgets::icon_button(ui, &p, Icon::Info, 18.0, false)
+                        .on_hover_text("About your stats")
+                        .clicked()
+                    {
+                        app.listening_view.help = true;
+                    }
+                });
             });
+            if app.listening_view.period == Period::Custom {
+                if app.listening_view.from.is_empty() {
+                    app.listening_view.from =
+                        Local::now().date_naive().with_day(1).unwrap().to_string();
+                    app.listening_view.to = Local::now().date_naive().to_string();
+                }
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    widgets::text_input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
+                    ui.label(
+                        RichText::new("to")
+                            .font(theme::regular(12.0))
+                            .color(p.secondary),
+                    );
+                    widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
+                });
+            }
         }
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
@@ -204,6 +209,18 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(GAP);
+        if app.listening_view.tab == Tab::Passes {
+            super::keepsakes::sheet(
+                ui,
+                &p,
+                app.listening.collection.as_ref(),
+                app.listening.error.as_deref().or(app
+                    .listening
+                    .collection_unavailable
+                    .then_some("Artist passes are unavailable for this listening history.")),
+            );
+            return;
+        }
         let query = match app.listening_view.query() {
             Ok(q) => q,
             Err(e) => {
@@ -252,6 +269,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             }
         } else {
             match app.listening_view.tab {
+                Tab::Passes => unreachable!("lifetime collection rendered above"),
                 Tab::Overview => overview(app, ui, &report),
                 Tab::Songs => songs(app, ui, &report),
                 Tab::Artists => ranking(app, ui, &report, Tab::Artists),

@@ -22,13 +22,23 @@ pub enum AppIcon {
     Copper,
     Ink,
     Bloom,
+    Pearl,
+    Vinyl,
+    Amethyst,
+    Matcha,
+    Solar,
+    Denim,
+    Marble,
+    Lagoon,
+    Cherry,
+    Carbon,
     #[default]
     #[serde(other)]
     Ceramic,
 }
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 impl AppIcon {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 20] = [
         Self::Ceramic,
         Self::Celadon,
         Self::Midnight,
@@ -39,7 +49,45 @@ impl AppIcon {
         Self::Copper,
         Self::Ink,
         Self::Bloom,
+        Self::Pearl,
+        Self::Vinyl,
+        Self::Amethyst,
+        Self::Matcha,
+        Self::Solar,
+        Self::Denim,
+        Self::Marble,
+        Self::Lagoon,
+        Self::Cherry,
+        Self::Carbon,
     ];
+    /// Best local calendar week required to equip this finish, in hours.
+    pub fn milestone(self) -> Option<u32> {
+        match self {
+            Self::Pearl => Some(5),
+            Self::Vinyl => Some(10),
+            Self::Amethyst => Some(15),
+            Self::Matcha => Some(20),
+            Self::Solar => Some(25),
+            Self::Denim => Some(30),
+            Self::Marble => Some(35),
+            Self::Lagoon => Some(40),
+            Self::Cherry => Some(45),
+            Self::Carbon => Some(50),
+            _ => None,
+        }
+    }
+
+    pub fn available_at(self, peak_minutes: u32) -> Self {
+        if self
+            .milestone()
+            .is_some_and(|hours| peak_minutes < hours * 60)
+        {
+            Self::Ceramic
+        } else {
+            self
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Ceramic => "Ceramic",
@@ -52,6 +100,16 @@ impl AppIcon {
             Self::Copper => "Copper",
             Self::Ink => "Ink",
             Self::Bloom => "Bloom",
+            Self::Pearl => "Pearl",
+            Self::Vinyl => "Vinyl",
+            Self::Amethyst => "Amethyst",
+            Self::Matcha => "Matcha",
+            Self::Solar => "Solar",
+            Self::Denim => "Denim",
+            Self::Marble => "Marble",
+            Self::Lagoon => "Lagoon",
+            Self::Cherry => "Cherry",
+            Self::Carbon => "Carbon",
         }
     }
     pub fn png(self) -> &'static [u8] {
@@ -83,6 +141,36 @@ impl AppIcon {
             Self::Ink => include_bytes!("../../../assets/branding/moosik/eclipse/variants/ink.png"),
             Self::Bloom => {
                 include_bytes!("../../../assets/branding/moosik/eclipse/variants/bloom.png")
+            }
+            Self::Pearl => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/pearl.png")
+            }
+            Self::Vinyl => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/vinyl.png")
+            }
+            Self::Amethyst => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/amethyst.png")
+            }
+            Self::Matcha => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/matcha.png")
+            }
+            Self::Solar => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/solar.png")
+            }
+            Self::Denim => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/denim.png")
+            }
+            Self::Marble => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/marble.png")
+            }
+            Self::Lagoon => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/lagoon.png")
+            }
+            Self::Cherry => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/cherry.png")
+            }
+            Self::Carbon => {
+                include_bytes!("../../../assets/branding/moosik/eclipse/variants/carbon.png")
             }
         }
     }
@@ -199,7 +287,21 @@ mod tests {
         }
     }
     #[test]
-    fn all_ten_selections_round_trip_and_decode_as_distinct_icons() {
+    fn only_the_new_finishes_require_a_personal_best() {
+        for (index, icon) in AppIcon::ALL.into_iter().enumerate() {
+            if index < 10 {
+                assert_eq!(icon.milestone(), None);
+                assert_eq!(icon.available_at(0), icon);
+            } else {
+                let minutes = (index as u32 - 9) * 5 * 60;
+                assert_eq!(icon.available_at(minutes - 1), AppIcon::Ceramic);
+                assert_eq!(icon.available_at(minutes), icon);
+            }
+        }
+    }
+
+    #[test]
+    fn all_selections_round_trip_and_decode_as_distinct_icons() {
         let mut images = std::collections::HashSet::new();
         for icon in AppIcon::ALL {
             let settings: crate::settings::Settings =

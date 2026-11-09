@@ -248,7 +248,7 @@ fn groups(map: HashMap<String, (Group, HashSet<String>)>) -> Vec<Group> {
 }
 const FACTOR: &str = "max(0,min(g.end_ms,?2)-max(g.start_ms,?1))*1.0/max(1,g.end_ms-g.start_ms)";
 
-fn qualified_play(time: f64, duration: f64) -> u64 {
+pub(super) fn qualified_play(time: f64, duration: f64) -> u64 {
     let threshold = if duration > 0.0 {
         30_000.0_f64.min(duration * 500.0)
     } else {
