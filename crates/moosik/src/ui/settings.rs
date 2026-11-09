@@ -971,9 +971,7 @@ fn home_settings(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     if open_order {
-        app.set_home_filter(None);
-        app.navigate(crate::app::Route::Home);
-        app.home_order_open = true;
+        super::home_order::open(app);
     }
     let ctx = ui.ctx().clone();
     app.update_settings(&ctx, |s| s.home_strict_order = strict);

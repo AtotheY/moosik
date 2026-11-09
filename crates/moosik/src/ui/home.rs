@@ -60,8 +60,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
     if app.home_loading && app.home.is_none() {
         // The first row's distance from the card's top, matching the sides.
         ui.add_space(theme::PAGE_INSET_X);
-        // The feed's own mood chips head it, as `filter_chips` draws them.
-        filter_chips(app, ui);
+        home_controls(app, ui);
         ui.add_space(4.0);
         // The real feed is several titled shelves, mixing grids and row-lists — never one
         // untitled block. Which shelves are coming can't be known before they load, so this is
@@ -95,6 +94,8 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     if let Some(err) = app.home_error.clone() {
+        ui.add_space(theme::PAGE_INSET_X);
+        home_controls(app, ui);
         failed(app, ui, err, App::retry_route);
         return;
     }
@@ -104,9 +105,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // distance from the card's top — the same as from its sides — and it scrolls away with
         // the feed. Outside the area it was a fixed band the feed was clipped under.
         ui.add_space(theme::PAGE_INSET_X);
+        home_controls(app, ui);
         home_warnings(app, ui);
         sign_in_note(app, ui);
-        filter_chips(app, ui);
 
         // One snapshot for the frame — a refcount bump, not a copy of every shelf. `shelf`
         // needs `&mut App` for navigation and the texture cache, which rules out borrowing
@@ -348,6 +349,16 @@ fn filter_row(
         None
     };
     (choice, clear)
+}
+
+fn home_controls(app: &mut App, ui: &mut egui::Ui) {
+    // Reserve the trailing action first so mood filters can wrap in the remaining space.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        if widgets::outline_button(ui, &app.palette, "Customize Home").clicked() {
+            super::home_order::open(app);
+        }
+        ui.vertical(|ui| filter_chips(app, ui));
+    });
 }
 
 fn filter_chips(app: &mut App, ui: &mut egui::Ui) {

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Default)]
 pub struct Collection {
+    pub revision: u64,
     pub sleeves: HashMap<String, Sleeve>,
     pub passes: BTreeMap<String, ArtistPass>,
 }
@@ -14,11 +15,16 @@ pub struct Collection {
 pub struct Sleeve {
     pub completed: u64,
     pub first_day: String,
+    pub title: String,
+    pub artwork: Option<std::sync::Arc<str>>,
+    pub artist: String,
+    pub listen_ms: f64,
 }
 
 #[derive(Default)]
 pub struct ArtistPass {
     pub name: String,
+    pub listen_ms: f64,
     songs: HashSet<String>,
     days: HashSet<String>,
     pub stamps: Vec<Stamp>,
@@ -30,6 +36,10 @@ pub struct Stamp {
 
 pub const TIERS: [&str; 4] = ["Admit One", "Regular", "Backstage", "All Access"];
 impl ArtistPass {
+    pub fn songs(&self) -> usize {
+        self.songs.len()
+    }
+
     pub fn days(&self) -> usize {
         self.days.len()
     }
@@ -69,6 +79,7 @@ pub(super) struct Hearing {
     track: Metadata,
     day: String,
     qualified: bool,
+    listen_ms: f64,
 }
 impl Hearing {
     fn read(row: &Row<'_>) -> Result<Self> {
@@ -76,6 +87,7 @@ impl Hearing {
         Ok(Self {
             track,
             day: row.get(1)?,
+            listen_ms: row.get(2)?,
             qualified: qualified_play(row.get(2)?, row.get(3)?) > 0,
         })
     }
@@ -87,21 +99,39 @@ impl Collection {
             track,
             day,
             qualified,
+            listen_ms,
         } = hearing;
+        self.revision += 1;
         let sleeve = self.sleeves.entry(track.id.clone()).or_default();
+        sleeve.listen_ms += listen_ms;
+        sleeve.title.clone_from(&track.title);
+        if let Some(url) = track.artwork.as_deref()
+            && sleeve.artwork.as_deref() != Some(url)
+        {
+            sleeve.artwork = Some(url.into());
+        }
+        sleeve.artist = track
+            .artists
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         if sleeve.first_day.is_empty() || day < sleeve.first_day {
             sleeve.first_day.clone_from(&day);
         }
-        if qualified {
-            for (name, id) in &track.artists {
-                if name.trim().is_empty() {
-                    continue;
-                }
-                let pass = self
-                    .passes
-                    .entry(artist_key(name, id.as_deref()))
-                    .or_default();
-                pass.name.clone_from(name);
+        let mut credited = HashSet::new();
+        for (name, id) in &track.artists {
+            if name.trim().is_empty() {
+                continue;
+            }
+            let key = artist_key(name, id.as_deref());
+            if !credited.insert(key.clone()) {
+                continue;
+            }
+            let pass = self.passes.entry(key).or_default();
+            pass.name.clone_from(name);
+            pass.listen_ms += listen_ms;
+            if qualified {
                 pass.credit(&track, &day);
             }
         }
@@ -152,15 +182,29 @@ const COMPLETED: &str = "ended_ms IS NOT NULL AND duration > 0 AND coverage_ms >
 pub(super) fn updates(db: &Connection, records: &[Record]) -> Result<(Vec<Hearing>, Vec<String>)> {
     let mut hearings = Vec::new();
     let mut completed = Vec::new();
-    let mut seen = HashSet::new();
+    // The query returns cumulative daily credit for milestone qualification. Add
+    // only this committed batch's new time to the lifetime listening totals.
+    let mut deltas = HashMap::new();
+    for record in records {
+        if let Record::Segment(s) = record
+            && s.listen_ms > 0.
+        {
+            *deltas.entry((&s.session, &s.day)).or_insert(0.) += s.listen_ms;
+        }
+    }
     for record in records {
         match record {
-            Record::Segment(s) if s.listen_ms > 0.0 && seen.insert((&s.session, &s.day)) => {
+            Record::Segment(s) if s.listen_ms > 0.0 => {
+                let Some(delta) = deltas.remove(&(&s.session, &s.day)) else {
+                    continue;
+                };
                 let mut stmt =
                     db.prepare_cached(&format!("{HEARINGS} WHERE h.session_id=?1 AND h.day=?2"))?;
                 let mut rows = stmt.query((&s.session, &s.day))?;
                 if let Some(row) = rows.next()? {
-                    hearings.push(Hearing::read(row)?);
+                    let mut hearing = Hearing::read(row)?;
+                    hearing.listen_ms = delta;
+                    hearings.push(hearing);
                 }
             }
             Record::End { id, .. } => {
@@ -191,6 +235,7 @@ mod tests {
                 ..Default::default()
             },
             day: day.to_string(),
+            listen_ms: 30000.,
             qualified,
         }
     }
@@ -200,7 +245,7 @@ mod tests {
         let mut c = Collection::default();
         let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         c.hear(heard(0, start, false));
-        assert!(c.passes.is_empty());
+        assert_eq!(c.passes["id"].days(), 0);
         for i in 0..9 {
             c.hear(heard(i, start, true));
         }
@@ -251,7 +296,7 @@ mod tests {
             )
             .unwrap();
         }
-        let initial = Collection::load(&db).unwrap();
+        let mut initial = Collection::load(&db).unwrap();
         assert_eq!(initial.sleeves["song"].completed, 5);
         assert_eq!(initial.sleeves["song"].first_day, "2026-03-01");
         assert_eq!(initial.passes["artist"].stamps[0].day, "2026-03-05");
@@ -276,8 +321,43 @@ mod tests {
         db.execute_batch("UPDATE sessions SET coverage_ms=90000 WHERE id='new'")
             .unwrap();
         assert_eq!(updates(&db, &[end]).unwrap().1, ["song"]);
+        // A batch can contain several samples for a previously credited day.
+        // Re-reading cumulative credit must not count the old samples again.
+        let day = "2026-03-05";
+        let sample = Record::Segment(super::super::Segment {
+            session: "5".into(),
+            day: day.into(),
+            start_ms: 7,
+            end_ms: 8,
+            from: 0.,
+            to: 0.,
+            listen_ms: 500.,
+            media_ms: 500.,
+            paused_ms: 0.,
+            buffer_ms: 0.,
+            muted_ms: 0.,
+            unobserved_ms: 0.,
+            hour: 12,
+            weekday: 0,
+            offset_seconds: 0,
+            volume: 1.,
+            speed: 1.,
+            coverage_ms: 0.,
+            duration: 100.,
+        });
+        for _ in 0..2 {
+            db.execute("INSERT INTO segments VALUES ('5',?1,7,500)", [day])
+                .unwrap();
+        }
+        let (hearings, _) = updates(&db, &[sample.clone(), sample]).unwrap();
+        assert_eq!(hearings.len(), 1);
+        for h in hearings {
+            initial.hear(h);
+        }
+        assert_eq!(initial.passes["artist"].listen_ms, 151000.);
         let restored = Collection::load(&db).unwrap();
         assert_eq!(restored.sleeves["song"].completed, 6);
+        assert_eq!(restored.sleeves["song"].listen_ms, 182000.);
         assert_eq!(restored.passes["artist"].days(), 6);
     }
 }

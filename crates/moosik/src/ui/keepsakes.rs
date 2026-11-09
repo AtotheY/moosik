@@ -1,5 +1,5 @@
 //! Small player artwork and the artist-pass sheet. All coordinates are logical points.
-use crate::listening::collection::{ArtistPass, Collection, TIERS};
+use crate::listening::collection::{ArtistPass, TIERS};
 use crate::{theme, widgets};
 use egui::{Align2, Color32, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
 
@@ -13,7 +13,8 @@ pub fn sleeve(ui: &Ui, cover: Rect, plays: u64) {
         return;
     }
     let painter = ui.painter().with_clip_rect(cover.intersect(ui.clip_rect()));
-    let point = |x, y| cover.left_top() + vec2(x, y);
+    let scale = cover.width() / 56.;
+    let point = |x, y| cover.left_top() + vec2(x, y) * scale;
     // A few exposed paper fibres along the upper right corner of the jacket.
     for (a, b) in [
         ((42., 2.), (49., 2.)),
@@ -28,7 +29,7 @@ pub fn sleeve(ui: &Ui, cover: Rect, plays: u64) {
             let arc = (0..=20)
                 .map(|i| {
                     let a = start + (end - start) * i as f32 / 20.;
-                    cover.center() + egui::Vec2::angled(a) * 22.5
+                    cover.center() + egui::Vec2::angled(a) * (22.5 * scale)
                 })
                 .collect::<Vec<_>>();
             painter.add(Shape::line(
@@ -211,43 +212,271 @@ pub fn player_pass(
     });
 }
 
-pub fn sheet(
+#[derive(Default, PartialEq, Clone, Copy)]
+enum Category {
+    Icons,
+    #[default]
+    Artists,
+    Songs,
+}
+#[derive(Default)]
+pub(super) struct Shelf {
+    browse: Option<Category>,
+    search: String,
+    revision: Option<u64>,
+    artists: Vec<String>,
+    songs: Vec<String>,
+}
+fn by_time<'a>(items: impl Iterator<Item = (&'a String, f64)>) -> Vec<String> {
+    let mut items: Vec<_> = items.collect();
+    items.sort_by(|(a, ta), (b, tb)| tb.total_cmp(ta).then(a.cmp(b)));
+    items.into_iter().map(|(key, _)| key.clone()).collect()
+}
+fn reward_row(
     ui: &mut Ui,
     p: &theme::Palette,
-    collection: Option<&Collection>,
-    error: Option<&str>,
-) {
-    let Some(collection) = collection else {
-        ui.label(error.unwrap_or("Loading passes…"));
-        return;
-    };
-    let mut passes: Vec<_> = collection
-        .passes
-        .iter()
-        .filter(|(_, p)| !p.stamps.is_empty())
-        .collect();
-    if passes.is_empty() {
-        ui.label(egui::RichText::new("Your first artist pass").font(theme::semibold(18.)));
-        ui.label("Listen to 10 different songs by one artist, or return on 5 different days.");
-        return;
+    title: &str,
+    detail: &str,
+    mark: impl FnOnce(&Ui, Rect),
+) -> egui::Response {
+    let (r, hit) = ui.allocate_exact_size(
+        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        Sense::hover(),
+    );
+    if ui.is_rect_visible(r) {
+        let tile = Rect::from_center_size(pos2(r.left() + 22., r.center().y), vec2(38., 38.));
+        mark(ui, tile);
+        let x = tile.right() + 12.;
+        for (label, dy, font, color) in [
+            (title, -9., theme::semibold(14.), p.text),
+            (detail, 10., theme::regular(12.), p.secondary),
+        ] {
+            ui.painter().text(
+                pos2(x, r.center().y + dy),
+                Align2::LEFT_CENTER,
+                widgets::truncate_to(ui, label, font.clone(), r.right() - x),
+                font,
+                color,
+            );
+        }
     }
-    passes.sort_by(|a, b| a.1.name.cmp(&b.1.name).then(a.0.cmp(b.0)));
-    let columns = ((ui.available_width() + 10.) / 230.).floor().max(1.) as usize;
-    let width = ((ui.available_width() - 10. * (columns - 1) as f32) / columns as f32).min(290.);
-    for row in passes.chunks(columns) {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.;
-            for (key, pass) in row {
-                let id = ui.id().with(("pass-back", key));
-                let back = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-                if pass_card(ui, pass, width, back, p.panel)
-                    .on_hover_text("Flip pass")
-                    .clicked()
-                {
-                    ui.data_mut(|d| d.insert_temp(id, !back));
+    hit.on_hover_text(format!("{title}\n{detail}"))
+}
+fn artist_row(ui: &mut Ui, p: &theme::Palette, pass: &ArtistPass) {
+    let tier = pass.stamps.len();
+    let status = match tier {
+        0 => format!(
+            "Admit One · {}/10 songs or {}/5 days",
+            pass.songs(),
+            pass.days()
+        ),
+        4 => format!("All Access · {} listening days", pass.days()),
+        _ => format!(
+            "{} earned · {}/{} days to {}",
+            TIERS[tier - 1],
+            pass.days(),
+            pass.next_days().unwrap(),
+            TIERS[tier]
+        ),
+    };
+    if tier > 0 {
+        // Preserve the ticket's dated stamp history on both the shelf and the player.
+        let hit = reward_row(ui, p, &pass.name, &status, |ui, t| {
+            ticket(ui, t.shrink2(vec2(0., 8.)), tier, p.panel)
+        });
+        let click = ui
+            .interact(hit.rect, hit.id.with("stamps"), Sense::click())
+            .on_hover_text("See stamps");
+        egui::Popup::menu(&click)
+            .frame(egui::Frame::NONE)
+            .show(|ui| {
+                pass_card(ui, pass, 236., true, p.panel);
+            });
+    } else {
+        reward_row(ui, p, &pass.name, &status, |ui, t| {
+            ui.painter().rect_stroke(
+                t.shrink2(vec2(0., 8.)),
+                3.,
+                Stroke::new(1., p.dim),
+                egui::StrokeKind::Inside,
+            );
+        });
+    }
+}
+fn song_row(
+    ui: &mut Ui,
+    p: &theme::Palette,
+    song: &crate::listening::collection::Sleeve,
+    paint_cover: impl FnOnce(&Ui, Rect, Option<&std::sync::Arc<str>>),
+) {
+    let n = song.completed;
+    let detail = match n {
+        0..5 => format!("Worn corner · {n}/5 full listens"),
+        5..15 => format!("Worn corner earned · {n}/15 listens to Record ring"),
+        15..30 => format!("Record ring earned · {n}/30 listens to Tape"),
+        _ => format!("Tape earned · {n} full listens"),
+    };
+    let title = if song.artist.is_empty() {
+        song.title.clone()
+    } else {
+        format!("{} · {}", song.title, song.artist)
+    };
+    reward_row(ui, p, &title, &detail, |ui, t| {
+        paint_cover(ui, t, song.artwork.as_ref());
+        sleeve(ui, t, n);
+    });
+}
+impl Shelf {
+    pub(super) fn sheet(
+        &mut self,
+        ui: &mut Ui,
+        p: &theme::Palette,
+        ledger: &crate::listening::Ledger,
+        mut paint_cover: impl FnMut(&Ui, Rect, Option<&std::sync::Arc<str>>),
+    ) {
+        use crate::app_icon::AppIcon;
+        let peak = ledger.peak_week_minutes;
+        let Some(c) = ledger.collection.as_ref() else {
+            let error = ledger.error.as_deref().or(ledger
+                .collection_unavailable
+                .then_some("Collection unavailable for this listening history."));
+            ui.label(error.unwrap_or("Loading collection…"));
+            return;
+        };
+        if self.revision != Some(c.revision) {
+            self.artists = by_time(c.passes.iter().map(|(k, v)| (k, v.listen_ms)));
+            self.songs = by_time(c.sleeves.iter().map(|(k, v)| (k, v.listen_ms)));
+            self.revision = Some(c.revision);
+        }
+        for (section, label) in [
+            (Category::Icons, "App icons"),
+            (Category::Artists, "Artist passes"),
+            (Category::Songs, "Song sleeves"),
+        ] {
+            let open = self.browse == Some(section);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .font(theme::semibold(17.))
+                        .color(p.text),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::outline_button(ui, p, if open { "Close" } else { "Browse" })
+                        .clicked()
+                    {
+                        self.browse = if open { None } else { Some(section) };
+                        self.search.clear();
+                    }
+                });
+            });
+            let open = self.browse == Some(section);
+            if open && section != Category::Icons {
+                let w = ui.available_width().min(360.);
+                widgets::text_input(
+                    ui,
+                    p,
+                    &mut self.search,
+                    if section == Category::Artists {
+                        "Find an artist"
+                    } else {
+                        "Find a song or artist"
+                    },
+                    w,
+                );
+            }
+            match section {
+                Category::Icons => {
+                    let finishes: Vec<_> = AppIcon::ALL
+                        .into_iter()
+                        .filter_map(|i| Some((i, i.milestone()?)))
+                        .collect();
+                    if let Some(peak) = peak {
+                        let next = finishes.iter().position(|(_, h)| peak < h * 60);
+                        let current = next
+                            .unwrap_or(finishes.len())
+                            .checked_sub(1)
+                            .map(|i| finishes[i].0);
+                        for (i, (icon, h)) in finishes.iter().enumerate() {
+                            if !open && i != next.unwrap_or(finishes.len() - 1) {
+                                continue;
+                            }
+                            let detail = if peak >= h * 60 {
+                                format!("Earned · {h}h listening week")
+                            } else {
+                                let earned = current.map_or(String::new(), |icon| {
+                                    format!("{} earned · ", icon.label())
+                                });
+                                format!("{earned}Best week {}h {:02}m / {h}h", peak / 60, peak % 60)
+                            };
+                            reward_row(ui, p, icon.label(), &detail, |ui, t| {
+                                if let Some(tex) = icon.texture(ui.ctx()) {
+                                    ui.painter().image(
+                                        tex.id(),
+                                        t,
+                                        Rect::from_min_max(pos2(0., 0.), pos2(1., 1.)),
+                                        Color32::WHITE,
+                                    );
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label("Loading best week…");
+                    }
+                }
+                Category::Artists | Category::Songs => {
+                    let artists = section == Category::Artists;
+                    let ranked = if artists { &self.artists } else { &self.songs };
+                    let query = self.search.trim().to_lowercase();
+                    let keys: Vec<_> = if !open {
+                        ranked.iter().take(1).collect()
+                    } else {
+                        ranked
+                            .iter()
+                            .filter(|k| {
+                                if artists {
+                                    let pass = &c.passes[*k];
+                                    if query.is_empty() {
+                                        !pass.stamps.is_empty()
+                                    } else {
+                                        pass.name.to_lowercase().contains(&query)
+                                    }
+                                } else {
+                                    let s = &c.sleeves[*k];
+                                    if query.is_empty() {
+                                        s.completed >= 5
+                                    } else {
+                                        s.title.to_lowercase().contains(&query)
+                                            || s.artist.to_lowercase().contains(&query)
+                                    }
+                                }
+                            })
+                            .collect()
+                    };
+                    if keys.is_empty() {
+                        let text = if !open && artists {
+                            "Admit One · 10 songs by one artist or 5 listening days"
+                        } else if !open {
+                            "Worn corner · 5 full listens to one song"
+                        } else if !query.is_empty() {
+                            "No matches in your listening history"
+                        } else {
+                            "Nothing earned yet. Search to see progress."
+                        };
+                        ui.label(egui::RichText::new(text).color(p.secondary));
+                    }
+                    super::virtual_rows(ui, theme::ROW_HEIGHT, keys.len(), |ui, i| {
+                        let k = keys[i];
+                        ui.push_id(k, |ui| {
+                            if artists {
+                                artist_row(ui, p, &c.passes[k])
+                            } else {
+                                song_row(ui, p, &c.sleeves[k], &mut paint_cover)
+                            }
+                        });
+                    });
                 }
             }
-        });
-        ui.add_space(8.);
+            ui.add_space(12.);
+        }
     }
 }
