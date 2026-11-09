@@ -362,7 +362,7 @@ impl App {
             playing: false,
             audio_alternative: track.wide,
         };
-        if track.local_path.is_some() || !song.valid() {
+        if !track.can_share_in_session() || !song.valid() {
             self.toast("Only YouTube Music tracks can be shared");
         } else if !session.outbox.add(id, song) {
             self.toast("Couldn’t add this song to the session");
@@ -370,6 +370,18 @@ impl App {
     }
 
     pub(super) fn play_session_next(&mut self) -> bool {
+        let Some(entry) = self.room_snapshot().and_then(|room| room.queue.first()) else {
+            return false;
+        };
+        self.consume_session_entry(entry.entry)
+    }
+
+    pub(crate) fn play_session_entry(&mut self, entry_id: u64) {
+        self.note_playback_choice();
+        self.consume_session_entry(entry_id);
+    }
+
+    fn consume_session_entry(&mut self, entry_id: u64) -> bool {
         let Some(session) = self.together.session.as_mut() else {
             return false;
         };
@@ -379,12 +391,24 @@ impl App {
         let Some((id, snapshot)) = session.id.as_ref().zip(session.snapshot.as_mut()) else {
             return false;
         };
-        if snapshot.queue.is_empty() {
+        let Some(index) = snapshot
+            .queue
+            .iter()
+            .position(|entry| entry.entry == entry_id)
+        else {
             return false;
+        };
+        let track = snapshot.queue[index].song.track();
+        // Older rooms only understand a FIFO acknowledgement. A host who keeps skipped songs
+        // can still play the choice immediately there without discarding anyone's contributions.
+        if index == 0 || !self.settings.queue_click_keeps_order || snapshot.can_pick_entry {
+            if self.settings.queue_click_keeps_order {
+                snapshot.queue.remove(index);
+            } else {
+                snapshot.queue.drain(..=index);
+            }
+            session.outbox.played(id, entry_id, &snapshot.queue);
         }
-        let next = snapshot.queue.remove(0);
-        session.outbox.played(id, next.entry);
-        let track = next.song.track();
         let index = self.q.current().map_or(0, |i| i + 1);
         if let Some(radio) = &mut self.radio {
             radio.chosen.insert(track.video_id.clone());
@@ -540,8 +564,7 @@ impl App {
                 None => self.toast("This shared song is unavailable"),
             }
         }
-        let shareable =
-            |t: &Track| t.local_path.is_none() && moosik_resolve::VideoId::new(&t.video_id).is_ok();
+        let shareable = Track::can_share_in_session;
         let can_host = self.settings.discord_host_listen_along
             && self
                 .discord
@@ -598,9 +621,7 @@ impl App {
             };
             match update {
                 Update::Snapshot(mut snapshot) => {
-                    snapshot
-                        .queue
-                        .retain(|e| e.entry > session.outbox.last_played());
+                    session.outbox.filter_played(&mut snapshot);
                     let message = snapshot
                         .error
                         .take()
@@ -880,7 +901,7 @@ mod tests {
                     assert_eq!(entry.by.name, "Guest");
                     assert_eq!(entry.song.id, skipped.id);
                     assert_eq!(s.members.len(), 2);
-                    host_commands.played(&room, entry.entry);
+                    host_commands.played(&room, entry.entry, &s.queue[1..]);
                     break;
                 }
             }

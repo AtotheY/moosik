@@ -92,6 +92,10 @@ pub struct Track {
 }
 
 impl Track {
+    pub(crate) fn can_share_in_session(&self) -> bool {
+        self.local_path.is_none() && moosik_resolve::VideoId::new(&self.video_id).is_ok()
+    }
+
     pub fn provider(&self) -> Provider {
         if self.local_path.is_some() {
             Provider::Local

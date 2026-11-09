@@ -1,6 +1,10 @@
 //! Song transfer shared by ordinary rows, the queue and playlist drop targets.
-use crate::{model::Track, theme};
+use crate::{
+    model::{PlaylistSource, Track},
+    theme,
+};
 use egui::{Context, Id, Rect, Ui};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct Payload {
@@ -9,6 +13,37 @@ pub(crate) struct Payload {
     pub playlist: Option<String>,
     pub queue: bool,
 }
+impl Payload {
+    pub(crate) fn session_eligible(&self) -> bool {
+        self.tracks.iter().all(Track::can_share_in_session)
+    }
+
+    pub(crate) fn accepts_playlist(
+        &self,
+        id: &str,
+        source: PlaylistSource,
+        signed_in: bool,
+    ) -> bool {
+        if self.playlist.as_deref() == Some(id) {
+            return false;
+        }
+        if id.starts_with("private:") {
+            return true;
+        }
+        match source {
+            PlaylistSource::Local => self.tracks.iter().all(|t| t.local_path.is_some()),
+            PlaylistSource::YouTube => {
+                signed_in
+                    && self
+                        .tracks
+                        .iter()
+                        .all(|t| t.local_path.is_none() && !t.is_spotify())
+            }
+            PlaylistSource::Spotify => false,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct Selection {
     list: Option<Id>,
@@ -21,19 +56,19 @@ fn key() -> Id {
 fn selection_key() -> Id {
     key().with("selection")
 }
-pub(crate) fn payload(ctx: &Context) -> Option<Payload> {
+pub(crate) fn payload(ctx: &Context) -> Option<Arc<Payload>> {
     ctx.data(|d| d.get_temp(key()))
 }
 pub(crate) fn start(ctx: &Context, payload: Payload) {
-    ctx.data_mut(|d| d.insert_temp(key(), payload));
+    ctx.data_mut(|d| d.insert_temp(key(), Arc::new(payload)));
 }
 pub(crate) fn take(ctx: &Context) -> Option<Payload> {
     let value = payload(ctx);
-    ctx.data_mut(|d| d.remove::<Payload>(key()));
+    ctx.data_mut(|d| d.remove::<Arc<Payload>>(key()));
     if value.is_some() {
         egui::DragAndDrop::clear_payload(ctx);
     }
-    value
+    value.map(Arc::unwrap_or_clone)
 }
 pub(crate) fn clear_selection(ctx: &Context) {
     ctx.data_mut(|d| d.remove::<Selection>(selection_key()));
@@ -118,6 +153,27 @@ pub(crate) fn indices(ctx: &Context, list: Id) -> Vec<usize> {
         .map(|s| s.indices)
         .unwrap_or_default()
 }
+/// Mark every eligible destination throughout a drag; emphasize the one under the pointer.
+pub(crate) fn drop_outline(ui: &Ui, palette: &theme::Palette, rect: Rect, hovered: bool) {
+    if !ui.is_rect_visible(rect) || rect.width() < 5.0 || rect.height() < 5.0 {
+        return;
+    }
+    let mut path = Vec::new();
+    egui::epaint::tessellator::path::rounded_rectangle(
+        &mut path,
+        rect.shrink(2.0),
+        egui::CornerRadius::same(theme::RADIUS).into(),
+    );
+    path.push(path[0]);
+    let (color, radius) = if hovered {
+        (palette.accent, 1.6)
+    } else {
+        (palette.accent.gamma_multiply(0.65), 1.1)
+    };
+    ui.painter()
+        .extend(egui::Shape::dotted_line(&path, color, 6.0, radius));
+}
+
 /// Targets use geometry so children (artwork and links) cannot steal the drop.
 pub(crate) fn target(
     ui: &Ui,
@@ -125,20 +181,16 @@ pub(crate) fn target(
     rect: Rect,
     enabled: bool,
 ) -> Option<Vec<Track>> {
-    let drag = payload(ui.ctx())?;
-    if !enabled || !ui.rect_contains_pointer(rect) {
+    if !enabled || payload(ui.ctx()).is_none() {
         return None;
     }
-    ui.painter().rect_stroke(
-        rect.shrink(1.0),
-        theme::RADIUS,
-        egui::Stroke::new(2.0, palette.accent),
-        egui::StrokeKind::Inside,
-    );
-    ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
-    if ui.input(|i| i.pointer.any_released()) {
-        take(ui.ctx());
-        return Some(drag.tracks);
+    let hovered = ui.rect_contains_pointer(rect);
+    drop_outline(ui, palette, rect, hovered);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+        if ui.input(|i| i.pointer.primary_released() && !i.key_pressed(egui::Key::Escape)) {
+            return take(ui.ctx()).map(|drag| drag.tracks);
+        }
     }
     None
 }
@@ -155,7 +207,9 @@ pub(crate) fn finish(ctx: &Context, palette: &theme::Palette) {
     if !drag.queue
         && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
     {
-        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        if ctx.output(|o| o.cursor_icon != egui::CursorIcon::Copy) {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
         egui::Area::new(key().with("preview"))
             .order(egui::Order::Tooltip)
             .fixed_pos(pos + egui::vec2(16.0, 16.0))

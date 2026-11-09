@@ -412,7 +412,9 @@ pub(crate) fn drop_boundary(
         pos2(ui.max_rect().right(), clip.bottom()),
     )
     .intersect(clip);
-    if !ui.rect_contains_pointer(bounds) {
+    let hovered = ui.rect_contains_pointer(bounds);
+    super::song_drag::drop_outline(ui, palette, bounds, hovered);
+    if !hovered {
         return None;
     }
     let pitch = theme::ROW_HEIGHT + ui.spacing().item_spacing.y;

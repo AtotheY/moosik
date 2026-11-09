@@ -288,7 +288,11 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
 pub fn page(app: &mut App, ui: &mut egui::Ui) {
     crate::ui::page_scroll(app, "queue-page").show(ui, |ui| {
         crate::ui::page_title(ui, &app.palette, "Queue");
-        if !app.q.is_empty() {
+        if !app.q.is_empty()
+            || app
+                .room_snapshot()
+                .is_some_and(|room| !room.queue.is_empty())
+        {
             if widgets::pill_button(ui, &app.palette, "Save as private playlist").clicked() {
                 let tracks = app
                     .q
@@ -352,59 +356,84 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
     let Some(room) = app.together.snapshot() else {
         return;
     };
-    if room.queue.is_empty() {
-        ui.label(
-            egui::RichText::new("Use a song’s menu to add it to the session queue.")
-                .font(theme::regular(13.0))
-                .color(p.secondary),
-        );
-    }
-    for entry in &room.queue {
-        let track = entry.song.track();
-        ui.horizontal(|ui| {
-            ui.set_min_height(theme::ROW_HEIGHT);
-            ui.add_space(theme::ROW_LEFT_INSET);
-            let (rect, _) =
-                ui.allocate_exact_size(egui::Vec2::splat(theme::ART_SIZE), egui::Sense::hover());
-            let art = crate::ui::art_texture(
+    let signed_in = app.signed_in();
+    let tracks: Vec<_> = room.queue.iter().map(|entry| entry.song.track()).collect();
+    let box_response = egui::Frame::new()
+        .fill(p.surface)
+        .stroke(egui::Stroke::new(1.0, p.outline))
+        .corner_radius(theme::RADIUS)
+        .inner_margin(4)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let list_id = ui.id();
+            if tracks.is_empty() {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new("Drop songs here")
+                                .font(theme::medium(13.0))
+                                .color(p.secondary),
+                        );
+                    },
+                );
+                return (list_id, None);
+            }
+            let clicked = super::spec_rows_with_slot(
+                ui,
+                &p,
                 &mut app.images,
                 &app.backend,
-                ui.ctx(),
-                track.thumbnail.as_ref(),
-                theme::ART_SIZE,
-            );
-            widgets::paint_art(ui, &p, rect, art, ArtShape::Square);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                avatar(
-                    ui,
-                    &p,
-                    &mut app.images,
-                    &app.backend,
-                    &entry.by,
-                    &format!("Added by {}", entry.by.name),
-                );
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width());
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&entry.song.title)
-                                .font(theme::medium(theme::ROW_TITLE_PT))
-                                .color(p.text),
-                        )
-                        .truncate(),
+                &mut app.stats,
+                &app.liked,
+                tracks.len(),
+                |i| {
+                    queue_row(
+                        &tracks[i],
+                        &app.now,
+                        &app.library.playlists.items,
+                        signed_in,
+                        None,
                     )
-                    .on_hover_text(&entry.song.title);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&entry.song.artist)
-                                .font(theme::regular(12.0))
-                                .color(p.secondary),
-                        )
-                        .truncate(),
+                },
+                |_| widgets::RowSlot::Trailing(AVATAR + AVATAR_GAP),
+                |ui, images, i| {
+                    let member = &room.queue[i].by;
+                    avatar(
+                        ui,
+                        &p,
+                        images,
+                        &app.backend,
+                        member,
+                        &format!("Added by {}", member.name),
                     );
-                });
-            });
+                },
+            );
+            (list_id, Some(clicked))
         });
+    let (list_id, clicked) = box_response.inner;
+    let accepts = super::song_drag::payload(ui.ctx())
+        .is_some_and(|drag| drag.source != list_id && drag.session_eligible());
+    let dropped = super::song_drag::target(ui, &p, box_response.response.rect, accepts);
+    if let Some(clicked) = clicked {
+        match clicked.click {
+            Some(ListClick::Row(i)) if app.hosting() => {
+                let entry = room.queue[i].entry;
+                app.play_session_entry(entry);
+            }
+            Some(ListClick::Row(i)) => app.play_row(tracks, i),
+            Some(ListClick::Link(route)) => app.navigate(route),
+            None => {}
+        }
+        if let Some(action) = clicked.action {
+            app.row_action(action);
+        }
+    }
+    if let Some(tracks) = dropped {
+        for track in tracks {
+            app.add_session_song(&track);
+        }
     }
 }
 
@@ -633,49 +662,53 @@ fn upcoming_rows<'a>(
     move |row| {
         let index = upcoming[row];
         let t = &queue.tracks()[index];
-        // No album names: this is what happens next, not where each song is
-        // from.
-        let subtitle = track_subtitle_no_album(t);
-        RowSpec {
-            number: None,
-            rank: t.rank.as_deref(),
-            trend: t.trend,
-            title: &t.title,
-            source: Some(t.source_name()),
-            album_id: t.album_id.as_deref(),
-            subtitle,
-            duration: t.duration,
-            // The subtitle's tail slot: the algorithm's tracks read "Radio" where
-            // the listener's own keep their play count.
-            // Manual moves can interleave chosen songs and recommendations.
-            plays: if chosen.is_some_and(|ids| !ids.contains(&t.video_id)) {
-                Some("Radio")
-            } else {
-                t.plays.as_deref()
-            },
-            explicit: t.explicit,
-            active: is_active(now, &t.video_id),
-            playing: is_active(now, &t.video_id) && !now.paused,
-            badge: None,
-            // Square: the queue shows the cover, not a cropped 16:9 still.
-            shape: ArtShape::Square,
-            hide_art: false,
-            thumbnail: t.thumbnail.as_ref(),
-            menu: Some(widgets::RowMenu {
-                track: t,
-                playlist_id: None,
-                playlists,
-                signed_in,
-                queue_index: Some(index),
-            }),
-            like: t.like,
-            // The queue is a list of what happens next, not a place to
-            // rate things: a column of thumbs repeated down it is noise.
-            // Rating a queued song is one click away on the player bar.
-            show_rating: false,
-            quiet_like: false,
-            add_to: None,
+        let mut spec = queue_row(t, now, playlists, signed_in, Some(index));
+        if chosen.is_some_and(|ids| !ids.contains(&t.video_id)) {
+            spec.plays = Some("Radio");
         }
+        spec
+    }
+}
+
+fn queue_row<'a>(
+    t: &'a crate::model::Track,
+    now: &crate::player::NowPlaying,
+    playlists: &'a [crate::model::PlaylistRef],
+    signed_in: bool,
+    queue_index: Option<usize>,
+) -> RowSpec<'a> {
+    RowSpec {
+        number: None,
+        rank: t.rank.as_deref(),
+        trend: t.trend,
+        title: &t.title,
+        source: Some(t.source_name()),
+        album_id: t.album_id.as_deref(),
+        subtitle: track_subtitle_no_album(t),
+        duration: t.duration,
+        plays: t.plays.as_deref(),
+        explicit: t.explicit,
+        active: is_active(now, &t.video_id),
+        playing: is_active(now, &t.video_id) && !now.paused,
+        badge: None,
+        // Square: the queue shows the cover, not a cropped 16:9 still.
+        shape: ArtShape::Square,
+        hide_art: false,
+        thumbnail: t.thumbnail.as_ref(),
+        menu: Some(widgets::RowMenu {
+            track: t,
+            playlist_id: None,
+            playlists,
+            signed_in,
+            queue_index,
+        }),
+        like: t.like,
+        // The queue is a list of what happens next, not a place to
+        // rate things: a column of thumbs repeated down it is noise.
+        // Rating a queued song is one click away on the player bar.
+        show_rating: false,
+        quiet_like: false,
+        add_to: None,
     }
 }
 
