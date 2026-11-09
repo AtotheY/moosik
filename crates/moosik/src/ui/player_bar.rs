@@ -781,16 +781,38 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
     )
     .unwrap_or_else(|| ui.interact(title_rect, ui.id().with("np-title-hit"), Sense::click()));
     let art_hit = ui.interact(art, ui.id().with("np-art-hit"), Sense::click());
-    if let Some(sleeve) = sleeve
-        && let Some(rank) = crate::listening::awards::SongRank::from_completed(sleeve.completed)
-    {
-        let position = song_position.map_or_else(String::new, |place| format!("#{place} · "));
-        art_hit.clone().on_hover_text(format!(
-            "{position}{} · {} full listens\nFirst heard {}",
-            rank.name(),
-            sleeve.completed,
-            sleeve.first_day
-        ));
+    if let Some(track) = app.now.track.as_ref() {
+        for hit in [&art_hit, &title_hit] {
+            let mut tooltip = egui::Tooltip::for_enabled(hit);
+            if let Some(rank) =
+                completed.and_then(crate::listening::awards::SongRank::from_completed)
+            {
+                let color = super::keepsakes::rank_color(rank);
+                tooltip.popup = tooltip.popup.frame(
+                    widgets::menu_frame(ui, &p)
+                        .stroke(egui::Stroke::new(1., widgets::mix(p.overlay, color, 0.72))),
+                );
+            }
+            tooltip.show(|ui| {
+                if collection.is_some() {
+                    let duration = track
+                        .duration
+                        .map(|d| d as f64)
+                        .filter(|d| *d > 0.)
+                        .or_else(|| sleeve.map(|s| s.duration).filter(|d| *d > 0.))
+                        .unwrap_or(state.duration);
+                    super::collection_gallery::song_stats(ui, &p, sleeve, duration);
+                } else {
+                    ui.label(
+                        if app.listening.collection_unavailable || app.listening.error.is_some() {
+                            "Listening history unavailable"
+                        } else {
+                            "Loading listening history…"
+                        },
+                    );
+                }
+            });
+        }
     }
     // Hovering the playing song's cover offers the fullscreen view: the cover dims and an expand
     // glyph appears on it. A primary click opens it; the right-click menu is unchanged.

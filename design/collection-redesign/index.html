@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moosik · Collection preview</title>
+<link rel="stylesheet" href="preview.css">
+<figure>
+  <div class="stage">
+    <picture><source media="(max-width:760px)" srcset="records-narrow.png"><img class="screen" src="records.png" alt="Moosik Collection, Records tab"></picture>
+    <button data-view="records" aria-label="Records" aria-pressed="true"></button>
+    <button data-view="artists" aria-label="Artist passes" aria-pressed="false"></button>
+    <button data-view="finishes" aria-label="App finishes" aria-pressed="false"></button>
+    <section class="panel" aria-label="Records"></section>
+    <button class="cover" data-hover="song" aria-label="Classic PT2 listening details"></button>
+    <button class="song" data-hover="song" aria-label="Classic PT2 listening details"></button>
+    <button class="ticket" data-hover="ticket" aria-label="Drake artist pass details"></button>
+    <output hidden aria-live="polite"></output>
+  </div>
+  <figcaption>Open a crate to inspect a sleeve. Drag the sleeve to turn it.</figcaption>
+</figure>
+<dialog aria-labelledby="album-title">
+  <header><span class="tier"></span><button aria-label="Close record" autofocus>×</button></header>
+  <div class="turntable" role="img" aria-label="Rotatable album sleeve. Drag or use the arrow keys." tabindex="0"><div class="model" hidden><div class="wax"></div><div class="face front"><span class="gem"></span></div><div class="face back"></div></div></div>
+  <h2 id="album-title"></h2><p class="artist"></p>
+  <footer><span class="totals"></span><small>Drag to rotate</small></footer>
+</dialog>
+<script src="preview.js"></script>
+</html>

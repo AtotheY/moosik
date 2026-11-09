@@ -1,6 +1,6 @@
 use super::*;
 use anyhow::{Context as _, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use std::io::Write;
 
 pub(super) fn open(path: &std::path::Path) -> Result<Connection> {
@@ -127,6 +127,15 @@ fn install_weekly_totals(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn current_week_minutes(db: &Connection, monday: chrono::NaiveDate) -> Result<u32> {
+    Ok(db.query_row(
+        "SELECT CAST(COALESCE(SUM(listen_ms),0)/60000 AS INTEGER)
+        FROM weekly_listening WHERE monday=?1",
+        [monday.to_string()],
+        |row| row.get(0),
+    )?)
+}
+
 fn peak_week_minutes(db: &Connection) -> Result<u32> {
     Ok(db.query_row(
         "SELECT CAST(COALESCE(MAX(listen_ms), 0) / 60000 AS INTEGER) FROM weekly_listening",
@@ -217,8 +226,22 @@ pub(super) fn worker(
     lock.try_lock()
         .context("Another Moosik instance is already recording. Close the extra instance.")?;
     let mut db = open(&path)?;
-    let _genre_job = genre::Job::start(path.clone(), replies.clone());
-    let mut peak = peak_week_minutes(&db)?;
+    let mut last_weeks = None;
+    let mut refresh_weeks = |db: &Connection, requested: bool| -> Result<()> {
+        let monday = local_monday();
+        let best = peak_week_minutes(db)?;
+        let current = current_week_minutes(db, monday)?;
+        let snapshot = (monday, best, current);
+        if requested || last_weeks != Some(snapshot) {
+            let _ = replies.send(Reply::WeekMinutes {
+                best,
+                monday,
+                current,
+            });
+            last_weeks = Some(snapshot);
+        }
+        Ok(())
+    };
     let collection_ready = match collection::Collection::load(&db) {
         Ok(collection) => {
             let _ = replies.send(Reply::Collection(collection));
@@ -231,7 +254,7 @@ pub(super) fn worker(
         }
     };
     // The player polls until this startup reply, including when playback is paused.
-    let _ = replies.send(Reply::PeakWeekMinutes(peak));
+    refresh_weeks(&db, true)?;
     while let Ok(command) = commands.recv() {
         let result: Result<()> = match command {
             Command::Records(records) => {
@@ -247,19 +270,13 @@ pub(super) fn worker(
                         _ => {}
                     }
                 }
-                let minutes = peak_week_minutes(&db)?;
-                if minutes != peak {
-                    peak = minutes;
-                    let _ = replies.send(Reply::PeakWeekMinutes(peak));
-                }
-                Ok(())
+                refresh_weeks(&db, false)
             }
+            Command::RefreshWeeks => refresh_weeks(&db, true),
             Command::Report(query) => report::build(&db, &query).map(|report| {
                 let _ = replies.send(Reply::Report(Box::new(report)));
             }),
-            Command::Tags(id, genres, tags, rating, genre_changed) => {
-                save_tags(&db, &id, &genres, &tags, rating, genre_changed)
-            }
+            Command::Tags(id, tags, rating) => save_tags(&db, &id, &tags, rating),
             Command::Export(kind, path, query) => export(&db, kind, &path, &query).map(|()| {
                 let _ = replies.send(Reply::Saved(format!("Saved {}", path.display())));
             }),
@@ -275,42 +292,13 @@ pub(super) fn worker(
     Ok(())
 }
 
-fn save_tags(
-    db: &Connection,
-    id: &str,
-    genres: &str,
-    tags: &str,
-    rating: i32,
-    genre_changed: bool,
-) -> Result<()> {
-    let previous: Option<(String, i64)> = db
-        .query_row(
-            "SELECT genres,genres_override FROM track_tags WHERE track_id=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    // A catalog match can arrive while the editor is open. Only an edit to its genre field
-    // may replace or suppress that match; saving tags/rating preserves the manual row.
-    let (genres, genres_override) = if genre_changed {
-        (clean_list(genres), 1)
-    } else {
-        previous.unwrap_or_default()
-    };
+fn save_tags(db: &Connection, id: &str, tags: &str, rating: i32) -> Result<()> {
+    // A tags or rating edit must preserve genre annotations from older versions.
     db.execute(
-        "INSERT INTO track_tags(track_id,genres,tags,rating,updated_ms,genres_override)
-         VALUES (?1,?2,?3,?4,?5,?6)
-         ON CONFLICT(track_id) DO UPDATE SET genres=excluded.genres,tags=excluded.tags,
-             rating=excluded.rating,updated_ms=excluded.updated_ms,
-             genres_override=excluded.genres_override",
-        params![
-            id,
-            genres,
-            clean_list(tags),
-            rating.clamp(0, 5),
-            now_ms(),
-            genres_override
-        ],
+        "INSERT INTO track_tags(track_id,tags,rating,updated_ms) VALUES (?1,?2,?3,?4)
+         ON CONFLICT(track_id) DO UPDATE SET tags=excluded.tags,
+             rating=excluded.rating,updated_ms=excluded.updated_ms",
+        params![id, clean_list(tags), rating.clamp(0, 5), now_ms()],
     )?;
     Ok(())
 }
@@ -495,6 +483,20 @@ mod tests {
         .unwrap();
         install_weekly_totals(&db).unwrap();
         assert_eq!(peak_week_minutes(&db).unwrap(), 299);
+        // The previous best crosses New Year. The new Monday starts a fresh target.
+        assert_eq!(
+            current_week_minutes(&db, "2025-12-29".parse().unwrap()).unwrap(),
+            299
+        );
+        assert_eq!(
+            current_week_minutes(&db, "2026-01-05".parse().unwrap()).unwrap(),
+            2
+        );
+        assert_eq!(
+            current_week_minutes(&db, "2026-01-12".parse().unwrap()).unwrap(),
+            0
+        );
+
         // A final millisecond in the same local week crosses the five-hour milestone.
         db.execute("INSERT INTO segments VALUES ('2026-01-04', 1)", [])
             .unwrap();
@@ -688,8 +690,8 @@ mod tests {
             source: String::new(),
             label: "Test recap".into(),
         };
-        // Editing only tags/rating before a catalog match keeps automatic genre lookup active.
-        save_tags(&db, "test", "", "Evening", 5, false).unwrap();
+        // Editing tags preserves cached matches and manual annotations from older versions.
+        save_tags(&db, "test", "Evening", 5).unwrap();
         assert_eq!(
             db.query_row(
                 "SELECT genres_override FROM track_tags WHERE track_id='test'",
@@ -701,13 +703,10 @@ mod tests {
         );
         db.execute("INSERT INTO auto_genres(track_id,genres,source,checked_ms) VALUES ('test','Rock','apple',100000)",[]).unwrap();
         assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "Rock");
-        // The editor may still hold a blank value from before the match arrived.
-        save_tags(&db, "test", "", "Focus", 5, false).unwrap();
+        save_tags(&db, "test", "Focus", 5).unwrap();
         assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "Rock");
-        // Clearing the visible match is an explicit empty override.
-        save_tags(&db, "test", "", "Focus", 5, true).unwrap();
-        assert_eq!(report::build(&db, &query).unwrap().tracks[0].genres, "");
-        save_tags(&db, "test", "Soul", "Focus", 5, true).unwrap();
+        db.execute("UPDATE track_tags SET genres='Soul',genres_override=1,updated_ms=1 WHERE track_id='test'",[]).unwrap();
+        save_tags(&db, "test", "Focus", 4).unwrap();
         for (kind, name) in [
             (Export::Json, "data.json"),
             (Export::Csv, "songs.csv"),

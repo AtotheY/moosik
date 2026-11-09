@@ -5,7 +5,6 @@ use crate::{
     listening::{self, Export, Group, Query, Report},
     theme, widgets,
 };
-mod atlas;
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use egui::{Align2, Rect, RichText, Sense, pos2, vec2};
 use std::sync::Arc;
@@ -17,7 +16,6 @@ enum Tab {
     Songs,
     Artists,
     Albums,
-    Genres,
     History,
     Recap,
 }
@@ -35,8 +33,6 @@ enum Period {
 #[derive(Default)]
 pub struct View {
     collection: super::keepsakes::Shelf,
-    atlas: atlas::View,
-    genre_list: bool,
     tab: Tab,
     period: Period,
     from: String,
@@ -47,8 +43,6 @@ pub struct View {
     search: String,
     sort: usize,
     selected: Option<String>,
-    genres: String,
-    original_genres: String,
     tags: String,
     rating: i32,
     help: bool,
@@ -136,12 +130,11 @@ const PERIODS: [(Period, &str); 7] = [
     (Period::All, "All time"),
     (Period::Custom, "Custom dates"),
 ];
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 6] = [
     (Tab::Overview, "Overview"),
     (Tab::Songs, "Songs"),
     (Tab::Artists, "Artists"),
     (Tab::Albums, "Albums"),
-    (Tab::Genres, "Genres"),
     (Tab::History, "History"),
     (Tab::Recap, "My recap"),
 ];
@@ -159,7 +152,7 @@ pub fn collection_page(app: &mut App, ui: &mut egui::Ui) {
                     .color(p.text),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let guide = widgets::outline_button(ui, &p, "How it works");
+                let guide = widgets::icon_button(ui, &p, Icon::Info, 16., false).on_hover_text("Milestone guide");
                 egui::Popup::menu(&guide)
                     .frame(widgets::menu_frame(ui, &p))
                     .width(300.)
@@ -177,7 +170,7 @@ pub fn collection_page(app: &mut App, ui: &mut egui::Ui) {
                             ),
                             (
                                 "Song awards",
-                                "Iron 10, Bronze 25, Silver 50, Gold 100, Platinum 250, Double Platinum 500, Diamond 1,000 full listens of one song. A full listen ends after 90% coverage. Listening time also includes partial plays. These are your own awards.",
+                                "Iron 10, Bronze 25, Silver 50, Gold 100, Platinum 250, Double Platinum 500, Diamond 1,000 full listens of one song. An ended play counts at 90% coverage. Estimated time to a rank assumes full-length replays.",
                             ),
                             (
                                 "App finishes",
@@ -202,10 +195,8 @@ pub fn collection_page(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(10.);
         app.listening_view
             .collection
-            .sheet(ui, &p, &app.listening, |ui, rect, url| {
-                let tex =
-                    super::art_texture(&mut app.images, &app.backend, ui.ctx(), url, rect.width());
-                widgets::paint_art(ui, &p, rect, tex, widgets::ArtShape::Square);
+            .sheet(ui, &p, &app.listening, |ui, size, url| {
+                super::art_texture(&mut app.images, &app.backend, ui.ctx(), url, size).cloned()
             });
     });
 }
@@ -217,52 +208,51 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         crate::ui::page_title(ui, &p, "Your listening");
         let mut refresh = false;
         ui.horizontal_wrapped(|ui| {
-                let period = PERIODS
-                    .iter()
-                    .find(|(v, _)| *v == app.listening_view.period)
-                    .unwrap()
-                    .1;
-                if let Some(i) = dropdown(ui, &p, "stats-period", period, &PERIODS.map(|(_, s)| s))
+            let period = PERIODS
+                .iter()
+                .find(|(v, _)| *v == app.listening_view.period)
+                .unwrap()
+                .1;
+            if let Some(i) = dropdown(ui, &p, "stats-period", period, &PERIODS.map(|(_, s)| s)) {
+                app.listening_view.period = PERIODS[i].0;
+                refresh = true;
+            }
+            source_filter(app, ui, &p, &mut refresh);
+            if widgets::outline_button(ui, &p, "Share my week").clicked() {
+                app.listening_view.period = Period::Week;
+                app.listening_view.source.clear();
+                app.listening_view.tab = Tab::Recap;
+                app.listening_view.share_feedback = None;
+                app.listening_view.share = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let more = widgets::icon_button(ui, &p, Icon::Ellipsis, 20.0, false)
+                    .on_hover_text("Export and more");
+                utility_menu(app, ui, &more, &mut refresh);
+                if widgets::icon_button(ui, &p, Icon::Info, 18.0, false)
+                    .on_hover_text("About your stats")
+                    .clicked()
                 {
-                    app.listening_view.period = PERIODS[i].0;
-                    refresh = true;
+                    app.listening_view.help = true;
                 }
-                source_filter(app, ui, &p, &mut refresh);
-                if widgets::outline_button(ui, &p, "Share my week").clicked() {
-                    app.listening_view.period = Period::Week;
-                    app.listening_view.source.clear();
-                    app.listening_view.tab = Tab::Recap;
-                    app.listening_view.share_feedback = None;
-                    app.listening_view.share = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let more = widgets::icon_button(ui, &p, Icon::Ellipsis, 20.0, false)
-                        .on_hover_text("Export and more");
-                    utility_menu(app, ui, &more, &mut refresh);
-                    if widgets::icon_button(ui, &p, Icon::Info, 18.0, false)
-                        .on_hover_text("About your stats")
-                        .clicked()
-                    {
-                        app.listening_view.help = true;
-                    }
-                });
+            });
         });
         if app.listening_view.period == Period::Custom {
-                if app.listening_view.from.is_empty() {
-                    app.listening_view.from =
-                        Local::now().date_naive().with_day(1).unwrap().to_string();
-                    app.listening_view.to = Local::now().date_naive().to_string();
-                }
-                ui.add_space(8.0);
-                ui.horizontal_wrapped(|ui| {
-                    widgets::text_input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
-                    ui.label(
-                        RichText::new("to")
-                            .font(theme::regular(12.0))
-                            .color(p.secondary),
-                    );
-                    widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
-                });
+            if app.listening_view.from.is_empty() {
+                app.listening_view.from =
+                    Local::now().date_naive().with_day(1).unwrap().to_string();
+                app.listening_view.to = Local::now().date_naive().to_string();
+            }
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                widgets::text_input(ui, &p, &mut app.listening_view.from, "YYYY-MM-DD", 120.0);
+                ui.label(
+                    RichText::new("to")
+                        .font(theme::regular(12.0))
+                        .color(p.secondary),
+                );
+                widgets::text_input(ui, &p, &mut app.listening_view.to, "YYYY-MM-DD", 120.0);
+            });
         }
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
@@ -326,31 +316,6 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 Tab::Songs => songs(app, ui, &report),
                 Tab::Artists => ranking(app, ui, &report, Tab::Artists),
                 Tab::Albums => ranking(app, ui, &report, Tab::Albums),
-                Tab::Genres => {
-                    ui.horizontal_wrapped(|ui| {
-                        for (list, label) in [(false, "Map"), (true, "List")] {
-                            if widgets::chip(ui, &p, label, app.listening_view.genre_list == list)
-                                .clicked()
-                            {
-                                app.listening_view.genre_list = list;
-                            }
-                        }
-                        if !app.listening_view.genre_list {
-                            app.listening_view.atlas.filter(ui, &p, &report);
-                        }
-                    });
-                    small(
-                        ui,
-                        &p,
-                        "Song and artist names are matched with Apple's catalog; listening times stay here.",
-                    );
-                    ui.add_space(12.);
-                    if app.listening_view.genre_list {
-                        ranking(app, ui, &report, Tab::Genres);
-                    } else {
-                        atlas::show(app, ui, &report);
-                    }
-                }
                 Tab::History => history(app, ui, &report),
                 Tab::Recap => recap(app, ui, &report),
             }
@@ -1119,8 +1084,6 @@ fn row_hover(ui: &egui::Ui, p: &theme::Palette, rect: Rect, response: &egui::Res
 }
 fn select_song(app: &mut App, row: &listening::Row) {
     app.listening_view.selected = Some(row.id.clone());
-    app.listening_view.genres = row.genres.clone();
-    app.listening_view.original_genres = row.genres.clone();
     app.listening_view.tags = row.tags.clone();
     app.listening_view.rating = row.rating;
 }
@@ -1349,15 +1312,6 @@ fn group_matches(row: &listening::Row, kind: Tab, id: &str) -> bool {
     match kind {
         Tab::Artists => row.artist_keys.iter().any(|k| k == id),
         Tab::Albums => row.album_key == id,
-        Tab::Genres => {
-            if id.eq_ignore_ascii_case("Unknown") {
-                row.genres.is_empty()
-            } else {
-                row.genres
-                    .split(',')
-                    .any(|g| g.trim().to_lowercase() == id.to_lowercase())
-            }
-        }
         _ => true,
     }
 }
@@ -1492,11 +1446,7 @@ fn songs(app: &mut App, ui: &mut egui::Ui, r: &Report) {
         .tracks
         .iter()
         .filter(|t| {
-            let text = format!(
-                "{} {} {} {} {}",
-                t.name, t.subtitle, t.album, t.genres, t.tags
-            )
-            .to_lowercase();
+            let text = format!("{} {} {} {}", t.name, t.subtitle, t.album, t.tags).to_lowercase();
             text.contains(&search)
                 && app
                     .listening_view
@@ -1564,24 +1514,8 @@ fn ranking(app: &mut App, ui: &mut egui::Ui, r: &Report, kind: Tab) {
     let rows = match kind {
         Tab::Artists => &r.artists,
         Tab::Albums => &r.albums,
-        _ => &r.genres,
+        _ => return,
     };
-    if kind == Tab::Genres && r.unknown_genre_ms > 0.0 {
-        ui.horizontal_wrapped(|ui| {
-            small(
-                ui,
-                &p,
-                format!("{} without a genre", clock(r.unknown_genre_ms)),
-            );
-            if widgets::outline_button(ui, &p, "Review missing").clicked() {
-                app.listening_view.group =
-                    Some((Tab::Genres, "Unknown".into(), "Songs without genres".into()));
-                app.listening_view.tab = Tab::Songs;
-                app.listening_view.search.clear();
-            }
-        });
-        ui.add_space(12.0);
-    }
     if rows.is_empty() {
         empty(
             ui,
@@ -1731,15 +1665,6 @@ fn editor(app: &mut App, ctx: &egui::Context) {
                         },
                     );
                     ui.add_space(20.0);
-                    small(ui, &p, "Genres");
-                    widgets::text_input(
-                        ui,
-                        &p,
-                        &mut app.listening_view.genres,
-                        "Hip-hop, soul…",
-                        width,
-                    );
-                    ui.add_space(10.0);
                     small(ui, &p, "Tags & moods");
                     widgets::text_input(
                         ui,
@@ -1781,10 +1706,8 @@ fn editor(app: &mut App, ctx: &egui::Context) {
     if save {
         app.listening.tags(
             id,
-            app.listening_view.genres.clone(),
             app.listening_view.tags.clone(),
             app.listening_view.rating,
-            app.listening_view.genres.trim() != app.listening_view.original_genres.trim(),
         );
         if let Ok(q) = app.listening_view.query() {
             app.listening.request(q, true);
@@ -2032,8 +1955,8 @@ fn help(app: &mut App, ctx: &egui::Context) {
             for(title,body)in[
                 ("Listening time","Observed playback in Moosik on this Mac, excluding pauses, buffering, seeks and app mute. System mute and whether you are paying attention cannot be detected."),
                 ("Plays & completion","A play is 30 seconds or half the song, whichever is shorter. Finished means an ended session with at least 90% unique coverage. Replaying one section doesn't inflate coverage."),
-                ("Dates & rankings","Time is clipped to your date range. Plays qualify inside that range; skips and completions use the session end. Artist and genre totals can overlap when a song has multiple credits or tags."),
-                ("Genres & labels","Online song and artist names are sent to Apple's catalog to match genres; play counts and listening times are not. Local files use their embedded genre. Open a song to correct a genre, add tags or rate it. Your edits take precedence; unmatched songs stay Unknown."),
+                ("Dates & rankings","Time is clipped to your date range. Plays qualify inside that range; skips and completions use the session end. Artist totals can overlap when a song has multiple credits."),
+                ("Song details","Open a song to add tags or rate it."),
                 ("Your data","Recorded locally from when tracking began. Nothing here is published to YouTube. All raw history is retained. Use the ••• menu for CSV, JSON, recap or database exports; JSON and database exports include all dates."),
                 ("Recording details","Samples are saved about every five seconds. A crash can lose the last unsaved seconds. Long observation gaps are excluded. The database uses your Mac account's protection; it is not separately encrypted or automatically backed up.")
             ]{ui.add_space(14.0);ui.label(RichText::new(title).font(theme::semibold(13.0)).color(p.text));ui.label(RichText::new(body).font(theme::regular(12.0)).color(p.secondary));}
@@ -2230,23 +2153,14 @@ fn share_recap(app: &mut App, ctx: &egui::Context, r: &Report) {
 mod tests {
     use super::*;
     #[test]
-    fn ranking_drilldowns_use_exact_artist_ids_and_normalized_genres() {
+    fn ranking_drilldowns_use_exact_artist_and_album_ids() {
         let row = listening::Row {
             artist_keys: vec!["artist-12".into()],
             album_key: "album-1".into(),
-            genres: "Hip-Hop, Soul".into(),
             ..Default::default()
         };
         assert!(group_matches(&row, Tab::Artists, "artist-12"));
         assert!(!group_matches(&row, Tab::Artists, "artist-1"));
         assert!(group_matches(&row, Tab::Albums, "album-1"));
-        assert!(group_matches(&row, Tab::Genres, "hip-hop"));
-        assert!(group_matches(&row, Tab::Genres, "soul"));
-        assert!(!group_matches(&row, Tab::Genres, "unknown"));
-        assert!(group_matches(
-            &listening::Row::default(),
-            Tab::Genres,
-            "unknown"
-        ));
     }
 }

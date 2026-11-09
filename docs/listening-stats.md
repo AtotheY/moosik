@@ -19,10 +19,9 @@ Shift-click for a group, and use Undo to reverse an edit. See [Queue controls](q
   a song detail view with unique coverage and first/last session dates, and sorting by time, plays,
   skips, completions, recency, title, or personal star rating. Song rows use the regular
   playback controls and right-click menu, including Start Mix and queue actions.
-  Use the row’s info button for listening details, comma-separated genres and mood
-  tags, and a 0–5 rating (0 = unrated).
-- **Artists / Albums / Genres:** rankings by listening time, with play and song
-  counts. Every credited artist and every assigned genre receives full credit;
+  Use the row’s info button for listening details, mood tags, and a 0–5 rating (0 = unrated).
+- **Artists / Albums:** rankings by listening time, with play and song
+  counts. Every credited artist receives full credit, so
   these group totals overlap, while the headline total counts each second once.
 - **History:** compact artwork rows for the latest 5,000 attempts in a selected range, including partial
   listens and unsuccessful attempts. All older rows remain in the ledger/export.
@@ -32,16 +31,12 @@ Shift-click for a group, and use Undo to reverse an edit. See [Queue controls](q
 Use Today, 7 days, 30 days, This month, This year, All time, or inclusive custom
 calendar dates. You can filter YouTube, downloaded YouTube tracks, or local files.
 The dashboard refreshes about every ten seconds; ••• → Refresh requests an immediate
-snapshot. Local files use embedded genre tags. For online songs without a genre edit,
-Moosik matches the song title and artist against Apple's song catalog in the background.
-Only those names are sent to Apple, never play counts, listening times, or the database.
-Matches and misses are cached locally; ambiguous or unmatched songs stay **Unknown**.
-Your genre edits take precedence over automatic matches.
+snapshot.
 
 ## Collection
 
 **Collection** in the sidebar shows lifetime milestones from this installation's
-listening history. Its **How it works** menu explains each threshold in the app.
+listening history. Its **ⓘ** menu explains each threshold in the app.
 An artist pass earns **Admit One** after 10 different songs by that artist or
 5 listening days. Only a qualified play credits an artist day; later pass stamps
 unlock at 15, 30, and 60 listening days. The song named on a pass stamp was
@@ -50,14 +45,14 @@ playing when that artist milestone was earned.
 Songs are ranked by lifetime completed listens. Their personal records progress
 through **Iron** (10), **Bronze** (25), **Silver** (50), **Gold** (100),
 **Platinum** (250), **Double Platinum** (500), and **Diamond** (1,000). The
-Collection shelf shows the top songs as tier-specific album trophies and includes
-their full-listen counts and total listening time. Listening time also includes
-partial plays. A sparkle on song artwork shows the earned tier and, where space
-allows, the song's position in the lifetime ranking. These are Moosik keepsakes,
-not sales certifications.
+Records tab groups earned sleeves into crates by their current tier. Open a crate to inspect a sleeve, or use search to find any song. The next milestone highlights the song needing the fewest additional full listens. Drag a sleeve to turn it around.
+Earned ranks add a faceted seal to the cover. Hover the current song title or the player artwork for full listens,
+time listened, and progress toward the next rank. The time estimate assumes
+full-length replays at normal speed. Hover the artist ticket for its listening
+days, songs, time, and next stamp.
 
 Selectable app icon finishes unlock from the best Monday–Sunday listening week
-at five hour intervals; choose them in Settings → Appearance. The shelf and
+at five-hour intervals. App finishes shows the current week’s credited time and the amount left to reach the next finish. Choose earned finishes in Settings → Appearance. The shelf and
 its progress are independent of the period and source filters in Listening stats.
 
 ## Listening history and rediscovery (0.1.16)

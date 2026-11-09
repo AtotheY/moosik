@@ -13,6 +13,7 @@ pub struct Collection {
 
 #[derive(Default)]
 pub struct Sleeve {
+    pub duration: f64,
     pub completed: u64,
     pub first_day: String,
     pub title: String,
@@ -83,12 +84,16 @@ pub(super) struct Hearing {
 }
 impl Hearing {
     fn read(row: &Row<'_>) -> Result<Self> {
-        let track = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        let mut track: Metadata = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        let duration: f64 = row.get(3)?;
+        if duration > 0. {
+            track.duration = duration;
+        }
         Ok(Self {
             track,
             day: row.get(1)?,
             listen_ms: row.get(2)?,
-            qualified: qualified_play(row.get(2)?, row.get(3)?) > 0,
+            qualified: qualified_play(row.get(2)?, duration) > 0,
         })
     }
 }
@@ -104,6 +109,9 @@ impl Collection {
         self.revision += 1;
         let sleeve = self.sleeves.entry(track.id.clone()).or_default();
         sleeve.listen_ms += listen_ms;
+        if track.duration > 0. {
+            sleeve.duration = track.duration;
+        }
         sleeve.title.clone_from(&track.title);
         if let Some(url) = track.artwork.as_deref()
             && sleeve.artwork.as_deref() != Some(url)
