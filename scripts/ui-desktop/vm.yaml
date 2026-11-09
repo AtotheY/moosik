@@ -1,0 +1,33 @@
+minimumLimaVersion: 2.0.0
+base:
+- template:_images/ubuntu-24.04
+vmType: vz
+cpus: 6
+memory: 10GiB
+disk: 45GiB
+mounts: []
+audio:
+  device: none
+containerd:
+  system: false
+  user: false
+portForwards:
+- guestPortRange: [1, 65535]
+  guestIP: 0.0.0.0
+  proto: any
+  ignore: true
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    apt-get -o Acquire::Retries=3 update
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+      build-essential cmake pkg-config curl ca-certificates rsync libmpv-dev libwebkit2gtk-4.1-dev \
+      libgtk-3-dev libsoup-3.0-dev libayatana-appindicator3-dev libxdo-dev libxkbcommon-dev \
+      libwayland-dev libssl-dev xvfb xauth openbox xdotool imagemagick libgl1-mesa-dri \
+      dbus-daemon dbus-user-session fonts-dejavu-core libxkbcommon-x11-0 python3-gi \
+      pulseaudio tesseract-ocr tesseract-ocr-eng yt-dlp

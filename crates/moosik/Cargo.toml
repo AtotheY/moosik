@@ -184,3 +184,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # actual work on every other target, via `CARGO_CFG_TARGET_OS`.
 [build-dependencies]
 embed-resource = "3.0.11"
+
+[features]
+ui-check = ["dep:egui_kittest"]
+
+[dependencies.egui_kittest]
+version = "=0.36.2"
+optional = true
+features = ["wgpu"]

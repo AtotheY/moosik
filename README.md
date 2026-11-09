@@ -69,6 +69,8 @@ YouTube playlist edits follow the playlist’s visibility settings. **Save priva
 
 ## Contribute
 
+To test a feature on a Mac, run `./scripts/ui-session start --page library` from the checkout you’re editing. It opens the full app on a private Linux desktop with sample music, so you can navigate, test playback and take screenshots while continuing to use your Mac. See the [offscreen testing guide](docs/offscreen-testing.md) for setup, controls and cleanup.
+
 [Report a bug](https://github.com/AtotheY/moosik/issues/new?template=bug.yml), [suggest a feature](https://github.com/AtotheY/moosik/issues/new?template=feature.yml), or help test a platform. Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting a larger change. Planned work is in the [roadmap](docs/ROADMAP.md).
 
 ## Credits and license

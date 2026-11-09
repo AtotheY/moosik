@@ -34,6 +34,11 @@ release args="":
 stats args="":
     cargo run -p moosik --bin moosik -- --stats {{args}}
 
+# Check a widget or drive the full app on the private desktop.
+[positional-arguments]
+ui-check *args="queue":
+    ./scripts/ui-check "$@"
+
 # Unit tests.
 test:
     cargo test --workspace --lib --bins
@@ -115,6 +120,8 @@ size:
 
 # Install as a desktop application: binary, hicolor icons, desktop entry.
 install:
+    #!/usr/bin/env bash
+    set -eu
     cargo install --path crates/moosik --bin moosik
     for s in 16 32 48 64 128 256 512; do
       install -Dm644 "assets/icons/app/moosik-$s.png" \
@@ -125,6 +132,8 @@ install:
 
 # Remove the installed desktop application.
 uninstall:
+    #!/usr/bin/env bash
+    set -eu
     cargo uninstall moosik
     rm -f "$HOME/.local/share/applications/moosik.desktop"
     for s in 16 32 48 64 128 256 512; do
