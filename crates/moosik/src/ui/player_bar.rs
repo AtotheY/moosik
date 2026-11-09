@@ -1065,13 +1065,13 @@ pub fn player_bar(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     // The video view, further left still, and only when the track actually has one.
-    if !compact && video {
-        if widgets::icon_button(&mut vui, &p, Icon::Video, 16.0, app.video_open)
+    if !compact
+        && video
+        && widgets::icon_button(&mut vui, &p, Icon::Video, 16.0, app.video_open)
             .on_hover_text(crate::ui::tips::video(app.video_open))
             .clicked()
-        {
-            app.toggle_video();
-        }
+    {
+        app.toggle_video();
     }
 
     if ratings
