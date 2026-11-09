@@ -1339,6 +1339,9 @@ pub(crate) fn entry_grid(
     ui.horizontal_wrapped(|ui| {
         let card_w = grid_card_w(ui);
         for (position, group) in groups.iter().enumerate() {
+            if position > 0 && ui.available_size_before_wrap().x < card_w {
+                ui.end_row();
+            }
             let item = group
                 .preferred_entry(ctx.preferred_provider, None)
                 .expect("card group entry");
