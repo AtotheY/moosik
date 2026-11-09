@@ -109,7 +109,7 @@ fn trophy_card(
         widgets::mix(
             p.surface,
             record_display::metal(rank),
-            if rank >= SongRank::Diamond {
+            if rank >= SongRank::DoublePlatinum {
                 0.10
             } else {
                 0.045

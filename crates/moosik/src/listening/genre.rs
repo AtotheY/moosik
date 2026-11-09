@@ -19,6 +19,7 @@ use std::{
 const MISS_RETRY_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const ERROR_RETRY_MS: i64 = 10 * 60 * 1000;
 const SEARCH_GAP: Duration = Duration::from_millis(3100); // Apple's ~20 requests/minute guidance.
+const DB_LOCK_RETRY_GAP: Duration = Duration::from_millis(250);
 
 pub(super) struct Job {
     stop: Arc<AtomicBool>,
@@ -59,6 +60,42 @@ fn pause(stop: &AtomicBool, duration: Duration) {
                 .min(until.saturating_duration_since(std::time::Instant::now())),
         );
     }
+}
+
+fn temporary_db_lock(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}
+
+// The recorder writes on a separate connection. Its temporary lock must not end
+// genre discovery or make us repeat an already completed catalog request.
+fn retry_db_lock<T>(
+    stop: &AtomicBool,
+    mut operation: impl FnMut() -> Result<T>,
+) -> Result<Option<T>> {
+    let mut reported = false;
+    while !stop.load(Ordering::Relaxed) {
+        match operation() {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) if temporary_db_lock(&error) => {
+                if !reported {
+                    tracing::debug!(%error, "listening database busy; retrying genre lookup operation");
+                    reported = true;
+                }
+                pause(stop, DB_LOCK_RETRY_GAP);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn next(db: &Connection) -> Result<Option<Metadata>> {
@@ -106,25 +143,38 @@ fn run(path: &Path, replies: &Sender<Reply>, stop: &AtomicBool) -> Result<()> {
         .timeout(Duration::from_secs(8))
         .build()?;
     while !stop.load(Ordering::Relaxed) {
-        let Some(track) = next(&db)? else {
+        let Some(candidate) = retry_db_lock(stop, || next(&db))? else {
+            break;
+        };
+        let Some(track) = candidate else {
             pause(stop, Duration::from_secs(5));
             continue;
         };
         if Path::new(&track.id).is_absolute() {
             let genre = local_genre(&track.id).unwrap_or_default();
-            save(&db, &track.id, &genre, "file")?;
+            if retry_db_lock(stop, || save(&db, &track.id, &genre, "file"))?.is_none() {
+                break;
+            }
             if !genre.is_empty() {
                 let _ = replies.send(Reply::GenresUpdated);
             }
             continue;
         }
         if !eligible(&track) {
-            save(&db, &track.id, "", "skipped")?;
+            if retry_db_lock(stop, || save(&db, &track.id, "", "skipped"))?.is_none() {
+                break;
+            }
             continue;
         }
         match runtime.block_on(lookup(&client, &track)) {
             Ok(genre) => {
-                save(&db, &track.id, genre.as_deref().unwrap_or(""), "apple")?;
+                if retry_db_lock(stop, || {
+                    save(&db, &track.id, genre.as_deref().unwrap_or(""), "apple")
+                })?
+                .is_none()
+                {
+                    break;
+                }
                 if genre.is_some() {
                     let _ = replies.send(Reply::GenresUpdated);
                 }
@@ -132,7 +182,9 @@ fn run(path: &Path, replies: &Sender<Reply>, stop: &AtomicBool) -> Result<()> {
             }
             Err(error) => {
                 tracing::debug!(%error, "genre lookup unavailable; retrying later");
-                save(&db, &track.id, "", "error")?;
+                if retry_db_lock(stop, || save(&db, &track.id, "", "error"))?.is_none() {
+                    break;
+                }
                 pause(stop, Duration::from_secs(60));
             }
         }
@@ -303,6 +355,64 @@ fn best_genre(track: &Metadata, songs: &[Song]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_database_lock_does_not_drop_a_genre_match() {
+        use std::sync::atomic::AtomicUsize;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("listening.db");
+        let holder = Connection::open(&path).unwrap();
+        holder
+            .execute_batch(
+                "CREATE TABLE auto_genres(track_id TEXT PRIMARY KEY,genres TEXT,source TEXT,checked_ms INTEGER);
+                 BEGIN IMMEDIATE;",
+            )
+            .unwrap();
+        let writer = Connection::open(&path).unwrap();
+        writer.busy_timeout(Duration::from_millis(10)).unwrap();
+        let stop = AtomicBool::new(false);
+        let attempts = AtomicUsize::new(0);
+        let (first_result, first_attempt) = std::sync::mpsc::channel();
+
+        thread::scope(|scope| {
+            let stop = &stop;
+            let attempts = &attempts;
+            let job = scope.spawn(move || {
+                retry_db_lock(stop, || {
+                    let result = save(&writer, "track", "Alternative", "apple");
+                    if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                        first_result
+                            .send(result.as_ref().err().is_some_and(temporary_db_lock))
+                            .unwrap();
+                    }
+                    result
+                })
+                .unwrap()
+            });
+            let was_busy = first_attempt.recv().unwrap();
+            holder.execute_batch("COMMIT").unwrap();
+            assert!(job.join().unwrap().is_some());
+            assert!(was_busy);
+        });
+
+        assert!(attempts.load(Ordering::Relaxed) >= 2);
+        let genre: String = holder
+            .query_row(
+                "SELECT genres FROM auto_genres WHERE track_id='track'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(genre, "Alternative");
+    }
+
+    #[test]
+    fn permanent_database_errors_remain_visible() {
+        let db = Connection::open_in_memory().unwrap();
+        let stop = AtomicBool::new(false);
+        assert!(retry_db_lock(&stop, || save(&db, "track", "Rock", "apple")).is_err());
+    }
 
     fn track() -> Metadata {
         Metadata {

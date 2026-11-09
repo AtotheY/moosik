@@ -55,6 +55,7 @@
     .display { display:grid;grid-template-columns:1.30fr 1fr 1fr;gap:14px; }
     .record { min-width:0;height:396px;border:1px solid #30343b;border-radius:15px;background:#1b1e23;position:relative;overflow:hidden; }
     .record.hero { background:radial-gradient(ellipse 78% 66% at 50% 40%,#214454 0%,#1b2932 47%,#1c2026 100%);border-color:#3b5d68; }
+    .record.double {background:radial-gradient(ellipse at 50% 35%,#393045,#25212e 61%,#1b1e23);border-color:#5f4a72;}
     .record.plat {background:radial-gradient(ellipse at 50% 35%,#313943,#20242b 61%,#1b1e23);}
     .record.gold {background:radial-gradient(ellipse at 50% 35%,#443329,#292320 58%,#1b1e23);}
     .record:before {content:"";position:absolute;inset:0;background:linear-gradient(120deg,#fff1,transparent 22% 82%,#fff05);pointer-events:none;}
@@ -62,6 +63,7 @@
     .rank:after {content:" / SONG";font-size:9px;color:#a4abb3;letter-spacing:.12em;font-weight:760;}
     .tier-pill {position:absolute;right:15px;top:15px;z-index:3;padding:6px 10px;border-radius:20px;font-size:11px;font-weight:760;letter-spacing:.06em;border:1px solid currentColor;background:#12181b9c;}
     .hero .tier-pill {color:#b7efff;}
+    .double .tier-pill {color:#dfc2f5;}
     .plat .tier-pill {color:#e1eaf0;}
     .gold .tier-pill {color:#f5d492;}
     .hero-art { position:absolute;top:13px;left:50%;transform:translateX(-50%);height:256px;width:320px;object-fit:contain;filter:drop-shadow(0 13px 18px #03080dd0); }
@@ -69,10 +71,12 @@
     .sparkle.one {top:76px;right:62px;font-size:20px;}.sparkle.two {top:183px;left:66px;font-size:13px;}.sparkle.three {top:129px;left:93px;font-size:8px;}
     .stand {height:250px;position:relative;perspective:400px; }
     .cover { position:absolute;width:165px;height:165px;left:50%;top:45px;transform:translateX(-50%) rotateY(-8deg) rotateZ(-2deg);border-radius:7px;border:2px solid #abb9c7;box-shadow:9px 9px 0 #49505d,14px 14px 21px #000b, inset 0 0 0 1px #fff6;overflow:hidden; }
+    .double .cover {background:linear-gradient(135deg,#251930 4%,#674869 37%,#d9a9cb 38%,#b99ac8 51%,#493450 52%,#1d1426 100%);border-color:#d8c2e7;box-shadow:9px 9px 0 #594565,14px 14px 21px #000b, inset 0 0 0 1px #fff6;}
     .plat .cover {background:linear-gradient(135deg,#132a40 4%,#3b5d71 37%,#ddad85 38%,#d7b7a5 51%,#203c4c 52%,#0f1b27 100%);}
     .gold .cover {background:radial-gradient(circle at 60% 37%,#db8e77 0 5%,#8e455b 7% 15%,#211928 16% 38%,#544160 39% 40%,#171622 42% 100%);}
     .cover:after { content:"";position:absolute;inset:0;background:linear-gradient(115deg,#fff6,transparent 24% 74%,#fff2),repeating-linear-gradient(0deg,transparent 0 31px,#fff1 32px 33px); }
     .plinth {position:absolute;left:50%;top:211px;transform:translateX(-50%) rotateX(59deg);width:204px;height:35px;border-radius:50%;box-shadow:0 22px 22px #0009;}
+    .double .plinth {background:linear-gradient(#f0dffd,#b99bdb 46%,#6e5188 75%,#211629);border:2px solid #ead5f8;}
     .plat .plinth {background:linear-gradient(#f1f8fa,#8ba7b4 46%,#475765 75%,#111b22);border:2px solid #e6f1f6;}
     .gold .plinth {background:linear-gradient(#ffe19a,#c08a33 44%,#6f461d 75%,#20180f);border:2px solid #fbe1a9;}
     .record-info {position:absolute;left:18px;right:18px;bottom:13px;z-index:3;}
@@ -83,7 +87,7 @@
     .metrics span {font-size:10px;color:#a9afb9;margin-left:4px;white-space:nowrap;}
     .progress { height:3px;border-radius:6px;background:#4c555d;margin-top:12px;overflow:hidden;}
     .progress i {display:block;height:100%;background:#a2eaff;border-radius:6px;}
-    .plat .progress i {background:#d9e7f0;}.gold .progress i {background:#e9bc67;}
+    .double .progress i {background:#d6b7f1;}.plat .progress i {background:#d9e7f0;}.gold .progress i {background:#e9bc67;}
     .next {font-size:10px;color:#aeb5bf;margin-top:6px;}
     .next b {color:#e5ecf0;font-weight:700;}
     .lower-head {display:flex;align-items:baseline;gap:12px;margin:17px 0 9px;}
@@ -145,19 +149,19 @@
         <div class="step silver"><span class="orb"></span><b>Silver</b><small>50</small></div>
         <div class="step gold"><span class="orb"></span><b>Gold</b><small>100</small></div>
         <div class="step platinum"><span class="orb"></span><b>Platinum</b><small>250</small></div>
-        <div class="step diamond"><span class="orb"></span><b>Diamond</b><small>500</small></div>
-        <div class="step double"><span class="orb"></span><b>Double Platinum</b><small>1,000</small></div>
+        <div class="step double"><span class="orb"></span><b>Double Platinum</b><small>500</small></div>
+        <div class="step diamond"><span class="orb"></span><b>Diamond</b><small>1,000</small></div>
       </div></div>
       <div class="display">
-        <article class="record hero"><div class="rank">#01</div><div class="tier-pill">DIAMOND</div><span class="sparkle one">✦</span><span class="sparkle two">✧</span><span class="sparkle three">✦</span><img class="hero-art" src="diamond-trophy.png" alt=""><div class="record-info"><div class="song-title">Afterglow</div><div class="artist">Luna Vale</div><div class="metrics"><div><strong>548</strong><span>full listens</span></div><div><strong>38h 26m</strong><span>listening time</span></div></div><div class="progress"><i style="width:54.8%"></i></div><div class="next">Next: <b>Double Platinum</b> · 452 full listens to go</div></div></article>
-        <article class="record plat"><div class="rank">#02</div><div class="tier-pill">PLATINUM</div><div class="stand"><div class="cover"></div><div class="plinth"></div></div><div class="record-info"><div class="song-title">Night Drive</div><div class="artist">Glass Avenue</div><div class="metrics"><div><strong>312</strong><span>full listens</span></div><div><strong>21h 04m</strong><span>listening time</span></div></div><div class="progress"><i style="width:62.4%"></i></div><div class="next">Next: <b>Diamond</b> · 188 full listens to go</div></div></article>
-        <article class="record gold"><div class="rank">#03</div><div class="tier-pill">GOLD</div><div class="stand"><div class="cover"></div><div class="plinth"></div></div><div class="record-info"><div class="song-title">Blue Hour</div><div class="artist">The Satellites</div><div class="metrics"><div><strong>184</strong><span>full listens</span></div><div><strong>12h 43m</strong><span>listening time</span></div></div><div class="progress"><i style="width:73.6%"></i></div><div class="next">Next: <b>Platinum</b> · 66 full listens to go</div></div></article>
+        <article class="record hero"><div class="rank">#01</div><div class="tier-pill">DIAMOND</div><span class="sparkle one">✦</span><span class="sparkle two">✧</span><span class="sparkle three">✦</span><img class="hero-art" src="diamond-trophy.png" alt=""><div class="record-info"><div class="song-title">Afterglow</div><div class="artist">Luna Vale</div><div class="metrics"><div><strong>1,048</strong><span>full listens</span></div><div><strong>73h 26m</strong><span>listening time</span></div></div><div class="progress"><i style="width:100%"></i></div><div class="next"><b>Diamond earned</b> · every song tier unlocked</div></div></article>
+        <article class="record double"><div class="rank">#02</div><div class="tier-pill">DOUBLE PLATINUM</div><div class="stand"><div class="cover"></div><div class="plinth"></div></div><div class="record-info"><div class="song-title">Night Drive</div><div class="artist">Glass Avenue</div><div class="metrics"><div><strong>548</strong><span>full listens</span></div><div><strong>38h 26m</strong><span>listening time</span></div></div><div class="progress"><i style="width:54.8%"></i></div><div class="next">Next: <b>Diamond</b> · 452 full listens to go</div></div></article>
+        <article class="record plat"><div class="rank">#03</div><div class="tier-pill">PLATINUM</div><div class="stand"><div class="cover"></div><div class="plinth"></div></div><div class="record-info"><div class="song-title">Blue Hour</div><div class="artist">The Satellites</div><div class="metrics"><div><strong>312</strong><span>full listens</span></div><div><strong>21h 04m</strong><span>listening time</span></div></div><div class="progress"><i style="width:62.4%"></i></div><div class="next">Next: <b>Double Platinum</b> · 188 full listens to go</div></div></article>
       </div>
       <div class="lower-head"><h3>More on your shelf</h3><span>Sorted by full listens</span><span class="browse">Browse all songs</span></div>
       <div class="rows">
-        <div class="row"><span class="row-rank">#04</span><span class="thumb a"></span><div><div class="row-title">Northern Lights</div><div class="row-sub">Silver · 86 / 100 to Gold</div></div><div class="row-meta"><b>86 full listens</b><span>6h 38m listening time</span></div></div>
-        <div class="row"><span class="row-rank">#05</span><span class="thumb b"></span><div><div class="row-title">Static Bloom</div><div class="row-sub">Bronze · 38 / 50 to Silver</div></div><div class="row-meta"><b>38 full listens</b><span>2h 27m listening time</span></div></div>
-        <div class="row"><span class="row-rank">#06</span><span class="thumb c"></span><div><div class="row-title">Slow Motion</div><div class="row-sub">Iron · 13 / 25 to Bronze</div></div><div class="row-meta"><b>13 full listens</b><span>1h 06m listening time</span></div></div>
+        <div class="row"><span class="row-rank">#04</span><span class="thumb a"></span><div><div class="row-title">Northern Lights</div><div class="row-sub">Gold · 184 / 250 to Platinum</div></div><div class="row-meta"><b>184 full listens</b><span>12h 43m listening time</span></div></div>
+        <div class="row"><span class="row-rank">#05</span><span class="thumb b"></span><div><div class="row-title">Static Bloom</div><div class="row-sub">Silver · 86 / 100 to Gold</div></div><div class="row-meta"><b>86 full listens</b><span>6h 38m listening time</span></div></div>
+        <div class="row"><span class="row-rank">#06</span><span class="thumb c"></span><div><div class="row-title">Slow Motion</div><div class="row-sub">Bronze · 38 / 50 to Silver</div></div><div class="row-meta"><b>38 full listens</b><span>2h 27m listening time</span></div></div>
       </div>
     </div></main>
     <div class="player"><div class="song-mini"><div class="mini-art">◉</div><span>Sample library</span></div><span>⤨</span><span>◀❘</span><span class="play">▶</span><span>❘▶</span><span>↻</span><span class="right">◖))</span></div>

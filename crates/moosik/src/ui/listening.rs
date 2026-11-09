@@ -177,7 +177,7 @@ pub fn collection_page(app: &mut App, ui: &mut egui::Ui) {
                             ),
                             (
                                 "Song awards",
-                                "Iron 10, Bronze 25, Silver 50, Gold 100, Platinum 250, Diamond 500, Double Platinum 1,000 full listens of one song. A full listen ends after 90% coverage. Listening time also includes partial plays. These are your own awards.",
+                                "Iron 10, Bronze 25, Silver 50, Gold 100, Platinum 250, Double Platinum 500, Diamond 1,000 full listens of one song. A full listen ends after 90% coverage. Listening time also includes partial plays. These are your own awards.",
                             ),
                             (
                                 "App finishes",

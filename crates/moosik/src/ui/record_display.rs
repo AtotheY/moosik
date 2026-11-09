@@ -18,8 +18,8 @@ pub(super) fn metal(rank: SongRank) -> Color32 {
         SongRank::Silver => Color32::from_rgb(202, 215, 225),
         SongRank::Gold => Color32::from_rgb(239, 195, 105),
         SongRank::Platinum => Color32::from_rgb(222, 235, 242),
-        SongRank::Diamond => Color32::from_rgb(154, 227, 245),
         SongRank::DoublePlatinum => Color32::from_rgb(217, 187, 255),
+        SongRank::Diamond => Color32::from_rgb(154, 227, 245),
     }
 }
 
@@ -79,7 +79,7 @@ pub(super) fn paint(
 ) -> Rect {
     let w = stage.width().max(1.);
     let h = stage.height().max(1.);
-    let is_jewel = matches!(rank, Some(SongRank::Diamond | SongRank::DoublePlatinum));
+    let is_jewel = rank == Some(SongRank::Diamond);
     let color = rank.map_or(palette.dim, metal);
     let dim = widgets::mix(
         palette.panel,
@@ -270,12 +270,7 @@ pub(super) fn paint(
     );
 
     if is_jewel {
-        let count = if rank == Some(SongRank::DoublePlatinum) {
-            5
-        } else {
-            3
-        };
-        for i in 0..count {
+        for i in 0..5 {
             let (x, y, s) = match i {
                 0 => (0.86, 0.22, 0.020),
                 1 => (0.14, 0.57, 0.014),

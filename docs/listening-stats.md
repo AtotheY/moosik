@@ -49,7 +49,7 @@ playing when that artist milestone was earned.
 
 Songs are ranked by lifetime completed listens. Their personal records progress
 through **Iron** (10), **Bronze** (25), **Silver** (50), **Gold** (100),
-**Platinum** (250), **Diamond** (500), and **Double Platinum** (1,000). The
+**Platinum** (250), **Double Platinum** (500), and **Diamond** (1,000). The
 Collection shelf shows the top songs as tier-specific album trophies and includes
 their full-listen counts and total listening time. Listening time also includes
 partial plays. A sparkle on song artwork shows the earned tier and, where space

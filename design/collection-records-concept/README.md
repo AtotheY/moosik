@@ -12,14 +12,14 @@ not change the app or the user's listening history.
 | Silver | 50 |
 | Gold | 100 |
 | Platinum | 250 |
-| Diamond | 500 |
-| Double Platinum | 1,000 |
+| Double Platinum | 500 |
+| Diamond | 1,000 |
 
 The display sorts songs by full listens. A full listen retains Moosik's existing
 90% distinct-coverage rule. Listening time is a separate total and includes partial
 plays. The top three get tier-specific 3D displays; the rest continue in ranked
-rows. The concept uses restrained glints for Diamond, leaving more room for a
-stronger Double Platinum treatment.
+rows. Double Platinum gets a violet display; Diamond gets the faceted blue
+centerpiece and strongest glints. These are personal goals, not sales awards.
 
 The mockup is responsive: the featured cards stack at narrow width. The source is
 [index.html](index.html), with rendered [desktop](desktop.png) and

@@ -13,8 +13,8 @@ pub enum SongRank {
     Silver,
     Gold,
     Platinum,
-    Diamond,
     DoublePlatinum,
+    Diamond,
 }
 
 impl SongRank {
@@ -24,8 +24,8 @@ impl SongRank {
         Self::Silver,
         Self::Gold,
         Self::Platinum,
-        Self::Diamond,
         Self::DoublePlatinum,
+        Self::Diamond,
     ];
 
     pub fn from_completed(completed: u64) -> Option<Self> {
@@ -42,8 +42,8 @@ impl SongRank {
             Self::Silver => "Silver",
             Self::Gold => "Gold",
             Self::Platinum => "Platinum",
-            Self::Diamond => "Diamond",
             Self::DoublePlatinum => "Double Platinum",
+            Self::Diamond => "Diamond",
         }
     }
 
@@ -54,8 +54,8 @@ impl SongRank {
             Self::Silver => 50,
             Self::Gold => 100,
             Self::Platinum => 250,
-            Self::Diamond => 500,
-            Self::DoublePlatinum => 1_000,
+            Self::DoublePlatinum => 500,
+            Self::Diamond => 1_000,
         }
     }
 
@@ -103,7 +103,7 @@ pub fn song_position(collection: &Collection, track_id: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ranked_song_ids, song_position};
+    use super::{SongRank, ranked_song_ids, song_position};
     use crate::listening::collection::{Collection, Sleeve};
 
     #[test]
@@ -128,6 +128,22 @@ mod tests {
         assert_eq!(ordered, ["more-full", "more-time", "first-id", "later-id"]);
         for (index, id) in ordered.into_iter().enumerate() {
             assert_eq!(song_position(&collection, id), Some(index + 1));
+        }
+    }
+
+    #[test]
+    fn double_platinum_precedes_diamond() {
+        assert_eq!(SongRank::Platinum.next(), Some(SongRank::DoublePlatinum));
+        assert_eq!(SongRank::DoublePlatinum.next(), Some(SongRank::Diamond));
+        for (listens, rank, next) in [
+            (250, SongRank::Platinum, Some(SongRank::DoublePlatinum)),
+            (499, SongRank::Platinum, Some(SongRank::DoublePlatinum)),
+            (500, SongRank::DoublePlatinum, Some(SongRank::Diamond)),
+            (999, SongRank::DoublePlatinum, Some(SongRank::Diamond)),
+            (1_000, SongRank::Diamond, None),
+        ] {
+            assert_eq!(SongRank::from_completed(listens), Some(rank));
+            assert_eq!(SongRank::next_goal(listens), next);
         }
     }
 }
