@@ -782,26 +782,33 @@ mod tests {
         let url = format!("http://{}/latest", listener.local_addr().unwrap());
         let installer = Install::WindowsMsi;
         let server = tokio::spawn(async move {
-            for version in ["0.1.1", "0.1.2"] {
+            // The first lookup reaches the Windows build on page two. Once a
+            // newer Windows build finishes it is available on page one.
+            for (page, version, linux_only) in
+                [(1, "0.1.2", true), (2, "0.1.1", false), (1, "0.1.2", false)]
+            {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = [0; 4096];
                 let read = socket.read(&mut buf).await.unwrap();
-                assert!(
-                    String::from_utf8_lossy(&buf[..read])
-                        .to_ascii_lowercase()
-                        .contains("cache-control: no-cache")
-                );
-                let names = [
-                    installer.asset_name(version).unwrap(),
-                    format!("moosik-{version}-SHA256SUMS.txt"),
-                ];
+                let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+                assert!(request.starts_with(&format!("get /latest?page={page} ")));
+                assert!(request.contains("cache-control: no-cache"));
+                let (package, next_page) = if linux_only {
+                    (
+                        format!("moosik-{version}-linux-amd64.deb"),
+                        "Link: </latest?page=2>; rel=\"next\"\r\n",
+                    )
+                } else {
+                    (installer.asset_name(version).unwrap(), "")
+                };
+                let names = [package, format!("moosik-{version}-SHA256SUMS.txt")];
                 let base = format!("{RELEASES}download/moosik-v{version}");
                 let body = serde_json::json!([{
                     "tag_name": format!("moosik-v{version}"),
                     "html_url": format!("{RELEASES}tag/moosik-v{version}"),
                     "assets": names.map(|name| serde_json::json!({"name":name, "browser_download_url":format!("{base}/{name}")})),
                 }]).to_string();
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{next_page}Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
         let http = reqwest::Client::new();
