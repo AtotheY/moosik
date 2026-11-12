@@ -675,14 +675,8 @@ impl LibrarySort {
     }
 }
 
-/// Track ordering for a playlist page — unlike [`LibrarySort`], never a server param: YouTube's
-/// playlist endpoints (`Api::playlist`/`playlist_more`) take no sort at all, so every one of
-/// these is a client-side re-sort of the tracks already loaded. Title and duration only — an
-/// "artist" order would need to pick one artist off a possibly-multi-artist credit, and "date
-/// added" isn't offered because `Track` carries no such timestamp. `Reverse` is the honest
-/// stand-in for that: YouTube serves an ordinary playlist oldest-added-first, so flipping the
-/// served order is a free "newest first" for those — but it is labelled as what it actually
-/// does, since an algorithmic playlist (a radio mix, say) has no "date added" for it to mean.
+/// Playlist ordering is local. Addition dates belong to a playlist entry; catalog and smart
+/// lists without membership dates use only the general sort options.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PlaylistSort {
     /// The order YouTube served the playlist in.
@@ -694,9 +688,24 @@ pub enum PlaylistSort {
     TitleDesc,
     DurationAsc,
     DurationDesc,
+    AddedNewest,
+    AddedOldest,
 }
 
 impl PlaylistSort {
+    pub(crate) const DATED: [Self; 8] = [
+        Self::Default,
+        Self::Reverse,
+        Self::AddedNewest,
+        Self::AddedOldest,
+        Self::TitleAsc,
+        Self::TitleDesc,
+        Self::DurationAsc,
+        Self::DurationDesc,
+    ];
+    pub(crate) fn by_date(self) -> bool {
+        matches!(self, Self::AddedNewest | Self::AddedOldest)
+    }
     pub(crate) const ALL: [PlaylistSort; 6] = [
         PlaylistSort::Default,
         PlaylistSort::Reverse,
@@ -710,6 +719,8 @@ impl PlaylistSort {
         match self {
             PlaylistSort::Default => "Default",
             PlaylistSort::Reverse => "Reverse order",
+            Self::AddedNewest => "Newest added first",
+            Self::AddedOldest => "Oldest added first",
             PlaylistSort::TitleAsc => "Title A–Z",
             PlaylistSort::TitleDesc => "Title Z–A",
             PlaylistSort::DurationAsc => "Shortest first",
@@ -731,6 +742,10 @@ impl PlaylistSort {
     /// gets "did nothing" instead of a panic.
     pub(crate) fn apply(self, tracks: &mut [crate::model::Track]) {
         match self {
+            Self::AddedNewest => tracks.sort_by_key(|t| std::cmp::Reverse(t.playlist_added_ms)),
+            Self::AddedOldest => {
+                tracks.sort_by_key(|t| (t.playlist_added_ms.is_none(), t.playlist_added_ms))
+            }
             PlaylistSort::Default | PlaylistSort::Reverse => {}
             PlaylistSort::TitleAsc => tracks.sort_by_key(|t| t.title.to_lowercase()),
             PlaylistSort::TitleDesc => {
@@ -998,6 +1013,9 @@ pub(crate) fn build_local_playlist(
             })
             .collect();
     }
+    for t in &mut tracks {
+        t.playlist_added_ms = lp.added_ms.get(&t.video_id).copied();
+    }
     let thumbnail = tracks.first().and_then(|t| t.thumbnail.clone());
     crate::model::Playlist {
         id: lp.id.clone(),
@@ -1148,8 +1166,12 @@ fn apply_playlist_sort(
     // Captured on whichever sort is chosen first, `Default`/`Reverse` included: either one
     // needs the served order as a baseline just as much as Title/Duration need it as something
     // to get back to later.
-    let order =
-        original_order.get_or_insert_with(|| tracks.iter().map(|t| t.video_id.clone()).collect());
+    let order = original_order.get_or_insert_with(|| {
+        tracks
+            .iter()
+            .map(|t| t.playlist_row_key().to_owned())
+            .collect()
+    });
     match sort {
         PlaylistSort::Default | PlaylistSort::Reverse => {
             let position: std::collections::HashMap<&str, usize> = order
@@ -1157,7 +1179,7 @@ fn apply_playlist_sort(
                 .enumerate()
                 .map(|(i, id)| (id.as_str(), i))
                 .collect();
-            let rank = |t: &Track| position.get(t.video_id.as_str()).copied().unwrap_or(0);
+            let rank = |t: &Track| position.get(t.playlist_row_key()).copied().unwrap_or(0);
             if sort == PlaylistSort::Reverse {
                 tracks.sort_by_key(|t| std::cmp::Reverse(rank(t)));
             } else {
@@ -1701,10 +1723,13 @@ pub struct App {
     /// reset whenever a different playlist opens (see [`PlaylistSort`]'s own doc comment for
     /// why this can't be a server order the way [`LibrarySort`] is).
     pub(crate) playlist_sort: PlaylistSort,
+    recorded_dates: crate::playlist_dates::RecordedDates,
+    pub(crate) added_filter: crate::playlist_dates::AddedFilter,
+    pub(crate) filtered_playlist: crate::playlist_dates::FilteredTracks,
     /// A sort was chosen before the playlist had fully loaded: the remaining pages are being
     /// fetched, and the sort applies once `tracks.next` goes `None`.
     pub(crate) playlist_sort_pending: bool,
-    /// The track order YouTube actually served, by video id — captured the first time this
+    /// The track order the source supplied, by playlist item ID when available — captured the first time this
     /// playlist is sorted to anything other than [`PlaylistSort::Default`], since choosing
     /// Default again has to put it back and sorting in place is otherwise destructive. `None`
     /// until then (no snapshot needed if nobody has left Default yet), and reset whenever a
@@ -2060,7 +2085,7 @@ fn plays_as_video(video_open: bool, wide: bool) -> bool {
 /// Whether two lists are the same queue, track for track. `start_from` needs the *whole* list,
 /// not just the loaded track: a mix seeded from the song playing now starts with it, and matching
 /// on the track alone turned Start Mix into a pause button that never touched the queue.
-fn same_queue(a: &[Track], b: &[Track]) -> bool {
+pub(crate) fn same_queue(a: &[Track], b: &[Track]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.video_id == y.video_id)
 }
 
@@ -2331,6 +2356,9 @@ impl App {
             spotify_playlist_remove_pending: false,
             playlist_picker: ui::player_bar::PlaylistPicker::default(),
             playlist_sort: PlaylistSort::default(),
+            recorded_dates: crate::playlist_dates::RecordedDates::load(),
+            added_filter: Default::default(),
+            filtered_playlist: Default::default(),
             playlist_sort_pending: false,
             playlist_original_order: None,
             artist_expand: None,
@@ -4322,7 +4350,9 @@ impl App {
         self.smart_playlist_report = None;
         // A new playlist starts back at its own order, not whatever the last one was sorted
         // to, and cancels any load-the-rest-then-sort chain that was still in flight.
-        self.playlist_sort = PlaylistSort::default();
+        self.added_filter = Default::default();
+        self.filtered_playlist = Default::default();
+        self.playlist_sort = self.settings.playlist_default_sort;
         self.playlist_sort_pending = false;
         self.playlist_original_order = None;
         self.playlist_suggestions = None;
@@ -4331,7 +4361,7 @@ impl App {
         // each time so a rescan's updated tags show up without needing its own cache-busting.
         if let Some(lp) = self.local_playlists.iter().find(|p| p.id == id).cloned() {
             self.playlist = Some(self.local_playlist_as_playlist(&lp));
-            self.apply_default_playlist_sort();
+            self.apply_loaded_playlist_view();
             self.playlist_loading = false;
             self.playlist_error = None;
             // Never fires `Event::PlaylistLoaded` — the event that would otherwise consume
@@ -4990,7 +5020,13 @@ impl App {
         );
     }
 
-    fn note_saved_to_playlist(&mut self, playlist_id: &str, video_id: &str) {
+    fn note_saved_to_playlist(
+        &mut self,
+        playlist_id: &str,
+        video_id: &str,
+        item_id: Option<String>,
+        now: i64,
+    ) {
         let bare = crate::model::bare_playlist_id;
         let open = self
             .playlist
@@ -5029,11 +5065,11 @@ impl App {
         if pl.tracks.next.is_none()
             && let Some(mut track) = track
         {
-            // Not a row of this playlist yet as far as its item id goes; the next load has it.
-            track.set_video_id = None;
+            track.set_video_id = item_id.map(Into::into);
+            track.playlist_added_ms = track.set_video_id.as_ref().map(|_| now);
             track.rank = None;
             if let Some(order) = self.playlist_original_order.as_mut() {
-                order.push(track.video_id.clone());
+                order.push(track.playlist_row_key().to_owned());
             }
             pl.tracks.items.push(track);
             if sort != PlaylistSort::Default || self.playlist_original_order.is_some() {
@@ -5310,14 +5346,34 @@ impl App {
         self.backend.fetch_playlist_suggestions(id, token);
     }
 
-    /// Open a freshly loaded playlist in the order Settings asks for. Through [`Self::sort_playlist`],
-    /// so a long playlist loads the rest first, exactly as picking it from the page's own menu.
-    /// Mixes stay as served: `sort_playlist` leaves an expanding one alone.
-    fn apply_default_playlist_sort(&mut self) {
-        let sort = self.settings.playlist_default_sort;
-        if sort != PlaylistSort::Default {
-            self.sort_playlist(sort);
+    /// Apply the chosen order after a fresh load or a refresh following a confirmed edit.
+    fn apply_loaded_playlist_view(&mut self) {
+        if !self
+            .playlist
+            .as_ref()
+            .is_some_and(crate::model::Playlist::supports_added_dates)
+        {
+            self.added_filter = Default::default();
+            if self.playlist_sort.by_date() {
+                self.playlist_sort = PlaylistSort::Default;
+            }
         }
+        if self.playlist_sort != PlaylistSort::Default || self.added_filter != Default::default() {
+            self.sort_playlist(self.playlist_sort);
+        }
+    }
+
+    fn refresh_account_playlist(&mut self, id: &str) {
+        let Some(open) = self.playlist_for.clone().filter(|open| {
+            crate::model::bare_playlist_id(open) == crate::model::bare_playlist_id(id)
+        }) else {
+            return;
+        };
+        let (sort, filter) = (self.playlist_sort, self.added_filter);
+        self.playlist_for = None;
+        self.load_playlist(open);
+        self.playlist_sort = sort;
+        self.added_filter = filter;
     }
 
     /// Ask for the next page of the open playlist's tracks.
@@ -6293,7 +6349,8 @@ impl App {
                         }
                     }
                 }
-                Event::PlaylistLoaded { id, playlist } if self.playlist_is_for(&id) => {
+                Event::PlaylistLoaded { id, mut playlist } if self.playlist_is_for(&id) => {
+                    self.recorded_dates.apply(&id, &mut playlist.tracks.items);
                     self.playlist_loading = false;
                     // Keep it for the rail's context menu too.
                     self.cache_rail_playlist(&id, &playlist);
@@ -6306,7 +6363,7 @@ impl App {
                         self.backend.fetch_playlist_suggestions(id.clone(), token);
                     }
                     self.playlist = Some(playlist);
-                    self.apply_default_playlist_sort();
+                    self.apply_loaded_playlist_view();
                     // Edit from the rail: the page has arrived, so open its editor now.
                     if self.edit_on_load.as_deref() == Some(id.as_str()) {
                         self.edit_on_load = None;
@@ -6319,13 +6376,13 @@ impl App {
                 {
                     if let Some(playlist) = self.playlist.as_mut() {
                         let next = page.next;
-                        playlist.tracks.extend(
-                            page.items
-                                .into_iter()
-                                .filter_map(|e| e.track().cloned())
-                                .collect(),
-                            next,
-                        );
+                        let mut tracks: Vec<_> = page
+                            .items
+                            .into_iter()
+                            .filter_map(|e| e.track().cloned())
+                            .collect();
+                        self.recorded_dates.apply(&id, &mut tracks);
+                        playlist.tracks.extend(tracks, next);
                     }
                     // A sort is waiting on the rest of the playlist: either it just arrived, or
                     // there is still more to fetch before it can apply.
@@ -7317,6 +7374,7 @@ impl App {
                     self.toast_error(&failure_text("Could not update the playlist", &error));
                 }
                 Event::PlaylistDeleted { id } => {
+                    self.recorded_dates.forget(&id, None);
                     tracing::debug!(%id, "playlist deleted");
                     self.drop_playlist(&id);
                     let was_open = self.current_route() == Route::Playlist(id.clone());
@@ -7352,9 +7410,14 @@ impl App {
                 Event::PlaylistBulkSaved {
                     playlist_id,
                     added,
+                    dated_items,
                     duplicates,
                     total,
                 } => {
+                    self.recorded_dates.record(&playlist_id, dated_items);
+                    if added > 0 {
+                        self.refresh_account_playlist(&playlist_id);
+                    }
                     tracing::debug!(%playlist_id, added, duplicates, total, "bulk save landed");
                     // The count went up by `total` when the save was asked for; whatever was
                     // not added comes back off.
@@ -7376,6 +7439,7 @@ impl App {
                     }
                 }
                 Event::PlaylistSaved {
+                    item_id,
                     playlist_id,
                     video_id,
                 } => {
@@ -7383,12 +7447,14 @@ impl App {
                     self.toast("Saved to playlist");
                     self.playlist_picker.note_saved(&video_id, &playlist_id);
                     if playlist_id.starts_with("spotify:playlist:") {
-                        if self.playlist_is_for(&playlist_id) {
-                            self.playlist_for = None;
-                            self.load_playlist(playlist_id);
-                        }
+                        self.refresh_account_playlist(&playlist_id);
                     } else {
-                        self.note_saved_to_playlist(&playlist_id, &video_id);
+                        let now = chrono::Utc::now().timestamp_millis();
+                        if let Some(uid) = &item_id {
+                            self.recorded_dates
+                                .record(&playlist_id, vec![(uid.clone(), now)]);
+                        }
+                        self.note_saved_to_playlist(&playlist_id, &video_id, item_id, now);
                     }
                 }
                 Event::PlaylistDuplicate {
@@ -7431,18 +7497,17 @@ impl App {
                     self.toast_error(&text);
                 }
                 Event::PlaylistRemoved {
+                    item_id,
                     playlist_id,
                     video_id,
                 } => {
+                    self.recorded_dates.forget(&playlist_id, Some(&item_id));
                     tracing::debug!(%playlist_id, %video_id, "removed from playlist");
                     self.playlist_picker.invalidate(&video_id);
                     if playlist_id.starts_with("spotify:playlist:") {
                         self.spotify_playlist_remove_pending = false;
                         self.bump_playlist_counts(&playlist_id, -1);
-                        if self.playlist_is_for(&playlist_id) {
-                            self.playlist_for = None;
-                            self.load_playlist(playlist_id);
-                        }
+                        self.refresh_account_playlist(&playlist_id);
                     }
                     // The count went down when the removal was asked for.
                     self.toast("Removed from playlist");
@@ -7767,6 +7832,10 @@ impl App {
     }
 
     pub(crate) fn skip(&mut self, delta: isize) {
+        if delta > 0 && self.following() {
+            self.request_session_skip();
+            return;
+        }
         self.note_playback_choice();
         if delta < 0 {
             self.previous();
@@ -8586,6 +8655,7 @@ impl App {
                 if playlist_id.starts_with("private:") {
                     let mut lists = self.local_playlists.clone();
                     if let Some(lp) = lists.iter_mut().find(|p| p.id == playlist_id) {
+                        lp.added_ms.remove(&video_id);
                         lp.tracks.retain(|t| t.id != video_id);
                     }
                     self.persist_private_lists(lists);
@@ -8601,12 +8671,13 @@ impl App {
                         .iter_mut()
                         .find(|p| p.id == playlist_id)
                     {
+                        lp.added_ms.remove(&video_id);
                         lp.track_paths.retain(|p| p != &path);
                     }
                     if let Err(e) = crate::local_playlists::save(&self.local_playlists) {
                         tracing::warn!(error = %format!("{e:#}"), "could not save local playlists");
                     }
-                    self.remove_playlist_row(&playlist_id, &video_id);
+                    self.remove_playlist_row(&playlist_id, &set_video_id);
                     self.resync_local_playlists();
                     return;
                 }
@@ -8616,7 +8687,7 @@ impl App {
                 }
                 // Optimistic: the row leaves at once; a refusal cannot put it back, so that
                 // case refetches the page instead of guessing.
-                self.remove_playlist_row(&playlist_id, &video_id);
+                self.remove_playlist_row(&playlist_id, &set_video_id);
                 self.bump_playlist_counts(&playlist_id, -1);
                 self.backend
                     .remove_from_playlist(playlist_id, video_id, set_video_id);
@@ -9129,6 +9200,13 @@ impl App {
             .push(crate::local_playlists::LocalPlaylist {
                 id: crate::local_playlists::new_id(),
                 title: title.clone(),
+                added_ms: {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    track_paths
+                        .iter()
+                        .map(|p| (p.to_string_lossy().into_owned(), now))
+                        .collect()
+                },
                 track_paths,
                 tracks: Vec::new(),
                 rule: None,
@@ -9159,12 +9237,21 @@ impl App {
         }
         self.local_playlists = lists;
         self.resync_local_playlists();
+        self.refresh_open_local_order();
+        true
+    }
+
+    fn refresh_open_local_order(&mut self) {
         if let Some(id) = self.playlist.as_ref().map(|p| p.id.clone())
             && let Some(lp) = self.local_playlists.iter().find(|p| p.id == id)
         {
+            self.smart_playlist_report = None;
             self.playlist = Some(self.local_playlist_as_playlist(lp));
+            self.playlist_original_order = None;
+            if self.playlist_sort != PlaylistSort::Default {
+                self.sort_playlist(self.playlist_sort);
+            }
         }
-        true
     }
 
     pub(crate) fn create_private_playlist(
@@ -9177,6 +9264,7 @@ impl App {
         let mut lp = crate::local_playlists::LocalPlaylist {
             id: crate::local_playlists::new_id().replacen("local:", "private:", 1),
             title,
+            added_ms: Default::default(),
             track_paths: vec![],
             tracks: vec![],
             rule,
@@ -9305,11 +9393,16 @@ impl App {
             self.toast_error("Already in that playlist");
             return;
         }
+        playlist.added_ms.insert(
+            path.to_string_lossy().into_owned(),
+            chrono::Utc::now().timestamp_millis(),
+        );
         playlist.track_paths.push(path);
         if let Err(e) = crate::local_playlists::save(&self.local_playlists) {
             tracing::warn!(error = %format!("{e:#}"), "could not save local playlists");
         }
         self.resync_local_playlists();
+        self.refresh_open_local_order();
         self.toast("Saved to playlist");
     }
 
@@ -9860,11 +9953,14 @@ impl App {
     /// Drop a track from the open playlist page, when it is the playlist it was removed from.
     /// A refused removal cannot reconstruct the row — position, neighbours, continuation —
     /// so that case reloads the page instead of guessing.
-    fn remove_playlist_row(&mut self, playlist_id: &str, video_id: &str) {
+    fn remove_playlist_row(&mut self, playlist_id: &str, item_id: &str) {
         if let Some(playlist) = self.playlist.as_mut()
             && playlist.id == playlist_id
         {
-            playlist.tracks.items.retain(|t| t.video_id != video_id);
+            playlist
+                .tracks
+                .items
+                .retain(|t| t.playlist_row_key() != item_id);
         }
     }
 
@@ -9890,10 +9986,11 @@ impl App {
                         .iter()
                         .map(crate::listening::Metadata::from_track)
                         .collect();
+                    let previous = std::mem::take(&mut self.playlist_sort);
                     if self.persist_private_lists(lists) {
-                        self.playlist_sort = PlaylistSort::default();
-                        self.playlist_original_order = None;
                         ui::song_drag::clear_selection(&self.ctx);
+                    } else {
+                        self.playlist_sort = previous;
                     }
                 }
             }
@@ -11279,6 +11376,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,
             rank: None,
@@ -11322,6 +11420,34 @@ mod tests {
             ["a", "b", "c"],
             "Default must restore the served order, not leave the tracks as the last sort left them"
         );
+    }
+
+    #[test]
+    fn playlist_dates_sort_each_copy_and_restore_original_order() {
+        let mut tracks = vec![
+            playlist_track("z"),
+            playlist_track("m"),
+            playlist_track("a"),
+        ];
+        for (t, date) in tracks.iter_mut().zip([Some(10), None, Some(20)]) {
+            t.video_id = "same-song".into();
+            t.playlist_added_ms = date;
+        }
+        let mut original = None;
+        for (sort, expected) in [
+            (PlaylistSort::AddedNewest, ["a", "z", "m"]),
+            (PlaylistSort::AddedOldest, ["z", "a", "m"]),
+            (PlaylistSort::Default, ["z", "m", "a"]),
+        ] {
+            apply_playlist_sort(sort, &mut tracks, &mut original);
+            assert_eq!(
+                tracks
+                    .iter()
+                    .map(Track::playlist_row_key)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     /// Choosing Default when nothing has ever been sorted away from it is a no-op, not a crash

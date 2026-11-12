@@ -19,6 +19,8 @@ pub struct LocalPlaylist {
     /// no server-issued playlist-item id to track, unlike a YouTube playlist's `set_video_id`.
     #[serde(default)]
     pub track_paths: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub added_ms: std::collections::BTreeMap<String, i64>,
     #[serde(default)]
     pub tracks: Vec<crate::listening::Metadata>,
     #[serde(default)]
@@ -84,9 +86,11 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.track_paths, vec![PathBuf::from("/music/a.flac")]);
         assert!(legacy.tracks.is_empty());
+        assert!(legacy.added_ms.is_empty());
         let mut private = LocalPlaylist {
             id: "private:new".into(),
             title: "Finds".into(),
+            added_ms: Default::default(),
             track_paths: vec![],
             tracks: vec![],
             rule: None,
@@ -106,7 +110,10 @@ mod tests {
         }
         .to_track();
         assert_eq!(private.add_tracks(&[a.clone(), b.clone(), a.clone()]), 2);
+        assert!(private.added_ms.contains_key(&a.video_id));
+        private.added_ms.insert(a.video_id.clone(), 42);
         assert_eq!(private.add_tracks(std::slice::from_ref(&a)), 0);
+        assert_eq!(private.added_ms[&a.video_id], 42);
         let lists: Vec<LocalPlaylist> =
             serde_json::from_slice(&serde_json::to_vec(&vec![legacy, private.clone()]).unwrap())
                 .unwrap();
@@ -219,9 +226,11 @@ impl LocalPlaylist {
         self.id.starts_with("private:")
     }
     pub fn add_tracks(&mut self, tracks: &[crate::model::Track]) -> usize {
+        let now = chrono::Utc::now().timestamp_millis();
         let before = self.tracks.len();
         for track in tracks {
             if !self.tracks.iter().any(|t| t.id == track.video_id) {
+                self.added_ms.insert(track.video_id.clone(), now);
                 self.tracks
                     .push(crate::listening::Metadata::from_track(track));
             }

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -37,7 +38,9 @@ if sys.argv[1] == "demo":
         paths.append(str(path))
     (config / "settings.json").write_text(json.dumps({"local_folders": [str(music)]}))
     (config / "local_playlists.json").write_text(
-        json.dumps([{"id": "local:studio", "title": "Studio Sessions", "track_paths": paths}])
+        json.dumps([{"id": "local:studio", "title": "Studio Sessions", "track_paths": paths,
+                     "added_ms": {paths[0]: int((time.time() - 15 * 86400) * 1000),
+                                  paths[2]: int((time.time() - 2 * 86400) * 1000)}}])
     )
     (config / "search_history.json").write_text(json.dumps({"entries": ["Studio Sessions", "Night Train"]}))
 

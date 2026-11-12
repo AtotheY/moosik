@@ -310,6 +310,7 @@ fn track_list(app: &mut App, ui: &mut egui::Ui, tracks: &[crate::model::Track]) 
             false,
             // Every row here is liked; the thumb shows under the pointer, as on Liked Music.
             true,
+            false,
         )
     };
     match clicked.click {

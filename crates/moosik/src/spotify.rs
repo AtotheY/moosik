@@ -537,6 +537,11 @@ fn catalog_track(item: CatalogTrack) -> Track {
     let mut track = track(item.metadata);
     track.artists = artist_links(item.artists);
     track.album_id = item.album_uri;
+    track.playlist_added_ms = item
+        .added_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.timestamp_millis());
     track.set_video_id = item.playlist_item_uid.map(Into::into);
     track.in_library = item.saved;
     track.like = if item.saved {
@@ -628,6 +633,7 @@ fn track(metadata: TrackMetadata) -> Track {
         in_library: false,
         library_add: None,
         library_remove: None,
+        playlist_added_ms: None,
         set_video_id: None,
         thumbnail: metadata.cover_url.map(Into::into),
         wide: false,

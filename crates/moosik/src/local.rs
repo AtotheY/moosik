@@ -96,6 +96,7 @@ fn track_from_path(path: &Path) -> Option<Track> {
         in_library: false,
         library_add: None,
         library_remove: None,
+        playlist_added_ms: None,
         set_video_id: None,
         // No embedded-art extraction yet — the image pipeline (`images.rs`) is built entirely
         // around YouTube's `sized_url` template, which a local path can't go through. Local

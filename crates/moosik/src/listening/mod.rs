@@ -65,6 +65,7 @@ impl Metadata {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             thumbnail: self.artwork.as_deref().map(std::sync::Arc::from),
             wide: self.video,

@@ -5,7 +5,8 @@
 //! N songs • duration"). The ••• also carries Edit and Delete for your own lists.
 
 use crate::app::{App, PlaylistSort, Route};
-use crate::model::Playlist;
+use crate::model::{Playlist, Track};
+use crate::playlist_dates::AddedFilter;
 use crate::ui::{ListClick, PAGE_ART_SIZE, failed, track_rows_quiet};
 use crate::widgets;
 
@@ -36,6 +37,13 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let grouped_tracks = smart_private_projection(app);
+    let filtered = app.playlist.as_ref().and_then(|pl| {
+        app.filtered_playlist.project(
+            app.added_filter,
+            &pl.tracks,
+            chrono::Utc::now().timestamp_millis(),
+        )
+    });
 
     let wash = crate::ui::header_wash_colour(
         app,
@@ -45,16 +53,18 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
         // The tint travels with the page: painted in scroll coordinates, it scrolls away
         // with the header instead of lingering as a background.
         crate::ui::header_wash(ui, &app.palette, app.content_rect, ui.cursor().min.y, wash);
-        header(app, ui, grouped_tracks.as_deref());
+        header(app, ui, grouped_tracks.as_deref().or(filtered.as_deref()));
         crate::ui::info_popup(app, ui);
         // Breathing room between the header and the first row.
         ui.add_space(10.0);
         // Both lists number their row controls from zero. Keep the playlist's
         // hover, click and drag targets separate from the suggestions below.
         ui.push_id("playlist-tracks", |ui| {
-            track_list(app, ui, grouped_tracks.is_some());
+            track_list(app, ui, grouped_tracks.is_some(), filtered.as_deref());
         });
-        suggestions(app, ui);
+        if filtered.is_none() {
+            suggestions(app, ui);
+        }
         if let Some(pl) = app.playlist.as_ref().filter(|p| p.editable) {
             let id = pl.id.clone();
             let accepts = super::song_drag::payload(ui.ctx())
@@ -216,14 +226,22 @@ fn suggestions(app: &mut App, ui: &mut egui::Ui) {
 /// only — the playlist endpoints take no sort of their own, see [`PlaylistSort`]'s own doc
 /// comment.
 fn sort_control(app: &mut App, ui: &mut egui::Ui, anchor: egui::Pos2) {
-    const OPTIONS: &[PlaylistSort] = &PlaylistSort::ALL;
+    let dated = app
+        .playlist
+        .as_ref()
+        .is_some_and(Playlist::supports_added_dates);
+    let options: &[PlaylistSort] = if dated {
+        &PlaylistSort::DATED
+    } else {
+        &PlaylistSort::ALL
+    };
     let rect = egui::Rect::from_min_size(anchor + egui::vec2(10.0, -15.0), egui::vec2(260.0, 30.0));
     let mut cui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(rect)
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    let labels: Vec<&'static str> = OPTIONS.iter().map(|s| s.label()).collect();
+    let labels: Vec<&'static str> = options.iter().map(|s| s.label()).collect();
     if let Some(i) = widgets::icon_dropdown(
         &mut cui,
         &app.palette,
@@ -235,7 +253,34 @@ fn sort_control(app: &mut App, ui: &mut egui::Ui, anchor: egui::Pos2) {
         app.playlist_sort.label(),
         &labels,
     ) {
-        app.sort_playlist(OPTIONS[i]);
+        app.sort_playlist(options[i]);
+    }
+    if dated {
+        let filter = app.added_filter;
+        let label = if filter == AddedFilter::Any {
+            "Date added"
+        } else {
+            filter.label()
+        };
+        if let Some(i) = widgets::text_dropdown_with_label(
+            &mut cui,
+            &app.palette,
+            ui.id().with("playlist-added-filter"),
+            label,
+            filter.label(),
+            &AddedFilter::ALL.map(AddedFilter::label),
+        ) {
+            app.added_filter = AddedFilter::ALL[i];
+            super::song_drag::clear_selection(ui.ctx());
+            if app.added_filter != AddedFilter::Any
+                && app
+                    .playlist
+                    .as_ref()
+                    .is_some_and(|p| p.tracks.next.is_some())
+            {
+                app.sort_playlist(app.playlist_sort);
+            }
+        }
     }
     if app.playlist_sort_pending {
         cui.add_space(6.0);
@@ -245,8 +290,8 @@ fn sort_control(app: &mut App, ui: &mut egui::Ui, anchor: egui::Pos2) {
         // takes reads as stuck even when it is working normally.
         let loaded = app.playlist.as_ref().map(|pl| pl.tracks.items.len());
         let text = match loaded {
-            Some(n) => format!("Loading the rest to sort… ({n} loaded)"),
-            None => "Loading the rest to sort…".to_owned(),
+            Some(n) => format!("Loading playlist… ({n} loaded)"),
+            None => "Loading playlist…".to_owned(),
         };
         cui.label(
             egui::RichText::new(text)
@@ -272,12 +317,16 @@ fn smart_private_projection(app: &mut App) -> Option<Vec<crate::model::Track>> {
     )
 }
 
-fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::model::Track]>) {
+fn header(app: &mut App, ui: &mut egui::Ui, visible_tracks: Option<&[crate::model::Track]>) {
     let signed_in = app.signed_in();
-    let playing = app
-        .playlist
-        .as_ref()
-        .is_some_and(|pl| app.is_playing_any(&pl.tracks));
+    let filtering = app.added_filter != AddedFilter::Any;
+    let filtered_queue_matches = !filtering
+        || visible_tracks.is_some_and(|tracks| crate::app::same_queue(app.q.tracks(), tracks));
+    let playing = filtered_queue_matches
+        && app
+            .playlist
+            .as_ref()
+            .is_some_and(|pl| app.is_playing_any(visible_tracks.unwrap_or(&pl.tracks)));
 
     let (out, menu_action, write, rail_ref, in_library, menu_description, is_expanding) = {
         let crate::app::App {
@@ -304,7 +353,11 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
             "Playlist"
         }
         .to_owned();
-        let meta = grouped_tracks.map_or_else(|| meta_line(pl), projected_meta);
+        let meta = if filtering && pl.tracks.next.is_some() {
+            meta_line(pl)
+        } else {
+            visible_tracks.map_or_else(|| meta_line(pl), projected_meta)
+        };
         // The owner, folded into the meta line below rather than a separate row: linked where
         // the page gave a channel id, so their profile can be opened from the name. Liked Music
         // is an auto list with no maker to show.
@@ -379,7 +432,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
                 // "Owner • N songs • duration" on one line instead of a row each.
                 owner: owner.as_ref(),
                 credit_air: 4.0,
-                play_size: Some(crate::ui::DETAIL_PLAY_PT),
+                play_size: (!visible_tracks.is_some_and(<[Track]>::is_empty))
+                    .then_some(crate::ui::DETAIL_PLAY_PT),
                 playing,
                 save_in_library: signed_in
                     .then(|| write.is_some().then_some(in_library))
@@ -413,7 +467,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
                         dots,
                         widgets::PageMenu {
                             page_id: &pl.id,
-                            tracks: grouped_tracks.unwrap_or(&pl.tracks.items),
+                            tracks: visible_tracks.unwrap_or(&pl.tracks.items),
                             artist_id: None,
                             playlists: &library.playlists.items,
                             signed_in,
@@ -459,7 +513,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
     };
 
     if out.play {
-        let tracks = grouped_tracks.map_or_else(
+        let tracks = visible_tracks.map_or_else(
             || {
                 app.playlist
                     .as_ref()
@@ -470,7 +524,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, grouped_tracks: Option<&[crate::mode
         );
         // Already on this playlist: the button just showed Pause, so clicking it again means
         // resume/pause, not "start over from track 1".
-        if app.queue_matches(&tracks) {
+        if filtered_queue_matches && app.queue_matches(&tracks) {
             app.toggle_playback();
         } else {
             app.start_from(tracks, 0);
@@ -556,7 +610,36 @@ fn meta_text(count: Option<&str>, loaded: usize, duration: Option<&str>) -> Stri
     parts.join(" • ")
 }
 
-fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
+fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool, filtered: Option<&[Track]>) {
+    if filtered.is_some_and(|tracks| tracks.is_empty()) {
+        if app.playlist_sort_pending {
+            widgets::skeleton_track_rows(ui, &app.palette, 3, false);
+        } else if app
+            .playlist
+            .as_ref()
+            .is_some_and(|p| p.tracks.next.is_some())
+        {
+            ui.label(
+                egui::RichText::new("Couldn’t load the full playlist.")
+                    .font(crate::theme::regular(13.0))
+                    .color(app.palette.secondary),
+            );
+            if widgets::chip(ui, &app.palette, "Retry", false).clicked() {
+                app.sort_playlist(app.playlist_sort);
+            }
+        } else {
+            ui.label(
+                egui::RichText::new("No songs with a recorded date in this period.")
+                    .font(crate::theme::regular(13.0))
+                    .color(app.palette.secondary),
+            );
+            if widgets::chip(ui, &app.palette, "Show all songs", false).clicked() {
+                app.added_filter = AddedFilter::Any;
+                super::song_drag::clear_selection(ui.ctx());
+            }
+        }
+        return;
+    }
     if let Some(pl) = app
         .playlist
         .as_ref()
@@ -614,7 +697,8 @@ fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
             library,
             ..
         } = app;
-        let tracks: &[crate::model::Track] = playlist.as_ref().map(|p| &*p.tracks).unwrap_or(&[]);
+        let tracks =
+            filtered.unwrap_or_else(|| playlist.as_ref().map(|p| &*p.tracks).unwrap_or(&[]));
         // "Remove from playlist" only on your own lists — never LM, never someone else's.
         let playlist_id = playlist
             .as_ref()
@@ -641,6 +725,7 @@ fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
             // Each track is from its own album, so the per-row cover stays.
             false,
             liked_music,
+            app.playlist_sort.by_date() || filtered.is_some(),
         )
     };
     // A long playlist arrives 100 tracks at a time; ask for the next when the viewport gets there.
@@ -652,7 +737,10 @@ fn track_list(app: &mut App, ui: &mut egui::Ui, grouped: bool) {
     }
     match clicked.click {
         Some(ListClick::Row(i)) => {
-            if let Some(tracks) = app.playlist.as_ref().map(|p| p.tracks.items.clone()) {
+            if let Some(tracks) = filtered
+                .map(<[Track]>::to_vec)
+                .or_else(|| app.playlist.as_ref().map(|p| p.tracks.items.clone()))
+            {
                 app.start_from(tracks, i);
             }
         }

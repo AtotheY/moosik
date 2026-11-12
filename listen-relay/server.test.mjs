@@ -90,3 +90,28 @@ test('session members share an attributed FIFO queue, while only the host contro
   now += 46000;
   assert.equal((await sync(alice, first)).status, 404);
 });
+
+test('guest skips coalesce and expire when the host advances, even to another copy of the song', async t => {
+  const relay = createRelay();
+  await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => relay.close(resolve)));
+  const rooms = 'http://127.0.0.1:' + relay.address().port + '/rooms';
+  const { id, key, session } = await (await fetch(rooms, { method: 'POST' })).json();
+  const sync = (headers, body) => fetch(rooms + '/' + id, { method: 'PUT',
+    headers: { 'X-Moosik-Session': session, ...headers }, body: JSON.stringify(body) });
+  const song = { id: 'aaaaaaaaaaa', title: 'Track', artist: '', playing: true, position: 0 };
+  const host = target => sync({ Authorization: 'Bearer ' + key }, { name: 'DJ', state: song, skip_target: target }).then(r => r.json());
+  const guest = (token, body) => sync({ 'X-Moosik-Listener': token.repeat(32) }, { name: 'Listener', ...body });
+
+  const { skip_target: first } = await host('1-0');
+  for (const result of await Promise.all([guest('a', {skip: first}), guest('b', {skip: first})])) {
+    assert.equal(result.status, 200);
+  }
+  assert.equal((await host(first)).skip_requested, true);
+  assert.equal((await host(first)).skip_requested, true); // Lost response, same playback.
+  assert.equal((await host('2-1')).skip_requested, false);
+  await guest('b', {skip: first});
+  assert.equal((await host('2-1')).skip_requested, false);
+  await guest('b', {skip: '2-1'});
+  assert.equal((await host('2-1')).skip_requested, true);
+});

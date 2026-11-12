@@ -30,6 +30,9 @@ pub(crate) struct Snapshot {
     pub you: u64,
     #[serde(default)]
     pub(super) can_pick_entry: bool,
+    pub(super) skip_target: Option<String>,
+    #[serde(default)]
+    pub(super) skip_requested: bool,
     pub current_by: Option<Member>,
     pub(super) state: Option<Song>,
     pub(super) error: Option<String>,
@@ -88,6 +91,7 @@ struct Commands {
     profile: SessionProfile,
     sequence: u64,
     pending: VecDeque<Addition>,
+    skip: Option<String>,
     played: Played,
     sent_played: Played,
     sent_profile: SessionProfile,
@@ -104,6 +108,7 @@ impl Outbox {
         if cmd.room != id {
             cmd.room = id.to_owned();
             cmd.pending.clear();
+            cmd.skip = None;
             cmd.played = Played::default();
             cmd.sent_played = Played::default();
         }
@@ -122,6 +127,13 @@ impl Outbox {
         let seq = cmd.sequence;
         cmd.pending.push_back(Addition { seq, song });
         true
+    }
+
+    pub(super) fn request_skip(&self, room: &str, target: &str) {
+        let mut cmd = self.0.lock().unwrap();
+        if cmd.room == room {
+            cmd.skip = Some(target.to_owned());
+        }
     }
 
     pub(super) fn played(&self, id: &str, entry: u64, remaining: &[Entry]) {
@@ -146,10 +158,13 @@ impl Outbox {
         request: reqwest::RequestBuilder,
         host_state: Option<&Option<Song>>,
     ) -> anyhow::Result<Snapshot> {
-        let (body, seq, profile, played) = {
+        let (body, seq, profile, played, skip) = {
             let cmd = self.0.lock().unwrap();
             let mut body = serde_json::to_value(&cmd.profile)?;
             if let Some(state) = host_state {
+                if let Some(target) = state.as_ref().and_then(|s| s.skip_target.as_deref()) {
+                    body["skip_target"] = target.into();
+                }
                 body["state"] = serde_json::to_value(state)?;
                 body["played"] = cmd.played.through.into();
                 if !cmd.played.keep_entries.is_empty() {
@@ -158,6 +173,11 @@ impl Outbox {
                 if let Some(entry) = cmd.played.play_entry {
                     body["play_entry"] = entry.into();
                 }
+            }
+            if host_state.is_none()
+                && let Some(target) = &cmd.skip
+            {
+                body["skip"] = target.as_str().into();
             }
             let add = cmd.pending.front();
             if let Some(add) = add {
@@ -168,6 +188,7 @@ impl Outbox {
                 add.map(|a| a.seq),
                 cmd.profile.clone(),
                 cmd.played.clone(),
+                cmd.skip.clone(),
             )
         };
         let res = request
@@ -185,6 +206,9 @@ impl Outbox {
                 && snapshot.queue.iter().all(|e| e.song.valid())
         );
         let mut cmd = self.0.lock().unwrap();
+        if cmd.skip == skip {
+            cmd.skip = None;
+        }
         cmd.sent_played = played;
         cmd.sent_profile = profile;
         if let Some(seq) = seq {
