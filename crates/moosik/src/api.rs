@@ -857,14 +857,20 @@ impl Api {
         let query = EditablePlaylistsQuery {
             video_id: video_id.to_owned(),
         };
-        let json = match self.client_ref().await? {
-            ClientRef::NoAuth(_) => anyhow::bail!("sign in to edit playlists"),
-            ClientRef::Browser(yt) => yt.json_query(query).await,
-        }
-        .map(ytmapi_rs::json::Json::into_inner)
-        .context("could not load YouTube Music playlists")?;
-        innertube::parse_editable_playlists(&json)
-            .context("YouTube Music returned an invalid playlist picker")
+        load_playlist_picker(
+            || async {
+                let yt = self.browser().await?.context("sign in to edit playlists")?;
+                // Keep the error envelope so the picker can distinguish an expired session
+                // from a permission error or an unexpected response.
+                let raw = yt
+                    .raw_json_query::<EditablePlaylistsQuery>(&query)
+                    .await
+                    .context("could not load YouTube Music playlists")?;
+                serde_json::from_str(&raw).context("invalid YouTube Music playlist response")
+            },
+            self.refresh_from_source(),
+        )
+        .await
     }
 
     /// One page of one library browse id, with a single re-import if the session has gone stale.
@@ -2176,6 +2182,29 @@ impl ytmapi_rs::query::PostQuery for FeedbackQuery {
     }
 }
 
+async fn load_playlist_picker<F: Future<Output = Result<serde_json::Value>>>(
+    mut request: impl FnMut() -> F,
+    refresh_session: impl Future<Output = bool>,
+) -> Result<model::EditablePlaylists> {
+    let session_rejected = |json: &serde_json::Value| {
+        json["error"]["code"].as_u64() == Some(401)
+            || json["error"]["status"].as_str() == Some("UNAUTHENTICATED")
+            || innertube::looks_signed_out(json)
+    };
+    let mut json = request().await?;
+    if session_rejected(&json) {
+        anyhow::ensure!(refresh_session.await, "YouTube Music session expired");
+        json = request().await?;
+        anyhow::ensure!(!session_rejected(&json), "YouTube Music session expired");
+    }
+    if let Some(error) = json.get("error") {
+        let message = error["message"].as_str().unwrap_or("request rejected");
+        anyhow::bail!("could not load YouTube Music playlists: {message}");
+    }
+    innertube::parse_editable_playlists(&json)
+        .context("YouTube Music returned an invalid playlist picker")
+}
+
 struct EditablePlaylistsQuery {
     video_id: String,
 }
@@ -3149,6 +3178,78 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn playlist_picker_reloads_after_session_refresh() {
+        use serde_json::json;
+        let signed_out = json!({"responseContext": {"serviceTrackingParams": [
+            {"params": [{"key": "logged_in", "value": "0"}]}
+        ]}});
+        for rejected in [
+            signed_out,
+            json!({"error": {"code": 401}}),
+            json!({"error": {"status": "UNAUTHENTICATED"}}),
+        ] {
+            let picker = json!({"contents": [{"addToPlaylistRenderer": {"playlists": [
+                {"playlistAddToOptionRenderer": {
+                    "playlistId": "PLmine", "title": {"simpleText": "Mine"},
+                    "addToPlaylistServiceEndpoint": {"playlistEditEndpoint": {}}
+                }}
+            ]}}]});
+            let mut responses = [rejected, picker].into_iter();
+            let result = load_playlist_picker(
+                || std::future::ready(Ok(responses.next().unwrap())),
+                async { true },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.playlists[0].0.id, "VLPLmine");
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_picker_stops_after_one_refresh() {
+        use serde_json::json;
+        for refreshed in [true, false] {
+            let mut calls = 0;
+            let result = load_playlist_picker(
+                || {
+                    calls += 1;
+                    std::future::ready(Ok(json!({"error": {"code": 401}})))
+                },
+                async { refreshed },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(calls, if refreshed { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn playlist_picker_only_refreshes_on_authentication_errors() {
+        use serde_json::json;
+        let empty = load_playlist_picker(
+            || std::future::ready(Ok(json!({"contents": [{"addToPlaylistRenderer": {}}]}))),
+            async { panic!("unexpected refresh") },
+        )
+        .await
+        .unwrap();
+        assert!(empty.playlists.is_empty());
+
+        for response in [
+            Ok(json!({"contents": []})),
+            Ok(json!({"error": {"code": 403, "status": "PERMISSION_DENIED"}})),
+            Err(anyhow::anyhow!("offline")),
+        ] {
+            let mut response = Some(response);
+            let result =
+                load_playlist_picker(|| std::future::ready(response.take().unwrap()), async {
+                    panic!("unexpected refresh")
+                })
+                .await;
+            assert!(result.is_err());
+        }
+    }
 
     #[tokio::test]
     async fn concurrent_client_builds_share_a_failure_and_can_retry() {
