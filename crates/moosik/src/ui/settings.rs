@@ -17,7 +17,7 @@ use crate::auth::AuthState;
 use crate::browser_cookies;
 use crate::model::Provider;
 use crate::settings::Opacity;
-use crate::settings::{HomeSource, Quality, Settings, Theme};
+use crate::settings::{HomeSource, MouseAction, Quality, Settings, Theme};
 use crate::theme;
 use crate::widgets;
 
@@ -28,16 +28,18 @@ pub enum SettingsTab {
     Appearance,
     Playback,
     Providers,
+    Shortcuts,
     System,
     Discord,
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
         SettingsTab::Appearance,
         SettingsTab::Playback,
         SettingsTab::Providers,
+        SettingsTab::Shortcuts,
         SettingsTab::System,
         SettingsTab::Discord,
         SettingsTab::About,
@@ -48,6 +50,7 @@ impl SettingsTab {
             SettingsTab::Appearance => "Appearance",
             SettingsTab::Playback => "Playback",
             SettingsTab::Providers => "Providers",
+            SettingsTab::Shortcuts => "Shortcuts",
             SettingsTab::System => "System",
             SettingsTab::Discord => "Discord",
             SettingsTab::About => "About",
@@ -81,6 +84,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                 SettingsTab::Appearance => appearance(app, ui),
                 SettingsTab::Playback => playback(app, ui),
                 SettingsTab::Providers => providers(app, ui),
+                SettingsTab::Shortcuts => shortcuts(app, ui),
                 SettingsTab::System => system(app, ui),
                 SettingsTab::Discord => discord(app, ui),
                 SettingsTab::About => about(app, ui),
@@ -142,9 +146,32 @@ fn providers(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The About tab: the shortcuts window, then the app's own name, version and licence.
-fn about(app: &mut App, ui: &mut egui::Ui) {
+fn shortcuts(app: &mut App, ui: &mut egui::Ui) {
     let p = app.palette;
+    let mut back = app.settings.mouse_back_button;
+    let mut forward = app.settings.mouse_forward_button;
+    widgets::setting_group(ui, &p, Some("Mouse side buttons"), |ui, g| {
+        for (title, action) in [("Back button", &mut back), ("Forward button", &mut forward)] {
+            g.row(ui, title, "", |ui| {
+                for (choice, label) in [
+                    (MouseAction::Unbound, "Unbound"),
+                    (MouseAction::Forward, "Forward"),
+                    (MouseAction::Back, "Back"),
+                ] {
+                    if widgets::chip(ui, &p, label, *action == choice).clicked() {
+                        *action = choice;
+                    }
+                }
+            });
+        }
+    });
+    if back != app.settings.mouse_back_button || forward != app.settings.mouse_forward_button {
+        app.update_settings(ui.ctx(), |s| {
+            s.mouse_back_button = back;
+            s.mouse_forward_button = forward;
+        });
+    }
+
     let mut open_help = false;
     widgets::setting_group(ui, &p, Some("Help"), |ui, g| {
         g.row(
@@ -157,7 +184,10 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     if open_help {
         app.help_open = true;
     }
+}
 
+fn about(app: &mut App, ui: &mut egui::Ui) {
+    let p = app.palette;
     let (mut check_now, mut show) = (false, false);
     let (title, detail) = match &app.update.available {
         Some(release) => (
@@ -1889,6 +1919,7 @@ mod tests {
                 "Appearance",
                 "Playback",
                 "Providers",
+                "Shortcuts",
                 "System",
                 "Discord",
                 "About"
