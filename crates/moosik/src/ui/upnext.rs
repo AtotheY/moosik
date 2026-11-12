@@ -5,6 +5,7 @@
 //! No rating thumbs here (`show_rating: false`). This is a list of what happens next, and a
 //! column of controls repeated down it is noise; rating a queued song is one right-click away.
 
+use super::queue_edit::{self, Scope};
 use crate::app::{App, RepeatMode, SessionMember};
 use crate::icons::Icon;
 use crate::theme;
@@ -324,32 +325,51 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         "Listening along"
     };
     ui.add_space(if page { 20.0 } else { 8.0 });
-    ui.horizontal(|ui| {
-        ui.label(if page {
-            egui::RichText::new(title)
-                .font(theme::bold(theme::SECTION_PT))
-                .color(p.text)
-        } else {
-            egui::RichText::new(title)
-                .font(theme::semibold(12.0))
-                .color(p.secondary)
-        });
-        if app.following() {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::outline_button(ui, &p, "Leave")
-                    .on_hover_text("Leave listening session and return to your queue")
-                    .clicked()
-                {
-                    app.leave_room();
-                    app.toast("Left listening session");
-                }
-            });
+    let following = app.following();
+    let mut leave = false;
+    let leave_button = |ui: &mut egui::Ui| {
+        if following {
+            leave = widgets::outline_button(ui, &p, "Leave")
+                .on_hover_text("Leave listening session and return to your queue")
+                .clicked();
         }
-    });
+    };
+    if let Some(room) = app.room_snapshot().filter(|room| room.can_edit_queue) {
+        queue_edit::toolbar(
+            Scope::Session,
+            ui,
+            &p,
+            title,
+            room.undo_edit.is_some(),
+            leave_button,
+        );
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(if page {
+                egui::RichText::new(title)
+                    .font(theme::bold(theme::SECTION_PT))
+                    .color(p.text)
+            } else {
+                egui::RichText::new(title)
+                    .font(theme::semibold(12.0))
+                    .color(p.secondary)
+            });
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                leave_button,
+            );
+        });
+    }
+    if leave {
+        app.leave_room();
+        app.toast("Left listening session");
+        return;
+    }
     ui.add_space(if page { 8.0 } else { 4.0 });
     let Some(room) = app.together.snapshot() else {
         return;
     };
+    let stamp = room.queue_stamp(app.together.session_id());
     let signed_in = app.signed_in();
     let tracks: Vec<_> = room.queue.iter().map(|entry| entry.song.track()).collect();
     let box_response = with_avatar_inset(
@@ -362,13 +382,13 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
     .show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         let list_id = ui.id();
-        let order = room
-            .queue
-            .iter()
-            .fold(egui::Id::new(app.together.session_id()), |id, entry| {
-                id.with(entry.entry)
-            });
-        super::song_drag::sync_list_order(ui.ctx(), list_id, order);
+        let list_top = ui.cursor().top();
+        if room.can_edit_queue {
+            let entries: Vec<_> = room.queue.iter().map(|e| e.entry as usize).collect();
+            queue_edit::prepare(Scope::Session, ui, stamp.value(), &entries);
+        } else {
+            super::song_drag::sync_list_order(ui.ctx(), list_id, stamp);
+        }
         if tracks.is_empty() {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
@@ -398,7 +418,7 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                     &app.now,
                     &app.library.playlists.items,
                     signed_in,
-                    None,
+                    room.can_edit_queue.then(|| room.queue[i].entry as usize),
                 )
             },
             |_| CREDIT_SLOT,
@@ -414,13 +434,22 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                 );
             },
         );
+        if room.can_edit_queue {
+            queue_edit::drop_target(Scope::Session, ui, &p, list_top, tracks.len());
+        }
         (list_id, Some(clicked))
     });
     let (list_id, clicked) = box_response.inner;
     let accepts = super::song_drag::payload(ui.ctx())
         .is_some_and(|drag| drag.source != list_id && drag.session_eligible());
     let dropped = super::song_drag::target(ui, &p, box_response.response.rect, accepts);
-    if let Some(clicked) = clicked {
+    let edit = room
+        .can_edit_queue
+        .then(|| queue_edit::take_action(Scope::Session, ui.ctx()))
+        .flatten();
+    if let Some(edit) = edit {
+        app.edit_session_queue(edit);
+    } else if let Some(clicked) = clicked {
         match clicked.click {
             Some(ListClick::Row(i)) if app.hosting() => {
                 let entry = room.queue[i].entry;
@@ -431,7 +460,14 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
             None => {}
         }
         if let Some(action) = clicked.action {
-            app.row_action(action);
+            if let super::RowAction::RemoveFromQueue(entry) = action {
+                app.edit_session_queue(queue_edit::Action::Remove {
+                    stamp: stamp.value(),
+                    indices: vec![entry],
+                });
+            } else {
+                app.row_action(action);
+            }
         }
     }
     if let Some(tracks) = dropped {
@@ -463,11 +499,11 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
         .queue_undo
         .as_ref()
         .is_some_and(|(stamp, _, _)| *stamp == app.q.edit_stamp());
-    crate::ui::queue_edit::prepare(ui, app.q.edit_stamp(), &upcoming);
+    crate::ui::queue_edit::prepare(Scope::Personal, ui, app.q.edit_stamp(), &upcoming);
     let show_section = has_current || in_room || !upcoming.is_empty() || undo;
     if show_section {
         let title = if in_room { "Personal queue" } else { "Next up" };
-        crate::ui::queue_edit::toolbar(ui, &app.palette, title, undo);
+        crate::ui::queue_edit::toolbar(Scope::Personal, ui, &app.palette, title, undo, |_| {});
         ui.add_space(4.0);
     }
 
@@ -488,7 +524,7 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
                     .color(app.palette.secondary),
             );
         }
-        if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
+        if let Some(action) = crate::ui::queue_edit::take_action(Scope::Personal, ui.ctx()) {
             app.edit_queue(action);
         }
     } else {
@@ -497,7 +533,7 @@ fn queue_contents(app: &mut App, ui: &mut egui::Ui, page: bool) {
     if has_current && app.repeat == RepeatMode::All {
         repeat_footer(app, ui, upcoming.is_empty());
     }
-    if super::song_drag::payload(ui.ctx()).is_some_and(|drag| !drag.queue)
+    if super::song_drag::payload(ui.ctx()).is_some_and(|drag| drag.queue != Some(Scope::Personal))
         && let Some(boundary) =
             super::queue_edit::drop_boundary(ui, &app.palette, list_top, upcoming.len())
         && ui.input(|i| i.pointer.primary_released())
@@ -626,8 +662,8 @@ fn next_up(app: &mut App, ui: &mut egui::Ui, upcoming: &[usize]) {
         )
     };
 
-    crate::ui::queue_edit::drop_target(ui, &app.palette, list_top, upcoming.len());
-    if let Some(action) = crate::ui::queue_edit::take_action(ui.ctx()) {
+    crate::ui::queue_edit::drop_target(Scope::Personal, ui, &app.palette, list_top, upcoming.len());
+    if let Some(action) = crate::ui::queue_edit::take_action(Scope::Personal, ui.ctx()) {
         app.edit_queue(action);
         return;
     }

@@ -115,3 +115,51 @@ test('guest skips coalesce and expire when the host advances, even to another co
   await guest('b', {skip: '2-1'});
   assert.equal((await host('2-1')).skip_requested, true);
 });
+
+test('listeners edit individual queue occurrences, with retry-safe moves and one-level undo', async t => {
+  const relay = createRelay();
+  await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => relay.close(resolve)));
+  const rooms = 'http://127.0.0.1:' + relay.address().port + '/rooms';
+  const { id, key, session } = await (await fetch(rooms, { method: 'POST' })).json();
+  const song = { id: 'aaaaaaaaaaa', title: 'Repeated song', artist: 'Artist', playing: false, position: 23 };
+  const sync = (headers, body) => fetch(rooms + '/' + id, {
+    method: 'PUT', headers: { 'X-Moosik-Session': session, ...headers }, body: JSON.stringify(body),
+  });
+  const host = body => sync({ Authorization: 'Bearer ' + key }, { name: 'Host', state: song, ...body }).then(r => r.json());
+  const guest = (who, body) => sync({ 'X-Moosik-Listener': who.repeat(32) }, { name: who, ...body }).then(r => r.json());
+  const ids = snap => snap.queue.map(e => e.entry);
+  await host({});
+  await guest('a', { add: { seq: 1, song } });
+  await guest('b', { add: { seq: 1, song } });
+  await guest('a', { add: { seq: 2, song } });
+  // Hosts that acknowledge only a FIFO prefix must never consume a reordered queue.
+  const move = { edit: { seq: 3, entries: [3], before: 1 } };
+  const older = await guest('a', move);
+  assert.equal(older.can_edit_queue, false);
+  assert.deepEqual(ids(older), [1, 2, 3]);
+  const heartbeat = { played_entries: [] };
+  assert.equal((await host(heartbeat)).can_edit_queue, true);
+  assert.deepEqual(ids(await guest('a', move)), [3, 1, 2]);
+  const other = await guest('b', { edit: { seq: 2, entries: [3, 1], before: null } });
+  assert.deepEqual(ids(other), [2, 3, 1]);
+  assert.deepEqual(ids(await guest('a', move)), [2, 3, 1]);
+  assert.equal((await guest('a', {})).undo_edit, undefined);
+  assert.deepEqual(ids(await guest('b', { edit: { seq: 3, undo: other.undo_edit } })), [3, 1, 2]);
+  const removed = await guest('b', { edit: { seq: 4, entries: [1] } });
+  assert.deepEqual(ids(removed), [3, 2]);
+  assert.deepEqual(removed.queue.map(e => e.by.name), ['a', 'b']);
+  assert.deepEqual(ids(await guest('b', { edit: { seq: 5, undo: removed.undo_edit } })), [3, 1, 2]);
+  // The host selected entry 3 while entry 1 was hidden. Its ack preserves the concurrent undo.
+  const played = await host({ played_entries: [3], played: 3, keep_entries: [2] });
+  assert.deepEqual(ids(played), [1, 2]);
+  assert.equal(played.current_by.name, 'a');
+  const clear = await guest('a', { edit: { seq: 6, entries: [1, 2] } });
+  assert.deepEqual(ids(clear), []);
+  await guest('b', { add: { seq: 2, song } });
+  const stale = await guest('a', { edit: { seq: 7, undo: clear.undo_edit } });
+  assert.deepEqual(ids(stale), [4]);
+  assert.equal(stale.state.position, 23);
+  const invalid = await sync({ 'X-Moosik-Listener': 'a'.repeat(32) }, { name: 'a', edit: { seq: 8, entries: [4], before: 4 } });
+  assert.equal(invalid.status, 400);
+});

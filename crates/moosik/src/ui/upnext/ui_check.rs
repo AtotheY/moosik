@@ -69,8 +69,20 @@ fn queue() {
                             empty_state(ui, &palette);
                             return;
                         }
-                        ui::queue_edit::prepare(ui, queue.edit_stamp(), &upcoming);
-                        ui::queue_edit::toolbar(ui, &palette, "Next up", false);
+                        ui::queue_edit::prepare(
+                            crate::ui::queue_edit::Scope::Personal,
+                            ui,
+                            queue.edit_stamp(),
+                            &upcoming,
+                        );
+                        ui::queue_edit::toolbar(
+                            crate::ui::queue_edit::Scope::Personal,
+                            ui,
+                            &palette,
+                            "Next up",
+                            false,
+                            |_| {},
+                        );
                         ui.add_space(4.0);
                         let now = Default::default();
                         let result = ui::spec_rows(

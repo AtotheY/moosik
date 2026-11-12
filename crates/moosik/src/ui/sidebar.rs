@@ -174,7 +174,7 @@ fn navigation(app: &mut App, ui: &mut egui::Ui, rail: bool) {
             let accepts = if session_queue {
                 drag.session_eligible()
             } else {
-                !drag.queue
+                drag.queue != Some(super::queue_edit::Scope::Personal)
             };
             if let Some(tracks) = super::song_drag::target(ui, &app.palette, response.rect, accepts)
             {

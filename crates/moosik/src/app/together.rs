@@ -384,6 +384,55 @@ impl App {
         }
     }
 
+    pub(crate) fn edit_session_queue(&mut self, action: ui::queue_edit::Action) {
+        use session::QueueEdit;
+        use ui::queue_edit::Action;
+        let Some(session) = &self.together.session else {
+            return;
+        };
+        let Some((id, room)) = session.id.as_deref().zip(session.snapshot.as_ref()) else {
+            return;
+        };
+        if !room.can_edit_queue {
+            return;
+        }
+        match &action {
+            Action::Clear { stamp } | Action::Move { stamp, .. } | Action::Remove { stamp, .. }
+                if room.queue.is_empty() || *stamp != room.queue_stamp(Some(id)).value() =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        let edit = match action {
+            Action::Undo => {
+                let Some(undo) = room.undo_edit else { return };
+                QueueEdit::Undo { undo }
+            }
+            Action::Clear { .. } => QueueEdit::Remove {
+                entries: room.queue.iter().map(|e| e.entry).collect(),
+            },
+            Action::Remove { indices, .. } => QueueEdit::Remove {
+                entries: indices.into_iter().map(|i| i as u64).collect(),
+            },
+            Action::Move {
+                indices, boundary, ..
+            } => {
+                let entries: Vec<u64> = indices.into_iter().map(|i| i as u64).collect();
+                let before = room
+                    .queue
+                    .iter()
+                    .skip(boundary)
+                    .find(|e| !entries.contains(&e.entry))
+                    .map(|e| e.entry);
+                QueueEdit::Move { entries, before }
+            }
+        };
+        if !session.outbox.edit(id, edit) {
+            self.toast("Couldn’t edit the session queue");
+        }
+    }
+
     pub(super) fn request_session_skip(&mut self) {
         let Some(session) = &self.together.session else {
             return;
@@ -432,12 +481,14 @@ impl App {
         // Older rooms only understand a FIFO acknowledgement. A host who keeps skipped songs
         // can still play the choice immediately there without discarding anyone's contributions.
         if index == 0 || !self.settings.queue_click_keeps_order || snapshot.can_pick_entry {
-            if self.settings.queue_click_keeps_order {
-                snapshot.queue.remove(index);
+            let consumed = if self.settings.queue_click_keeps_order {
+                vec![snapshot.queue.remove(index).entry]
             } else {
-                snapshot.queue.drain(..=index);
-            }
-            session.outbox.played(id, entry_id, &snapshot.queue);
+                snapshot.queue.drain(..=index).map(|e| e.entry).collect()
+            };
+            session
+                .outbox
+                .played(id, entry_id, &consumed, &snapshot.queue);
         }
         let index = self.q.current().map_or(0, |i| i + 1);
         if let Some(radio) = &mut self.radio {
@@ -975,7 +1026,12 @@ mod tests {
                     && s.skip_requested
                     && s.skip_target == hosted.skip_target
                 {
-                    host_commands.played(&room, s.queue[0].entry, &s.queue[1..]);
+                    host_commands.played(
+                        &room,
+                        s.queue[0].entry,
+                        &[s.queue[0].entry],
+                        &s.queue[1..],
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;

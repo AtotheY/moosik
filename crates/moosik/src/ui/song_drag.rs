@@ -11,11 +11,12 @@ pub(crate) struct Payload {
     pub tracks: Vec<Track>,
     pub source: Id,
     pub playlist: Option<String>,
-    pub queue: bool,
+    pub queue: Option<super::queue_edit::Scope>,
 }
 impl Payload {
     pub(crate) fn session_eligible(&self) -> bool {
-        self.tracks.iter().all(Track::can_share_in_session)
+        self.queue != Some(super::queue_edit::Scope::Session)
+            && self.tracks.iter().all(Track::can_share_in_session)
     }
 
     pub(crate) fn accepts_playlist(
@@ -157,7 +158,7 @@ pub(crate) fn interact(
                 tracks: vec![track.clone()],
                 source: list,
                 playlist: playlist.map(str::to_owned),
-                queue: false,
+                queue: None,
             },
         );
     }
@@ -220,7 +221,7 @@ pub(crate) fn finish(ctx: &Context, palette: &theme::Palette) {
         take(ctx);
         return;
     }
-    if !drag.queue
+    if drag.queue.is_none()
         && let Some(pos) = ctx.input(|i| i.pointer.interact_pos())
     {
         if ctx.output(|o| o.cursor_icon != egui::CursorIcon::Copy) {

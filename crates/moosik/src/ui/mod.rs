@@ -653,14 +653,14 @@ pub(crate) fn spec_rows_with_slot<'d>(
         if hit.response.drag_started()
             && let Some(menu) = spec(i).menu
         {
-            let queue = menu.queue_index.is_some();
-            let indices = if queue {
+            let queue = menu.queue_index.map(|_| queue_edit::Scope::of(ui));
+            let indices = if let Some(scope) = queue {
                 (0..count)
                     .filter(|j| {
                         spec(*j)
                             .menu
                             .and_then(|m| m.queue_index)
-                            .is_some_and(|n| queue_edit::selected(ui.ctx(), n))
+                            .is_some_and(|n| queue_edit::selected(scope, ui.ctx(), n))
                     })
                     .collect()
             } else {
