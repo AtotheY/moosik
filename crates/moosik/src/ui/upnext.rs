@@ -64,6 +64,15 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
 const AVATAR: f32 = 24.0;
 const AVATAR_GAP: f32 = 4.0;
 
+// Anchor the header and both kinds of track credit to the same card edge. egui
+// includes the stroke in a frame's inset, even when the inner margin is zero.
+fn with_avatar_inset(mut frame: egui::Frame) -> egui::Frame {
+    frame.inner_margin.right = (theme::ROW_LEFT_INSET - frame.stroke.width).round() as i8;
+    frame
+}
+
+const CREDIT_SLOT: widgets::RowSlot = widgets::RowSlot::Trailing(AVATAR + AVATAR_GAP);
+
 fn avatar(
     ui: &mut egui::Ui,
     p: &theme::Palette,
@@ -106,66 +115,79 @@ fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
         ui.add_space(20.0);
     }
     let p = app.palette;
-    ui.horizontal(|ui| {
-        if !page {
-            ui.add_space(theme::ROW_LEFT_INSET);
-        }
-        let text = egui::RichText::new(title);
-        ui.label(if page {
-            text.font(theme::bold(theme::SECTION_PT)).color(p.text)
-        } else {
-            text.font(theme::semibold(12.0)).color(p.secondary)
-        });
-        let Some(room) = app.together.snapshot() else {
-            return;
-        };
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let room = app.together.snapshot();
+    let height = if room.is_some() {
+        AVATAR
+    } else {
+        ui.spacing().interact_size.y
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
             if !page {
                 ui.add_space(theme::ROW_LEFT_INSET);
             }
-            ui.spacing_mut().item_spacing.x = AVATAR_GAP;
-            let slots =
-                ((ui.available_width() + AVATAR_GAP) / (AVATAR + AVATAR_GAP)).floor() as usize;
-            let members = &room.members;
-            let visible = if members.len() <= slots {
-                members.len()
+            let text = egui::RichText::new(title);
+            ui.label(if page {
+                text.font(theme::bold(theme::SECTION_PT)).color(p.text)
             } else {
-                slots.saturating_sub(1)
+                text.font(theme::semibold(12.0)).color(p.secondary)
+            });
+            let Some(room) = room else {
+                return;
             };
-            let label = |member: &SessionMember| {
-                let role = match (member.id == 0, member.id == room.you) {
-                    (true, true) => " (you, host)",
-                    (true, false) => " (host)",
-                    (false, true) => " (you)",
-                    _ => "",
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = AVATAR_GAP;
+                let slots =
+                    ((ui.available_width() + AVATAR_GAP) / (AVATAR + AVATAR_GAP)).floor() as usize;
+                let members = &room.members;
+                let visible = if members.len() <= slots {
+                    members.len()
+                } else {
+                    slots.saturating_sub(1)
                 };
-                format!("{}{role}", member.name)
-            };
-            if visible < members.len() {
-                let names = members[visible..]
-                    .iter()
-                    .map(label)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ui.label(
-                    egui::RichText::new(format!("+{}", members.len() - visible))
-                        .font(theme::semibold(12.0))
-                        .color(p.secondary),
-                )
-                .on_hover_text(names);
-            }
-            for member in members[..visible].iter().rev() {
-                avatar(
-                    ui,
-                    &p,
-                    &mut app.images,
-                    &app.backend,
-                    member,
-                    &label(member),
-                );
-            }
-        });
-    });
+                let label = |member: &SessionMember| {
+                    let role = match (member.id == 0, member.id == room.you) {
+                        (true, true) => " (you, host)",
+                        (true, false) => " (host)",
+                        (false, true) => " (you)",
+                        _ => "",
+                    };
+                    format!("{}{role}", member.name)
+                };
+                if visible < members.len() {
+                    let names = members[visible..]
+                        .iter()
+                        .map(label)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::splat(AVATAR),
+                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("+{}", members.len() - visible))
+                                    .font(theme::semibold(12.0))
+                                    .color(p.secondary),
+                            )
+                            .on_hover_text(names)
+                        },
+                    );
+                }
+                for member in members[..visible].iter().rev() {
+                    avatar(
+                        ui,
+                        &p,
+                        &mut app.images,
+                        &app.backend,
+                        member,
+                        &label(member),
+                    );
+                }
+            });
+        },
+    );
     if page {
         ui.add_space(8.0);
     }
@@ -175,7 +197,8 @@ fn playing_header(app: &mut App, ui: &mut egui::Ui, title: &str, page: bool) {
 fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
     let Some(track) = app.q.current_track().cloned() else {
         if app.room_snapshot().is_some() {
-            playing_header(app, ui, "Listening session", page);
+            with_avatar_inset(egui::Frame::NONE)
+                .show(ui, |ui| playing_header(app, ui, "Listening session", page));
         }
         return;
     };
@@ -188,88 +211,59 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
     // exact same widget id (`ui.id()` is the same parent for both — they're sequential calls on
     // the same `Ui`, not separately salted children) and neither one's link reliably works.
     let signed_in = app.signed_in();
-    let row = |app: &mut App, ui: &mut egui::Ui| {
-        ui.push_id("now-playing", |ui| {
-            let App {
-                palette,
-                images,
-                backend,
-                stats,
-                liked,
-                now,
-                library,
-                ..
-            } = app;
-            let subtitle = track_subtitle_no_album(&track);
-            spec_rows(ui, palette, images, backend, stats, liked, 1, |_| RowSpec {
-                number: None,
-                rank: track.rank.as_deref(),
-                trend: track.trend,
-                title: &track.title,
-                source: Some(track.source_name()),
-                album_id: track.album_id.as_deref(),
-                subtitle,
-                duration: track.duration,
-                plays: None,
-                explicit: track.explicit,
-                active: is_active(now, &track.video_id),
-                playing: is_active(now, &track.video_id) && !now.paused,
-                badge: None,
-                // Square: the cover, not a cropped 16:9 still.
-                shape: ArtShape::Square,
-                hide_art: false,
-                thumbnail: track.thumbnail.as_ref(),
-                // The same menu as the rows below, without Remove from Queue: the playing track
-                // is not removed from under itself.
-                menu: Some(widgets::RowMenu {
-                    track: &track,
-                    playlist_id: None,
-                    playlists: &library.playlists.items,
-                    signed_in,
-                    queue_index: None,
-                }),
-                like: track.like,
-                show_rating: false,
-                quiet_like: false,
-                add_to: None,
-            })
-        })
-        .inner
-    };
-    let clicked = egui::Frame::new()
+    let mut frame = egui::Frame::new()
         .fill(app.palette.surface)
         .corner_radius(theme::RADIUS)
         .inner_margin(egui::Margin {
             top: 8,
             ..egui::Margin::ZERO
-        })
+        });
+    if app.room_snapshot().is_some() {
+        frame = with_avatar_inset(frame);
+    }
+    let clicked = frame
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             playing_header(app, ui, "Now playing", false);
-            if let Some((member, label)) = credit {
-                ui.horizontal(|ui| {
-                    let width = ui.available_width() - AVATAR - ui.spacing().item_spacing.x;
-                    let clicked = ui
-                        .allocate_ui_with_layout(
-                            egui::vec2(width.max(0.0), theme::ROW_HEIGHT),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| row(app, ui),
-                        )
-                        .inner;
-                    avatar(
-                        ui,
-                        &app.palette,
-                        &mut app.images,
-                        &app.backend,
-                        &member,
-                        &label,
-                    );
-                    clicked
-                })
-                .inner
-            } else {
-                row(app, ui)
-            }
+            ui.push_id("now-playing", |ui| {
+                let App {
+                    palette,
+                    images,
+                    backend,
+                    stats,
+                    liked,
+                    now,
+                    library,
+                    ..
+                } = app;
+                super::spec_rows_with_slot(
+                    ui,
+                    palette,
+                    images,
+                    backend,
+                    stats,
+                    liked,
+                    1,
+                    true,
+                    |_| RowSpec {
+                        plays: None,
+                        ..queue_row(&track, now, &library.playlists.items, signed_in, None)
+                    },
+                    |_| {
+                        if credit.is_some() {
+                            CREDIT_SLOT
+                        } else {
+                            widgets::RowSlot::Trailing(0.0)
+                        }
+                    },
+                    |ui, images, _| {
+                        if let Some((member, label)) = &credit {
+                            avatar(ui, palette, images, backend, member, label);
+                        }
+                    },
+                )
+            })
+            .inner
         })
         .inner;
     if let Some(action) = clicked.action {
@@ -358,68 +352,70 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
     };
     let signed_in = app.signed_in();
     let tracks: Vec<_> = room.queue.iter().map(|entry| entry.song.track()).collect();
-    let box_response = egui::Frame::new()
-        .fill(p.surface)
-        .stroke(egui::Stroke::new(1.0, p.outline))
-        .corner_radius(theme::RADIUS)
-        .inner_margin(4)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            let list_id = ui.id();
-            let order = room
-                .queue
-                .iter()
-                .fold(egui::Id::new(app.together.session_id()), |id, entry| {
-                    id.with(entry.entry)
-                });
-            super::song_drag::sync_list_order(ui.ctx(), list_id, order);
-            if tracks.is_empty() {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
-                    egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new("Drop songs here")
-                                .font(theme::medium(13.0))
-                                .color(p.secondary),
-                        );
-                    },
-                );
-                return (list_id, None);
-            }
-            let clicked = super::spec_rows_with_slot(
-                ui,
-                &p,
-                &mut app.images,
-                &app.backend,
-                &mut app.stats,
-                &app.liked,
-                tracks.len(),
-                true,
-                |i| {
-                    queue_row(
-                        &tracks[i],
-                        &app.now,
-                        &app.library.playlists.items,
-                        signed_in,
-                        None,
-                    )
-                },
-                |_| widgets::RowSlot::Trailing(AVATAR + AVATAR_GAP),
-                |ui, images, i| {
-                    let member = &room.queue[i].by;
-                    avatar(
-                        ui,
-                        &p,
-                        images,
-                        &app.backend,
-                        member,
-                        &format!("Added by {}", member.name),
+    let box_response = with_avatar_inset(
+        egui::Frame::new()
+            .fill(p.surface)
+            .stroke(egui::Stroke::new(1.0, p.outline))
+            .corner_radius(theme::RADIUS)
+            .inner_margin(4),
+    )
+    .show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        let list_id = ui.id();
+        let order = room
+            .queue
+            .iter()
+            .fold(egui::Id::new(app.together.session_id()), |id, entry| {
+                id.with(entry.entry)
+            });
+        super::song_drag::sync_list_order(ui.ctx(), list_id, order);
+        if tracks.is_empty() {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new("Drop songs here")
+                            .font(theme::medium(13.0))
+                            .color(p.secondary),
                     );
                 },
             );
-            (list_id, Some(clicked))
-        });
+            return (list_id, None);
+        }
+        let clicked = super::spec_rows_with_slot(
+            ui,
+            &p,
+            &mut app.images,
+            &app.backend,
+            &mut app.stats,
+            &app.liked,
+            tracks.len(),
+            true,
+            |i| {
+                queue_row(
+                    &tracks[i],
+                    &app.now,
+                    &app.library.playlists.items,
+                    signed_in,
+                    None,
+                )
+            },
+            |_| CREDIT_SLOT,
+            |ui, images, i| {
+                let member = &room.queue[i].by;
+                avatar(
+                    ui,
+                    &p,
+                    images,
+                    &app.backend,
+                    member,
+                    &format!("Added by {}", member.name),
+                );
+            },
+        );
+        (list_id, Some(clicked))
+    });
     let (list_id, clicked) = box_response.inner;
     let accepts = super::song_drag::payload(ui.ctx())
         .is_some_and(|drag| drag.source != list_id && drag.session_eligible());
