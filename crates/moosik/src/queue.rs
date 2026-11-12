@@ -14,7 +14,8 @@
 //! radio's, Repeat All looping only those), the caller passes the chosen set as [`Chosen`].
 
 use std::cell::Cell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::{Radio, RepeatMode};
 use crate::model::Track;
@@ -178,6 +179,8 @@ pub(crate) struct PlayQueue {
     tracks: Vec<Track>,
     current: Option<usize>,
     edit_stamp: Cell<Option<u64>>,
+    /// Outstanding mix requests follow their seed occurrence through queue edits.
+    pending_mixes: HashMap<u64, usize>,
     /// A restored position to start at once its track loads: `(index, seconds)`.
     resume: Option<(usize, f64)>,
     /// The play order while shuffle is on.
@@ -190,6 +193,7 @@ pub(crate) struct PlayQueue {
 /// A single reversible queue edit. Playback time is deliberately not captured.
 #[derive(Clone)]
 pub(crate) struct EditSnapshot {
+    pending_mixes: HashMap<u64, usize>,
     tracks: Vec<Track>,
     current: Option<usize>,
     shuffle: Option<Order>,
@@ -207,6 +211,7 @@ impl PlayQueue {
             tracks: Vec::new(),
             current: None,
             edit_stamp: Cell::new(None),
+            pending_mixes: HashMap::new(),
             resume: None,
             shuffle: None,
             history: PlayHistory::default(),
@@ -563,6 +568,7 @@ impl PlayQueue {
 
     fn load(&mut self, tracks: Vec<Track>, start: usize, chosen: Chosen) {
         *self.edit_stamp.get_mut() = None;
+        self.pending_mixes.clear();
         self.tracks = tracks;
         self.current = None;
         // Keyed by index: the new queue's song at that index would open where the old one left off.
@@ -582,6 +588,7 @@ impl PlayQueue {
         chosen: Chosen,
     ) {
         *self.edit_stamp.get_mut() = None;
+        self.pending_mixes.clear();
         self.tracks = tracks;
         self.current = current.filter(|&i| i < self.tracks.len());
         self.resume = self.current.zip(resume);
@@ -688,6 +695,39 @@ impl PlayQueue {
         }
     }
 
+    pub(crate) fn queue_mix_seed(&mut self, track: Track, chosen: Chosen) -> u64 {
+        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
+        let request = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let index = self.current.map_or(0, |current| current + 1);
+        self.insert(index, track, Slot::Next(0), chosen);
+        self.pending_mixes.insert(request, index);
+        request
+    }
+
+    /// The displayed boundary immediately after this particular seed, even if it has
+    /// started playing or moved while recommendations were loading.
+    pub(crate) fn take_mix_boundary(
+        &mut self,
+        request: u64,
+        repeat: RepeatMode,
+        chosen: Chosen,
+    ) -> Option<(usize, String)> {
+        let index = self.pending_mixes.remove(&request)?;
+        let boundary = if self.current == Some(index) {
+            0
+        } else {
+            self.upcoming(repeat, chosen)
+                .iter()
+                .position(|&i| i == index)?
+                + 1
+        };
+        Some((boundary, self.tracks[index].video_id.clone()))
+    }
+
+    pub(crate) fn cancel_pending_mixes(&mut self) {
+        self.pending_mixes.clear();
+    }
+
     /// Where in the shuffle order a new track goes (the order before it is added).
     fn slot_position(&mut self, slot: Slot, chosen: Chosen) -> usize {
         let Some(o) = &self.shuffle else { return 0 };
@@ -744,6 +784,7 @@ impl PlayQueue {
 
     pub(crate) fn edit_snapshot(&self) -> EditSnapshot {
         EditSnapshot {
+            pending_mixes: self.pending_mixes.clone(),
             tracks: self.tracks.clone(),
             current: self.current,
             shuffle: self.shuffle.clone(),
@@ -755,6 +796,11 @@ impl PlayQueue {
         let resume = self
             .resume
             .and_then(|(_, seconds)| snapshot.current.map(|i| (i, seconds)));
+        self.pending_mixes = snapshot
+            .pending_mixes
+            .into_iter()
+            .filter(|(request, _)| self.pending_mixes.contains_key(request))
+            .collect();
         self.tracks = snapshot.tracks;
         self.current = snapshot.current;
         self.shuffle = snapshot.shuffle;
@@ -917,6 +963,13 @@ impl PlayQueue {
     /// restored position, and the shuffle order, whose place stays on the same entry.
     fn reindex(&mut self, map: impl Fn(usize) -> Option<usize>) {
         *self.edit_stamp.get_mut() = None;
+        self.pending_mixes.retain(|_, index| match map(*index) {
+            Some(new) => {
+                *index = new;
+                true
+            }
+            None => false,
+        });
         self.current = self.current.and_then(&map);
         self.resume = self.resume.and_then(|(i, p)| map(i).map(|i| (i, p)));
         if let Some(o) = &mut self.shuffle {
@@ -1160,6 +1213,50 @@ mod tests {
             q.undo_edit(snapshot);
             assert_eq!(ids(&q, &q.upcoming(RepeatMode::Off, None)), before);
         }
+    }
+
+    #[test]
+    fn queued_mixes_follow_their_own_occurrences_when_responses_arrive_out_of_order() {
+        for shuffle in [false, true] {
+            let mut q = queue(&["playing", "original"], 0);
+            q.set_shuffle(shuffle, None);
+            let first = q.queue_mix_seed(track("seed"), None);
+            let second = q.queue_mix_seed(track("seed"), None);
+            assert_eq!(q.current_track().unwrap().video_id, "playing");
+            assert_eq!(
+                ids(&q, &q.upcoming(RepeatMode::Off, None)),
+                ["seed", "seed", "original"]
+            );
+
+            // The more recent request starts playing before either response arrives.
+            q.set_current(q.upcoming(RepeatMode::Off, None)[0]);
+            for (request, mix) in [(second, "second mix"), (first, "first mix")] {
+                let (at, seed) = q.take_mix_boundary(request, RepeatMode::Off, None).unwrap();
+                assert_eq!(seed, "seed");
+                q.insert_upcoming(tracks(&[mix]), at, RepeatMode::Off, None);
+            }
+            assert_eq!(
+                ids(&q, &q.upcoming(RepeatMode::Off, None)),
+                ["second mix", "seed", "first mix", "original"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_removed_mix_seed_cannot_fill_a_different_occurrence() {
+        let mut q = queue(&["playing", "seed"], 0);
+        let request = q.queue_mix_seed(track("seed"), None);
+        q.remove(1);
+        assert!(
+            q.take_mix_boundary(request, RepeatMode::Off, None)
+                .is_none()
+        );
+        let request = q.queue_mix_seed(track("seed"), None);
+        q.replace(tracks(&["playing", "seed", "seed"]), None, 0, None);
+        assert!(
+            q.take_mix_boundary(request, RepeatMode::Off, None)
+                .is_none()
+        );
     }
 
     #[test]

@@ -420,6 +420,10 @@ pub enum Event {
         seed: String,
         queue: crate::innertube::WatchQueue,
     },
+    QueuedMix {
+        request: u64,
+        tracks: Result<Vec<Track>, String>,
+    },
     MixFailed {
         seed: String,
         error: String,
@@ -2830,6 +2834,18 @@ impl Backend {
                 },
             };
             Self::emit(&tx, &ctx, event);
+        });
+    }
+
+    pub fn fetch_queued_mix(&self, seed: String, request: u64) {
+        let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
+        self.rt.spawn(async move {
+            let tracks = api
+                .mix(&seed)
+                .await
+                .map(|queue| queue.tracks)
+                .map_err(|err| format!("{err:#}"));
+            Self::emit(&tx, &ctx, Event::QueuedMix { request, tracks });
         });
     }
 

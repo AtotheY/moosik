@@ -246,10 +246,7 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
                     liked,
                     1,
                     true,
-                    |_| RowSpec {
-                        plays: None,
-                        ..queue_row(&track, now, &library.playlists.items, signed_in, None)
-                    },
+                    |_| queue_row(&track, now, &library.playlists.items, signed_in, None, None),
                     |_| {
                         if credit.is_some() {
                             CREDIT_SLOT
@@ -424,6 +421,7 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                     &app.library.playlists.items,
                     signed_in,
                     room.can_edit_queue.then(|| room.queue[i].entry as usize),
+                    None,
                 )
             },
             |_| CREDIT_SLOT,
@@ -707,11 +705,12 @@ fn upcoming_rows<'a>(
     move |row| {
         let index = upcoming[row];
         let t = &queue.tracks()[index];
-        let mut spec = queue_row(t, now, playlists, signed_in, Some(index));
-        if chosen.is_some_and(|ids| !ids.contains(&t.video_id)) {
-            spec.plays = Some("Radio");
-        }
-        spec
+        let detail = if chosen.is_some_and(|ids| !ids.contains(&t.video_id)) {
+            Some("Radio")
+        } else {
+            t.plays.as_deref()
+        };
+        queue_row(t, now, playlists, signed_in, Some(index), detail)
     }
 }
 
@@ -721,6 +720,7 @@ fn queue_row<'a>(
     playlists: &'a [crate::model::PlaylistRef],
     signed_in: bool,
     queue_index: Option<usize>,
+    detail: Option<&'a str>,
 ) -> RowSpec<'a> {
     RowSpec {
         number: None,
@@ -730,8 +730,14 @@ fn queue_row<'a>(
         source: Some(t.source_name()),
         album_id: t.album_id.as_deref(),
         subtitle: track_subtitle_no_album(t),
-        duration: t.duration,
-        plays: t.plays.as_deref(),
+        duration: None,
+        subtitle_tail: match (t.duration.map(widgets::fmt_duration), detail) {
+            (Some(duration), Some(detail)) => {
+                Some(format!("{duration}{}{detail}", widgets::FIELD_SEP).into())
+            }
+            (Some(duration), None) => Some(duration.into()),
+            (None, detail) => detail.map(Into::into),
+        },
         explicit: t.explicit,
         active: is_active(now, &t.video_id),
         playing: is_active(now, &t.video_id) && !now.paused,

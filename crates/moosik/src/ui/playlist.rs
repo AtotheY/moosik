@@ -184,7 +184,7 @@ fn suggestions(app: &mut App, ui: &mut egui::Ui) {
                     album_id: t.album_id.as_deref(),
                     subtitle: crate::ui::track_subtitle(t),
                     duration: t.duration,
-                    plays: None,
+                    subtitle_tail: None,
                     explicit: t.explicit,
                     active: crate::ui::is_active(now, &t.video_id),
                     playing: crate::ui::is_active(now, &t.video_id) && !now.paused,
