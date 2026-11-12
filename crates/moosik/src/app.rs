@@ -7832,6 +7832,10 @@ impl App {
     }
 
     pub(crate) fn skip(&mut self, delta: isize) {
+        if delta > 0 && self.following() {
+            self.request_session_skip();
+            return;
+        }
         self.note_playback_choice();
         if delta < 0 {
             self.previous();

@@ -16,9 +16,13 @@ function publicMember({ id, name, avatar }) {
   return avatar ? { id, name, avatar } : { id, name };
 }
 
+const validSkipTarget = value => typeof value === 'string' && /^[0-9a-f]{1,16}-[0-9a-f]{1,16}$/.test(value);
+
 export function syncRoom(room, token, host, body, now) {
   if (!body || typeof body !== 'object' || typeof body.name !== 'string' || body.name.length > 128
     || (host ? !validState(body.state) : ('state' in body || 'played' in body || 'keep_entries' in body || 'play_entry' in body))
+    || ('skip_target' in body && (!host || !validSkipTarget(body.skip_target) || !body.state))
+    || ('skip' in body && (host || !validSkipTarget(body.skip)))
     || (body.played !== undefined && (!Number.isSafeInteger(body.played) || body.played < 0))
     || (body.keep_entries !== undefined && (!Array.isArray(body.keep_entries) || body.keep_entries.length > maxQueue
       || !body.keep_entries.every(id => Number.isSafeInteger(id) && id > 0 && id <= body.played)))
@@ -44,6 +48,12 @@ export function syncRoom(room, token, host, body, now) {
   member.avatar = typeof body.avatar === 'string' && body.avatar.length <= 55
     && /^(?:default\/[0-5]|[0-9]{1,20}\/(?:a_)?[0-9a-f]{32})$/.test(body.avatar) ? body.avatar : null;
   if (host) {
+    // The host changes this token on a new playback or after handling Next (including at
+    // the end of its queue). A retried guest request can only affect the original track.
+    if (body.skip_target !== s.skipTarget || body.state?.id !== room.state?.id) {
+      s.skipRequested = false;
+    }
+    s.skipTarget = body.skip_target;
     room.state = publicState(body.state);
     room.seen = now;
     const current = body.played && s.queue.find(item => item.entry === (body.play_entry ?? body.played));
@@ -57,6 +67,8 @@ export function syncRoom(room, token, host, body, now) {
       delete s.current;
     }
   }
+
+  if (!host && body.skip && body.skip === s.skipTarget) s.skipRequested = true;
 
   if (body.add && body.add.seq > member.lastSeq) {
     member.lastSeq = body.add.seq;
@@ -75,6 +87,7 @@ export function syncRoom(room, token, host, body, now) {
   const currentBy = room.state && room.state.id === s.current?.id ? s.current.by : null;
   return { status: 200, value: {
     state: playback(room, now), members, queue: s.queue, current_by: currentBy,
+    skip_target: s.skipTarget, skip_requested: host && s.skipRequested === true,
     can_pick_entry: true, you: member.id, error: body.add ? member.error : undefined,
   } };
 }

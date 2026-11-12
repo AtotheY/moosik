@@ -16,6 +16,9 @@ pub(crate) struct Song {
     playing: bool,
     #[serde(default)]
     audio_alternative: bool,
+    /// Host-only metadata for the session heartbeat, omitted from shareable song metadata.
+    #[serde(skip)]
+    skip_target: Option<String>,
 }
 
 impl Song {
@@ -77,6 +80,12 @@ impl Together {
     pub(crate) fn snapshot(&self) -> Option<&Snapshot> {
         self.session.as_ref()?.snapshot.as_ref()
     }
+}
+
+// A generation identifies one playback even if the next entry has the same video ID.
+// A manual Next also consumes the target when there is nothing left to play.
+fn skip_target(generation: u64, choice: u64) -> String {
+    format!("{generation:x}-{choice:x}")
 }
 
 fn origin() -> String {
@@ -162,7 +171,8 @@ fn solo_heartbeat_due(last: &Option<Song>, next: &Option<Song>, elapsed: Duratio
                 } else {
                     0.0
                 };
-            a.id != b.id
+            a.skip_target != b.skip_target
+                || a.id != b.id
                 || a.title != b.title
                 || a.artist != b.artist
                 || a.playing != b.playing
@@ -365,11 +375,27 @@ impl App {
             position: 0.0,
             playing: false,
             audio_alternative: track.wide,
+            skip_target: None,
         };
         if !track.can_share_in_session() || !song.valid() {
             self.toast("Only YouTube Music tracks can be shared");
         } else if !session.outbox.add(id, song) {
             self.toast("Couldn’t add this song to the session");
+        }
+    }
+
+    pub(super) fn request_session_skip(&mut self) {
+        let Some(session) = &self.together.session else {
+            return;
+        };
+        let target = session
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.skip_target.as_deref());
+        if let Some((id, target)) = session.id.as_deref().zip(target) {
+            session.outbox.request_skip(id, target);
+        } else {
+            self.toast("Skipping is unavailable in this session");
         }
     }
 
@@ -609,6 +635,7 @@ impl App {
                         artist: track.artist_line().chars().take(128).collect(),
                         position: position.clamp(0.0, 604800.0),
                         audio_alternative: track.wide && !self.play_is_video,
+                        skip_target: Some(skip_target(self.play_generation, self.playback_choice)),
                         playing: self.playback_started
                             && !self.player_state.paused
                             && !self.player_state.idle,
@@ -630,7 +657,19 @@ impl App {
                         .error
                         .take()
                         .or_else(|| snapshot.added.then(|| "Added to session queue".to_owned()));
+                    let skip = session.publish.is_some()
+                        && snapshot.skip_requested
+                        && snapshot.skip_target
+                            == Some(skip_target(self.play_generation, self.playback_choice))
+                        && snapshot
+                            .state
+                            .as_ref()
+                            .zip(self.q.current_track())
+                            .is_some_and(|(song, track)| song.id == track.video_id);
                     session.snapshot = Some(snapshot);
+                    if skip {
+                        self.skip(1);
+                    }
                     if let Some(message) = message {
                         self.toast(&message);
                     }
@@ -731,6 +770,7 @@ mod tests {
             position: 42.0,
             playing: true,
             audio_alternative: false,
+            skip_target: None,
         };
         assert!(song.valid());
         assert!(song.track().local_path.is_none());
@@ -752,6 +792,7 @@ mod tests {
             position: 10.0,
             playing: true,
             audio_alternative: false,
+            skip_target: None,
         };
         let last = Some(song.clone());
         let elapsed = Duration::from_secs(5);
@@ -782,6 +823,7 @@ mod tests {
             position: 10.0,
             playing: false,
             audio_alternative: false,
+            skip_target: None,
         };
         let (tx, updates) = channel();
         let (write, samples) = watch::channel(Some(song.clone()));
@@ -868,8 +910,13 @@ mod tests {
             position: 13.0,
             playing: false,
             audio_alternative: false,
+            skip_target: None,
         };
-        let (write, samples) = watch::channel(Some(song.clone()));
+        let hosted = Song {
+            skip_target: Some(skip_target(1, 0)),
+            ..song.clone()
+        };
+        let (write, samples) = watch::channel(Some(hosted.clone()));
         let host_commands = Outbox::default();
         let worker = tokio::spawn(host(samples, host_commands.clone(), host_tx, ctx.clone()));
         let Update::Ready(room) = host_rx.recv_timeout(Duration::from_secs(8)).unwrap() else {
@@ -905,12 +952,39 @@ mod tests {
                     assert_eq!(entry.by.name, "Guest");
                     assert_eq!(entry.song.id, skipped.id);
                     assert_eq!(s.members.len(), 2);
-                    host_commands.played(&room, entry.entry, &s.queue[1..]);
+                    guest_commands.request_skip(
+                        &room,
+                        s.skip_target
+                            .as_deref()
+                            .expect("host advertised skip support"),
+                    );
                     break;
                 }
             }
+            // Wake the solo host, then drive its normal heartbeats until the guest's
+            // Next reaches it. Use the queue entry that arrived on that same heartbeat.
+            host_commands.set_profile(crate::discord::SessionProfile {
+                name: "Host".into(),
+                ..Default::default()
+            });
+            let until = Instant::now() + Duration::from_secs(8);
+            loop {
+                assert!(Instant::now() < until, "missing guest skip");
+                write.send_replace(Some(hosted.clone()));
+                if let Ok(Update::Snapshot(s)) = host_rx.recv_timeout(Duration::from_millis(300))
+                    && s.skip_requested
+                    && s.skip_target == hosted.skip_target
+                {
+                    host_commands.played(&room, s.queue[0].entry, &s.queue[1..]);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
-        write.send_replace(Some(skipped.clone()));
+        write.send_replace(Some(Song {
+            skip_target: Some(skip_target(2, 1)),
+            ..skipped.clone()
+        }));
         let until = Instant::now() + Duration::from_secs(8);
         loop {
             if let Update::Follow(Some(next), _) = rx
