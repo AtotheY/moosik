@@ -404,6 +404,8 @@ pub struct Settings {
     pub playlist_default_sort: crate::app::PlaylistSort,
     /// The sidebar's width as last dragged, in points. `None` until it has been.
     pub sidebar_width: Option<f32>,
+    /// Preferred height of the navigation menu above Playlists, in points.
+    pub sidebar_menu_height: Option<f32>,
     /// The queue/lyrics panel's width as last dragged. Still capped by the window on the way in.
     pub panel_width: Option<f32>,
 }
@@ -453,6 +455,7 @@ impl Default for Settings {
             local_folders: Vec::new(),
             playlist_default_sort: crate::app::PlaylistSort::Default,
             sidebar_width: None,
+            sidebar_menu_height: None,
             panel_width: None,
         }
     }
