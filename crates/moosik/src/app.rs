@@ -7174,6 +7174,27 @@ impl App {
                         self.start_queue(queue.tracks, 0, radio);
                     }
                 }
+                Event::QueuedMix { request, tracks } => {
+                    let chosen = self.radio.as_ref().map(|r| &r.chosen);
+                    if let Some((boundary, seed)) =
+                        self.q.take_mix_boundary(request, self.repeat, chosen)
+                        && !self.following()
+                    {
+                        match tracks {
+                            Ok(mut tracks) => {
+                                tracks.retain(|t| t.video_id != seed);
+                                if tracks.is_empty() {
+                                    self.toast("No other songs in this mix");
+                                } else {
+                                    self.insert_queue_tracks(tracks, boundary);
+                                }
+                            }
+                            Err(error) => {
+                                self.toast_error(&failure_text("Could not load the mix", &error))
+                            }
+                        }
+                    }
+                }
                 Event::MixFailed { seed, error } => {
                     tracing::warn!(%seed, %error, "start mix failed");
                     self.toast_error(&failure_text("Could not start a mix", &error));
@@ -8498,6 +8519,22 @@ impl App {
                 self.upnext_open = true;
                 self.backend.start_mix(id);
             }
+            RowAction::QueueMix(track) => {
+                if self.following() || track.provider() != crate::model::Provider::YouTubeMusic {
+                    return;
+                }
+                let seed = track.video_id.clone();
+                if let Some(radio) = &mut self.radio {
+                    radio.chosen.insert(seed.clone());
+                }
+                let request = self
+                    .q
+                    .queue_mix_seed(track, self.radio.as_ref().map(|r| &r.chosen));
+                self.prefetch_next();
+                self.save_playback();
+                self.backend.fetch_queued_mix(seed, request);
+                self.toast("Song queued next · Loading mix");
+            }
             RowAction::StartMixPlaylist(id) => {
                 self.choose_personal_playback();
                 self.upnext_open = true;
@@ -8881,6 +8918,7 @@ impl App {
                 changed
             }
             Action::Clear { .. } => {
+                self.q.cancel_pending_mixes();
                 // Closing this river also rejects any continuation already in flight.
                 if let Some(radio) = &mut self.radio {
                     radio.state = River::Dead;

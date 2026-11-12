@@ -2602,7 +2602,13 @@ fn track_row_inner<'a>(
     let duration_w = match (duration, badge) {
         (Some(d), _) => (text_width(ui, &fmt_duration(d), &theme::regular(12.0)) + 12.0).max(44.0),
         (None, Some(b)) => (text_width(ui, b, &badge_font()) + 12.0).max(44.0),
-        (None, None) if queue_remove.is_some() => 30.0,
+        (None, None)
+            if queue_remove.is_some()
+                && (ui.rect_contains_pointer(rect)
+                    || ui.memory(|mem| mem.has_focus(row_id.with("remove")))) =>
+        {
+            30.0
+        }
         (None, None) => 0.0,
     }
     .max(if share_corner { 76.0 } else { 0.0 });
@@ -2655,6 +2661,27 @@ fn track_row_inner<'a>(
     } else {
         rect.right() - right_pad - duration_w - thumb_w
     };
+
+    let thumb_right = if listening_time.is_some() {
+        more_rect.left()
+    } else if share_corner {
+        rect.right() - 17.0 - more_w
+    } else {
+        rect.right() - right_pad - duration_w
+    };
+    let session_track = menu
+        .as_ref()
+        .filter(|m| show_rating && add_to.is_none() && m.track.can_share_in_session())
+        .filter(|_| session_queue_host(ui.ctx()).is_some())
+        .map(|m| m.track);
+    let session_slot = session_track.map(|_| {
+        let offset = if has_thumbs { 82.0 } else { 18.0 };
+        Rect::from_center_size(
+            egui::pos2(thumb_right - offset, rect.center().y),
+            vec2(30.0, 30.0),
+        )
+    });
+    let text_right = session_slot.map_or(text_right, |slot| text_right.min(slot.left() - 4.0));
 
     // A narrow row — the open queue on a small window — compresses instead of starving: the
     // number column and the art yield first, and what they give back is the title's room. A
@@ -2709,6 +2736,7 @@ fn track_row_inner<'a>(
     let on_child_slot = [
         subtitle_slot,
         spotify_slot,
+        session_slot,
         queue_remove.map(|(_, rect)| rect),
     ]
     .into_iter()
@@ -3166,6 +3194,30 @@ fn track_row_inner<'a>(
         link = None;
     }
     let mut action = None;
+    if let Some((track, slot)) = session_track.zip(session_slot) {
+        let button = ui.interact(slot, row_id.with("session-add"), Sense::click());
+        let label = "Add to session queue";
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+        });
+        if ui.is_rect_visible(slot) && (over || button.hovered() || button.has_focus()) {
+            if let Some(fill) = shell_state_fill(ui, palette, &button) {
+                ui.painter().circle_filled(slot.center(), 15.0, fill);
+            }
+            Icon::ListPlus
+                .image(mix(palette.secondary, palette.text, lit(ui, &button)), 17.0)
+                .paint_at(
+                    ui,
+                    Rect::from_center_size(slot.center() + press_offset(&button), vec2(17.0, 17.0)),
+                );
+        }
+        if button.clicked() {
+            action = Some(crate::ui::RowAction::AddToSession(track.clone()));
+        }
+        button
+            .on_hover_text(label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     if let (Some(menu), Some(slot)) = (spotify_actions, spotify_slot)
         && ui.is_rect_visible(slot)
     {
@@ -3216,13 +3268,6 @@ fn track_row_inner<'a>(
         // Wide rows reserve a 68pt zone left of the duration and anchor the thumbs there.
         // Corner-sharing rows have no zone to anchor to — the thumbs take the duration's corner
         // instead, where the duration itself has stepped aside for them.
-        let thumb_right = if listening_time.is_some() {
-            more_rect.left()
-        } else if share_corner {
-            rect.right() - 17.0 - more_w
-        } else {
-            rect.right() - right_pad - duration_w
-        };
         if let Some(rate) = rate_thumbs(
             ui,
             palette,
@@ -3368,6 +3413,13 @@ pub(crate) fn set_session_queue_menu(ctx: &egui::Context, is_host: Option<bool>)
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(SESSION_QUEUE), is_host));
 }
 
+fn session_queue_host(ctx: &egui::Context) -> Option<bool> {
+    ctx.data(|data| {
+        data.get_temp::<Option<bool>>(egui::Id::new(SESSION_QUEUE))
+            .flatten()
+    })
+}
+
 /// A song's right-click menu, reporting the choice. Shared by every row and the player bar.
 ///
 /// The popup id is the video id, not the row index: indices shift as the virtualised range
@@ -3456,9 +3508,17 @@ fn row_menu_with_button(
 
             // Block one: what to do with it now. No title header — you know which row you
             // right-clicked, and a truncated one only ate a row's worth of height.
+            let session_host = session_queue_host(mui.ctx());
             if !t.is_spotify() && menu_item(mui, palette, Icon::Radio, "Start mix", None).clicked()
             {
                 choice = Some(RowAction::StartMix(t.video_id.clone()));
+                mui.close();
+            }
+            if t.provider() == crate::model::Provider::YouTubeMusic
+                && session_host != Some(false)
+                && menu_item(mui, palette, Icon::ListPlus, "Add mix to queue", None).clicked()
+            {
+                choice = Some(RowAction::QueueMix(t.clone()));
                 mui.close();
             }
             if menu_item(mui, palette, Icon::ListStart, "Play next", None).clicked() {
@@ -3469,10 +3529,6 @@ fn row_menu_with_button(
                 }
                 mui.close();
             }
-            let session_host = mui.ctx().data(|d| {
-                d.get_temp::<Option<bool>>(egui::Id::new(SESSION_QUEUE))
-                    .flatten()
-            });
             if session_host != Some(false)
                 && menu_item(mui, palette, Icon::ListPlus, "Add to queue", None).clicked()
             {

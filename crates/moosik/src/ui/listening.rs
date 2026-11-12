@@ -1224,7 +1224,7 @@ pub(crate) fn regular_song(
             album_id: track.album_id.as_deref(),
             subtitle: track_subtitle(track),
             duration: track.duration,
-            plays: None,
+            subtitle_tail: None,
             explicit: track.explicit,
             active: is_active(&app.now, &track.video_id),
             playing: is_active(&app.now, &track.video_id) && !app.now.paused,
