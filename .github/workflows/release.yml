@@ -240,7 +240,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - run: brew install mpv dylibbundler
+      - run: brew install mpv dylibbundler uv
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos

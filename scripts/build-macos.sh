@@ -6,7 +6,7 @@
 # tail copied into Contents/Frameworks, and a standalone yt-dlp next to the executable (where
 # `backend::yt_dlp_program` looks first). Nothing outside macOS itself is needed at run time.
 #
-# Needs Homebrew's mpv and dylibbundler (`brew install mpv dylibbundler`), plus Xcode command line tools, codesign and hdiutil.
+# Needs Homebrew's mpv, dylibbundler and uv (`brew install mpv dylibbundler uv`), plus Xcode command line tools, codesign and hdiutil.
 # Local builds reuse the identity configured by setup-macos-signing.sh. Without one,
 # packaging falls back to ad-hoc signing; a copy downloaded elsewhere needs the quarantine
 # flag cleared (`xattr -cr Moosik.app`) or a real Developer ID signature.
@@ -34,8 +34,6 @@ cp target/release/moosik "$app/Contents/MacOS/moosik"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 
 echo "building the icon"
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
 cp assets/icons/app/moosik.icns "$app/Contents/Resources/moosik.icns"
 
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -104,10 +102,5 @@ ditto -c -k --keepParent "$app" "$zip"
 
 # A drag-to-Applications disk image: the app plus a symlink to /Applications.
 dmg="dist/$prefix-$version-macos-$arch.dmg"
-stage="$work/dmg"
-mkdir -p "$stage"
-cp -R "$app" "$stage/"
-ln -s /Applications "$stage/Applications"
-rm -f "$dmg"
-hdiutil create -quiet -volname "$app_name" -srcfolder "$stage" -ov -format UDZO "$dmg"
+"$root/scripts/build-macos-dmg.sh" "$app" "$dmg"
 echo "built $app, $zip and $dmg"
