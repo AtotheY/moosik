@@ -68,7 +68,7 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('version='+v+'\n')
           PY
           if [ "$GITHUB_REF_TYPE" = tag ]; then git merge-base --is-ancestor "$GITHUB_SHA" origin/main; fi
-      - run: brew install mpv dylibbundler
+      - run: brew install mpv dylibbundler uv
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: moosik-release-macos
@@ -120,12 +120,8 @@ jobs:
           rm "$zip"
           ditto -c -k --sequesterRsrc --keepParent dist/Moosik.app "$zip"
           # The initial download uses the same notarized app as the updater.
-          rm "dist/moosik-$VERSION-macos-arm64.dmg"
-          mkdir -p "$RUNNER_TEMP/moosik-dmg"
-          ditto dist/Moosik.app "$RUNNER_TEMP/moosik-dmg/Moosik.app"
-          ln -s /Applications "$RUNNER_TEMP/moosik-dmg/Applications"
-          hdiutil create -quiet -volname Moosik -srcfolder "$RUNNER_TEMP/moosik-dmg" -ov -format UDZO "dist/moosik-$VERSION-macos-arm64.dmg"
           dmg="dist/moosik-$VERSION-macos-arm64.dmg"
+          ./scripts/build-macos-dmg.sh dist/Moosik.app "$dmg"
           codesign --sign "$MOOSIK_SIGNING_IDENTITY" --timestamp "$dmg"
           xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait
           xcrun stapler staple "$dmg"

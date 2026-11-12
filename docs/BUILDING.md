@@ -89,7 +89,7 @@ AppImage's, so it is as old as the build.
 ## macOS: the app bundle
 
 ```sh
-brew install rustup just mpv dylibbundler
+brew install rustup just mpv dylibbundler uv
 just macos             # or: ./scripts/build-macos.sh
 ```
 
