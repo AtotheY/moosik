@@ -944,7 +944,7 @@ mod tests {
         worker.await.unwrap().unwrap();
     }
 
-    /// Run against the real Node relay with synthetic songs, independent of Discord or mpv.
+    /// Check guest Next end to end in a disposable local or explicitly opted-in public room.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires a local relay or explicit MOOSIK_TEST_PUBLIC_ROOMS=1"]
     async fn native_host_and_guest_follow_a_room() {
@@ -990,52 +990,45 @@ mod tests {
             playing: true,
             ..song
         };
-        if origin().starts_with("http://127.0.0.1:") {
-            assert!(guest_commands.add(&room, skipped.clone()));
-            let until = Instant::now() + Duration::from_secs(8);
-            loop {
-                let update = rx
-                    .recv_timeout(until.saturating_duration_since(Instant::now()))
-                    .unwrap();
-                if let Update::Snapshot(s) = update
-                    && let Some(entry) = s.queue.first()
-                {
-                    assert_eq!(entry.by.name, "Guest");
-                    assert_eq!(entry.song.id, skipped.id);
-                    assert_eq!(s.members.len(), 2);
-                    guest_commands.request_skip(
-                        &room,
-                        s.skip_target
-                            .as_deref()
-                            .expect("host advertised skip support"),
-                    );
-                    break;
-                }
+        assert!(guest_commands.add(&room, skipped.clone()));
+        let until = Instant::now() + Duration::from_secs(8);
+        loop {
+            let update = rx
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if let Update::Snapshot(s) = update
+                && let Some(entry) = s.queue.first()
+            {
+                assert_eq!(entry.by.name, "Guest");
+                assert_eq!(entry.song.id, skipped.id);
+                assert_eq!(s.members.len(), 2);
+                guest_commands.request_skip(
+                    &room,
+                    s.skip_target
+                        .as_deref()
+                        .expect("host advertised skip support"),
+                );
+                break;
             }
-            // Wake the solo host, then drive its normal heartbeats until the guest's
-            // Next reaches it. Use the queue entry that arrived on that same heartbeat.
-            host_commands.set_profile(crate::discord::SessionProfile {
-                name: "Host".into(),
-                ..Default::default()
-            });
-            let until = Instant::now() + Duration::from_secs(8);
-            loop {
-                assert!(Instant::now() < until, "missing guest skip");
-                write.send_replace(Some(hosted.clone()));
-                if let Ok(Update::Snapshot(s)) = host_rx.recv_timeout(Duration::from_millis(300))
-                    && s.skip_requested
-                    && s.skip_target == hosted.skip_target
-                {
-                    host_commands.played(
-                        &room,
-                        s.queue[0].entry,
-                        &[s.queue[0].entry],
-                        &s.queue[1..],
-                    );
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Wake the solo host, then drive its normal heartbeats until the guest's
+        // Next reaches it. Use the queue entry that arrived on that same heartbeat.
+        host_commands.set_profile(crate::discord::SessionProfile {
+            name: "Host".into(),
+            ..Default::default()
+        });
+        let until = Instant::now() + Duration::from_secs(8);
+        loop {
+            assert!(Instant::now() < until, "missing guest skip");
+            write.send_replace(Some(hosted.clone()));
+            if let Ok(Update::Snapshot(s)) = host_rx.recv_timeout(Duration::from_millis(300))
+                && s.skip_requested
+                && s.skip_target == hosted.skip_target
+            {
+                host_commands.played(&room, s.queue[0].entry, &[s.queue[0].entry], &s.queue[1..]);
+                break;
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         write.send_replace(Some(Song {
             skip_target: Some(skip_target(2, 1)),

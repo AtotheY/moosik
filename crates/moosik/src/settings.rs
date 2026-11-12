@@ -302,6 +302,14 @@ impl Quality {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseAction {
+    Back,
+    Forward,
+    Unbound,
+}
+
 mod playlist_layout;
 pub use playlist_layout::{LibraryItem, PlaylistLayout};
 
@@ -355,6 +363,8 @@ pub struct Settings {
     /// still to come, after it, instead of passing over them. Off by default: the click jumps to
     /// that place in the queue.
     pub queue_click_keeps_order: bool,
+    pub mouse_back_button: MouseAction,
+    pub mouse_forward_button: MouseAction,
     /// Whether the fullscreen player shows the lyrics beside the cover. On by default; the
     /// Lyrics button in that view changes it, and a song with no lyrics never does.
     pub fullscreen_lyrics: bool,
@@ -434,6 +444,8 @@ impl Default for Settings {
             autoplay: true,
             spotify_autoplay: true,
             queue_click_keeps_order: false,
+            mouse_back_button: MouseAction::Back,
+            mouse_forward_button: MouseAction::Forward,
             fullscreen_lyrics: true,
             home_order: crate::model::default_order_keys(),
             home_shelf_orders: Default::default(),

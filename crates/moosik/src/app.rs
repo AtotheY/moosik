@@ -5910,15 +5910,21 @@ impl App {
     }
 
     fn handle_events(&mut self, ctx: &egui::Context) {
-        // Mouse side buttons walk the history, like a browser — on press, not on click.
-        // A click needs a clean press/release cycle and egui tracks one shared press
-        // origin, so any concurrent drag or pointer movement voids the release and the
-        // button "does nothing". `back`/`forward` are no-ops with nowhere to go.
-        if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra1)) {
-            self.back();
-        }
-        if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Extra2)) {
-            self.forward();
+        // Act on press so holding a side button or dragging does not retrigger it.
+        for (button, action) in [
+            (egui::PointerButton::Extra1, self.settings.mouse_back_button),
+            (
+                egui::PointerButton::Extra2,
+                self.settings.mouse_forward_button,
+            ),
+        ] {
+            if ctx.input(|i| i.pointer.button_pressed(button)) {
+                match action {
+                    crate::settings::MouseAction::Back => self.back(),
+                    crate::settings::MouseAction::Forward => self.forward(),
+                    crate::settings::MouseAction::Unbound => {}
+                }
+            }
         }
         for event in self.backend.drain() {
             let event = match event {
