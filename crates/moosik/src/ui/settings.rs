@@ -1919,6 +1919,7 @@ mod tests {
                 "Appearance",
                 "Playback",
                 "Providers",
+                "Shortcuts",
                 "System",
                 "Discord",
                 "About"
