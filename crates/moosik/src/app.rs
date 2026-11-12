@@ -5066,7 +5066,7 @@ impl App {
             && let Some(mut track) = track
         {
             track.set_video_id = item_id.map(Into::into);
-            track.playlist_added_ms = Some(now);
+            track.playlist_added_ms = track.set_video_id.as_ref().map(|_| now);
             track.rank = None;
             if let Some(order) = self.playlist_original_order.as_mut() {
                 order.push(track.playlist_row_key().to_owned());
