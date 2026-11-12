@@ -1067,6 +1067,7 @@ fn parse_search_row(row: &Value) -> Option<Entry> {
                 // Only playlist rows carry one; only it makes "Remove from playlist"
                 // offerable, so a wrong assumption about its location disables the button
                 // rather than corrupting a playlist.
+                playlist_added_ms: None,
                 set_video_id: row
                     .pointer("/playlistItemData/playlistSetVideoId")
                     .and_then(Value::as_str)
@@ -1622,7 +1623,7 @@ pub fn parse_playlist(root: &Value) -> Option<PlaylistPage> {
 /// as `status: STATUS_FAILED`, which is how an add of a song already in the playlist answers.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EditReply {
-    Done,
+    Done(Option<String>),
     /// The song is already in the playlist. The reply offers "Add anyway", which is the same add
     /// with `dedupeOption: DEDUPE_OPTION_SKIP`. Carries YouTube's own sentence for it.
     Duplicate(String),
@@ -1632,7 +1633,12 @@ pub enum EditReply {
 
 pub fn parse_edit_reply(root: &Value) -> EditReply {
     if root.get("status").and_then(Value::as_str) != Some("STATUS_FAILED") {
-        return EditReply::Done;
+        let uid = root
+            .pointer("/playlistEditResults/0/playlistEditVideoAddedResultData/setVideoId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        return EditReply::Done(uid);
     }
     let message = find_key(root, "responseText")
         .map(text)
@@ -2022,6 +2028,7 @@ fn parse_watch_row(row: &Value) -> Option<Track> {
         in_library: toggle.as_ref().map(|t| t.in_library).unwrap_or(false),
         library_add: toggle.as_ref().and_then(|t| t.add.clone()),
         library_remove: toggle.as_ref().and_then(|t| t.remove.clone()),
+        playlist_added_ms: None,
         set_video_id: None,
         thumbnail: thumbnail(row),
         // From the row's own watch kind, matched above.
@@ -2480,6 +2487,7 @@ fn parse_artist_songs(shelf: &Value, artist_name: &str, artist_id: &str) -> Vec<
                 in_library: toggle.as_ref().map(|t| t.in_library).unwrap_or(false),
                 library_add: toggle.as_ref().and_then(|t| t.add.clone()),
                 library_remove: toggle.as_ref().and_then(|t| t.remove.clone()),
+                playlist_added_ms: None,
                 set_video_id: None,
                 // The whole reason this parser exists.
                 thumbnail: thumbnail(row),
@@ -2724,6 +2732,7 @@ fn parse_card(item: &Value) -> Option<Entry> {
                 in_library: false,
                 library_add: None,
                 library_remove: None,
+                playlist_added_ms: None,
                 set_video_id: None,
                 thumbnail: thumb,
                 // A non-song kind is a music video, and its still is 16:9.
@@ -5424,7 +5433,12 @@ mod tests {
             EditReply::Duplicate("This track is already in the playlist".to_owned())
         );
         let done = serde_json::json!({"status": "STATUS_SUCCEEDED", "newHeader": {}});
-        assert_eq!(parse_edit_reply(&done), EditReply::Done);
+        assert_eq!(parse_edit_reply(&done), EditReply::Done(None));
+        let saved = serde_json::json!({"status":"STATUS_SUCCEEDED","playlistEditResults":[{"playlistEditVideoAddedResultData":{"setVideoId":"item-2","videoId":"same-song"}}]});
+        assert_eq!(
+            parse_edit_reply(&saved),
+            EditReply::Done(Some("item-2".into()))
+        );
         let other = serde_json::json!({"status": "STATUS_FAILED"});
         assert_eq!(parse_edit_reply(&other), EditReply::Refused(String::new()));
     }

@@ -69,6 +69,7 @@ pub mod pacing;
 pub mod persist;
 pub mod playback;
 pub mod player;
+mod playlist_dates;
 pub mod providers;
 pub mod queue;
 pub mod search_cache;

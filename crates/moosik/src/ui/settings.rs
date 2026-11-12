@@ -647,12 +647,9 @@ fn library(app: &mut App, ui: &mut egui::Ui) {
             "Playlist order",
             "How playlists are ordered when you open them. The sort button on a playlist still changes it for that visit.",
             |ui| {
-                for option in crate::app::PlaylistSort::ALL {
+                for option in crate::app::PlaylistSort::DATED {
                     let label = match option {
-                        // Named for what it shows in a playlist you add to: the latest songs on
-                        // top.
                         crate::app::PlaylistSort::Default => "As saved",
-                        crate::app::PlaylistSort::Reverse => "Newest added first",
                         other => other.label(),
                     };
                     if widgets::chip(ui, &p, label, playlist_sort == option).clicked() {

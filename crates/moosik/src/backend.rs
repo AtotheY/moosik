@@ -528,6 +528,7 @@ pub enum Event {
     PlaylistBulkSaved {
         playlist_id: String,
         added: usize,
+        dated_items: Vec<(String, i64)>,
         /// Songs left out because the playlist already had them.
         duplicates: usize,
         total: usize,
@@ -542,6 +543,7 @@ pub enum Event {
     /// A playlist write landed. Saving needs no UI change — the song lives elsewhere now —
     /// while a removal drops the row from the open page.
     PlaylistSaved {
+        item_id: Option<String>,
         playlist_id: String,
         video_id: String,
     },
@@ -551,6 +553,7 @@ pub enum Event {
         error: String,
     },
     PlaylistRemoved {
+        item_id: String,
         playlist_id: String,
         video_id: String,
     },
@@ -3013,12 +3016,18 @@ impl Backend {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
             let total = video_ids.len();
+            let mut dated_items = Vec::new();
             let (mut added, mut duplicates) = (0, 0);
             // A song the playlist already has is skipped, not asked about: a page saves dozens,
             // and a dialog per song would be worse than the summary saying how many were there.
             for video_id in &video_ids {
                 match api.add_to_playlist(&playlist_id, video_id, false).await {
-                    Ok(crate::innertube::EditReply::Done) => added += 1,
+                    Ok(crate::innertube::EditReply::Done(uid)) => {
+                        added += 1;
+                        if let Some(uid) = uid {
+                            dated_items.push((uid, chrono::Utc::now().timestamp_millis()));
+                        }
+                    }
                     Ok(crate::innertube::EditReply::Duplicate(_)) => duplicates += 1,
                     Ok(crate::innertube::EditReply::Refused(m)) => {
                         tracing::warn!(%playlist_id, video_id = %video_id, message = %m,
@@ -3034,6 +3043,7 @@ impl Backend {
                 Event::PlaylistBulkSaved {
                     playlist_id,
                     added,
+                    dated_items,
                     duplicates,
                     total,
                 },
@@ -3111,6 +3121,7 @@ impl Backend {
         self.rt.spawn(async move {
             let event = match crate::spotify::add_playlist_item(&playlist_id, &video_id).await {
                 Ok(()) => Event::PlaylistSaved {
+                    item_id: None,
                     playlist_id,
                     video_id,
                 },
@@ -3136,7 +3147,8 @@ impl Backend {
                 .add_to_playlist(&playlist_id, &video_id, allow_duplicate)
                 .await;
             let event = match reply {
-                Ok(crate::innertube::EditReply::Done) => Event::PlaylistSaved {
+                Ok(crate::innertube::EditReply::Done(item_id)) => Event::PlaylistSaved {
+                    item_id,
                     playlist_id,
                     video_id,
                 },
@@ -3176,12 +3188,13 @@ impl Backend {
             } else {
                 let edit = crate::api::PlaylistEdit::RemoveVideo {
                     video_id: video_id.clone(),
-                    set_video_id,
+                    set_video_id: set_video_id.clone(),
                 };
                 api.edit_playlist(&playlist_id, edit).await
             };
             let event = match result {
                 Ok(()) => Event::PlaylistRemoved {
+                    item_id: set_video_id,
                     playlist_id,
                     video_id,
                 },

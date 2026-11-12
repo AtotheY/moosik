@@ -1315,6 +1315,7 @@ fn autoplay_track(value: &Value, seed: &str, recent: &[String]) -> Result<Option
             saved: false,
             plays: None,
             playlist_item_uid: None,
+            added_at: None,
         })
     }))
 }

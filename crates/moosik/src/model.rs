@@ -70,6 +70,8 @@ pub struct Track {
     /// a long queue, like the thumbnail.
     pub library_add: Option<Arc<str>>,
     pub library_remove: Option<Arc<str>>,
+    /// Addition to this specific playlist entry, in Unix milliseconds; never a release or scan date.
+    pub playlist_added_ms: Option<i64>,
     /// The playlist item id, from `playlistItemData.playlistSetVideoId`. Only playlist rows
     /// carry one, and only it makes "Remove from playlist" offerable.
     pub set_video_id: Option<Arc<str>>,
@@ -92,6 +94,9 @@ pub struct Track {
 }
 
 impl Track {
+    pub(crate) fn playlist_row_key(&self) -> &str {
+        self.set_video_id.as_deref().unwrap_or(&self.video_id)
+    }
     pub(crate) fn can_share_in_session(&self) -> bool {
         self.local_path.is_none() && moosik_resolve::VideoId::new(&self.video_id).is_ok()
     }
@@ -1033,6 +1038,9 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    pub(crate) fn supports_added_dates(&self) -> bool {
+        !self.is_expanding() && (self.editable || self.source == PlaylistSource::Spotify)
+    }
     /// YouTube's own auto-generated mixes/radios ("My Mix", "Supermix", and the rest) open
     /// through the same `Route::Playlist`/`Api::playlist` path as a real playlist, but their id
     /// wraps a radio id — `VLRDCLAK5uy_…` rather than a real `VLPL…`/`VLOLAK…` playlist id — and
@@ -1636,6 +1644,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,
             rank: None,

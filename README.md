@@ -28,7 +28,7 @@ These macOS screenshots show signed-out browsing and synthetic listening stats. 
 ## Player
 
 - **Listen along on Discord.** Open Discord desktop and enable **Discord Rich Presence** and **Host Listen along** in **Settings → Discord**. Play a YouTube Music track. Friends can join from your profile, follow your playback in Moosik, and add songs to the shared queue. [Setup guide](https://moosik.dev/blog/youtube-music-discord/)
-- **Queue and playlists.** Move several upcoming tracks together, undo edits, or save the queue as a private playlist. Organize playlists in nested folders and shuffle an entire folder. [Queue controls](docs/queue.md)
+- **Queue and playlists.** Move several upcoming tracks together, undo edits, or save the queue as a private playlist. Sort playlists by date added or filter to the last 7 or 30 days. Local and private lists track new additions; Spotify uses supplied dates, and YouTube Music additions made in Moosik are tracked when YouTube returns a playlist item ID. Older entries without dates stay unknown. Organize playlists in nested folders and shuffle an entire folder. [Queue controls](docs/queue.md)
 - Follow synced lyrics, use keyboard shortcuts, and customize the player’s theme, sidebars, and fullscreen view.
 
 ## Listening history

@@ -1728,7 +1728,7 @@ impl Api {
     /// [`Self::add_to_playlist`] instead, which tells a duplicate apart.
     pub async fn edit_playlist(&self, playlist_id: &str, edit: PlaylistEdit) -> Result<()> {
         match self.edit_playlist_reply(playlist_id, edit).await? {
-            innertube::EditReply::Done => Ok(()),
+            innertube::EditReply::Done(_) => Ok(()),
             innertube::EditReply::Duplicate(m) | innertube::EditReply::Refused(m) => {
                 anyhow::bail!("YouTube refused the edit to {playlist_id}: {m}")
             }
@@ -2830,6 +2830,7 @@ fn map_song(s: SearchResultSong) -> Track {
         in_library: false,
         library_add: None,
         library_remove: None,
+        playlist_added_ms: None,
         set_video_id: None,
         // The typed parsers carry no video kind, so a typed track is never wide.
         wide: false,
@@ -2896,6 +2897,7 @@ fn map_video_ref(v: ytmapi_rs::parse::SearchResultVideo) -> Option<Track> {
         in_library: false,
         library_add: None,
         library_remove: None,
+        playlist_added_ms: None,
         set_video_id: None,
         // A dedicated video search result is always a real video, never the plain
         // album-audio kind — there is no "song" filter mixed into this one.
@@ -2973,6 +2975,7 @@ fn map_artist(a: GetArtist) -> model::Artist {
                     in_library: false,
                     library_add: None,
                     library_remove: None,
+                    playlist_added_ms: None,
                     set_video_id: None,
                     // The typed parsers carry no video kind, so a typed track is never wide.
                     wide: false,
@@ -3084,6 +3087,7 @@ fn map_album(id: &str, a: GetAlbum) -> model::Album {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             wide: false,
             rank: None,
@@ -3130,6 +3134,7 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
         in_library: false,
         library_add: None,
         library_remove: None,
+        playlist_added_ms: None,
         set_video_id: None,
         // The typed parsers carry no video kind, so a typed track is never wide.
         wide: false,
@@ -3341,6 +3346,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,
             wide: false,

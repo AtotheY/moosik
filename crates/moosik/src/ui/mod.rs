@@ -573,6 +573,7 @@ pub(crate) fn spec_rows<'d>(
         stats,
         liked,
         count,
+        true,
         spec,
         |_| widgets::RowSlot::Trailing(0.0),
         |_, _, _| {},
@@ -588,6 +589,7 @@ pub(crate) fn spec_rows_with_slot<'d>(
     stats: &mut crate::stats::Stats,
     liked: &crate::liked::Index,
     count: usize,
+    allow_reorder: bool,
     spec: impl Fn(usize) -> RowSpec<'d>,
     slot: impl Fn(usize) -> widgets::RowSlot,
     mut paint_slot: impl FnMut(&mut egui::Ui, &mut Images, usize),
@@ -598,11 +600,11 @@ pub(crate) fn spec_rows_with_slot<'d>(
     let drawn = virtual_rows(ui, theme::ROW_HEIGHT, count, |ui, i| {
         let s = spec(i);
         let like = row_like(&s, liked);
-        let draggable = s
-            .menu
-            .as_ref()
-            .and_then(|m| m.playlist_id)
-            .is_some_and(|id| !id.starts_with("spotify:"));
+        let draggable = allow_reorder
+            && s.menu
+                .as_ref()
+                .and_then(|m| m.playlist_id)
+                .is_some_and(|id| !id.starts_with("spotify:"));
         // A video still is 16:9; fetch its wide crop so the row draws it at its own aspect
         // instead of squeezing it into the square cover slot. A hidden slot fetches nothing.
         let art = if s.hide_art {
@@ -1103,6 +1105,7 @@ pub(crate) fn track_rows(
         hide_album,
         hide_art,
         false,
+        false,
     )
 }
 
@@ -1124,8 +1127,10 @@ pub(crate) fn track_rows_quiet(
     hide_album: bool,
     hide_art: bool,
     quiet_like: bool,
+    show_added_date: bool,
 ) -> ListOutcome {
-    spec_rows(
+    let width = if show_added_date { 84.0 } else { 0.0 };
+    spec_rows_with_slot(
         ui,
         palette,
         images,
@@ -1133,6 +1138,7 @@ pub(crate) fn track_rows_quiet(
         stats,
         liked,
         tracks.len(),
+        !show_added_date,
         |i| {
             let t = &tracks[i];
             RowSpec {
@@ -1166,6 +1172,28 @@ pub(crate) fn track_rows_quiet(
                 quiet_like,
                 add_to: None,
             }
+        },
+        |_| widgets::RowSlot::Trailing(width),
+        |ui, _, i| {
+            let date = tracks[i]
+                .playlist_added_ms
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%b %-d, %Y")
+                        .to_string()
+                });
+            let label = date.as_deref().unwrap_or("Unknown");
+            ui.label(
+                egui::RichText::new(label)
+                    .font(theme::regular(11.0))
+                    .color(palette.secondary),
+            )
+            .on_hover_text(if date.is_some() {
+                "Date added to this playlist"
+            } else {
+                "No date recorded for this entry"
+            });
         },
     )
 }
@@ -4023,6 +4051,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,
             rank: None,

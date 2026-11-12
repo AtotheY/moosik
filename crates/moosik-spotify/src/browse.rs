@@ -37,6 +37,7 @@ pub struct CatalogTrack {
     pub album_uri: Option<String>,
     pub saved: bool,
     pub plays: Option<String>,
+    pub added_at: Option<String>,
     pub playlist_item_uid: Option<String>,
 }
 
@@ -641,6 +642,7 @@ fn parse_track(data: &Value, uri: Option<&str>, force_saved: bool) -> Option<Cat
         plays: text(data, "/playcount")
             .or_else(|| data["playcount"].as_u64().map(|count| count.to_string())),
         playlist_item_uid: None,
+        added_at: None,
     })
 }
 
@@ -810,6 +812,10 @@ fn parse_track_page(
         .filter_map(|item| {
             let (data, uri) = unwrap_item(item);
             let mut track = parse_track(data, uri, force_saved)?;
+            if matches!(kind, TrackPageKind::Playlist { .. }) {
+                track.added_at =
+                    text(item, "/addedAt/isoString").or_else(|| text(item, "/addedAt"));
+            }
             if matches!(
                 kind,
                 TrackPageKind::Playlist {
@@ -1099,6 +1105,7 @@ mod tests {
     fn playlist_paging_counts_unplayable_rows_and_keeps_links() {
         let mut playable = wrapped_track();
         playable["uid"] = json!("1234567890abcdef");
+        playable["addedAt"] = json!({"isoString":"2026-10-27T12:34:56Z"});
         let mut unavailable = wrapped_track();
         unavailable["uid"] = json!("1234567890abcdee");
         unavailable["itemV2"]["data"]["playability"]["playable"] = json!(false);
@@ -1125,6 +1132,7 @@ mod tests {
         );
         assert!(track.metadata.explicit);
         assert_eq!(track.playlist_item_uid.as_deref(), Some("1234567890abcdef"));
+        assert_eq!(track.added_at.as_deref(), Some("2026-10-27T12:34:56Z"));
         assert_eq!(
             decode_cursor(page.next.as_deref().unwrap()).unwrap().offset,
             2

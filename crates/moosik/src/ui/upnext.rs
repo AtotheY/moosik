@@ -395,6 +395,7 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                 &mut app.stats,
                 &app.liked,
                 tracks.len(),
+                true,
                 |i| {
                     queue_row(
                         &tracks[i],

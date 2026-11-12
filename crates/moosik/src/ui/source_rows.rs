@@ -65,7 +65,8 @@ impl State {
                 .unwrap_or(0)
         };
         match sort {
-            PlaylistSort::Default => {}
+            // Grouped liked/smart rows have no playlist membership dates.
+            PlaylistSort::Default | PlaylistSort::AddedNewest | PlaylistSort::AddedOldest => {}
             PlaylistSort::Reverse => rows.reverse(),
             PlaylistSort::TitleAsc => rows.sort_by_cached_key(title),
             PlaylistSort::TitleDesc => rows.sort_by_cached_key(|row| std::cmp::Reverse(title(row))),
@@ -223,6 +224,7 @@ pub(super) fn draw_with_options(
             stats,
             liked,
             state.len(),
+            true,
             |index| {
                 let group = &state.groups[index];
                 let mut spec = crate::ui::entry_row_spec(
