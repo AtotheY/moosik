@@ -5,9 +5,7 @@
 //! the top right, so nothing is pinned to the bottom except an audio failure, and that only when
 //! there is one.
 //!
-//! Only the library list scrolls. Scrolling the whole rail meant the nav items drifted off the
-//! top as soon as you had more than a handful of playlists, and the version before that put a
-//! 220px box around them — a scrollbar inside a scrollbar showing five of thirty-one.
+//! The menu and playlist list scroll independently on either side of the draggable header.
 
 use egui::{Rect, Sense, vec2};
 
@@ -53,6 +51,88 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     } else {
         ui.add_space(8.0);
     }
+    sidebar_sections(app, ui, rail);
+    // The card's rounded corners, over everything the rail drew: nav rows and playlist rows
+    // both run to the card's top and bottom edges now.
+    widgets::paint_corner_notches(ui, card, theme::CARD_INSET_X, &app.palette);
+}
+
+/// The default fits all menu items when space allows. On shorter windows, leave room
+/// below the handle for the Playlists header and at least one playlist.
+fn sidebar_sections(app: &mut App, ui: &mut egui::Ui, rail: bool) {
+    let id = ui.id().with("sidebar-playlists-resize");
+    let nav_top = ui.cursor().top();
+    let gap = 14.0;
+    let playlist_row = if rail {
+        theme::RAIL_ROW_HEIGHT_COMPACT
+    } else {
+        theme::RAIL_ROW_HEIGHT
+    };
+    let reserved = gap + 32.0 + 4.0 + 3.0 * ui.spacing().item_spacing.y + playlist_row;
+    let max_height = (ui.available_height() - reserved).max(theme::NAV_HEIGHT);
+    // Keep the original grab point under the pointer, whether the drag starts on the
+    // grip or on the heading below it. Save the preference once, on release.
+    let grab_offset = ui.data(|d| d.get_temp::<f32>(id));
+    let drag_height = grab_offset
+        .zip(ui.input(|i| i.pointer.interact_pos()))
+        .map(|(offset, pointer)| pointer.y - nav_top - offset);
+    let height = drag_height
+        .or(app.settings.sidebar_menu_height)
+        .unwrap_or(max_height)
+        .clamp(theme::NAV_HEIGHT, max_height);
+    let menu = egui::ScrollArea::vertical()
+        .id_salt("sidebar-navigation")
+        .max_height(height)
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| navigation(app, ui, rail));
+    let visible_height = height.min(menu.content_size.y);
+
+    let gap_top = ui.cursor().top();
+    ui.add_space(gap);
+    let plus = playlist_header(app, ui, rail);
+    let column = ui.max_rect();
+    // Leave the creation button its own hit target. In the icon rail, the grip alone resizes.
+    let hit_rect = Rect::from_min_max(
+        egui::pos2(column.left(), gap_top),
+        if rail {
+            egui::pos2(column.right(), gap_top + gap)
+        } else {
+            egui::pos2(plus.left() - 4.0, plus.bottom())
+        },
+    );
+    let handle = ui
+        .interact(hit_rect, id, Sense::click_and_drag())
+        .on_hover_and_drag_cursor(egui::CursorIcon::ResizeVertical)
+        .on_hover_text("Drag to resize · Double-click to reset");
+    let grip = Rect::from_center_size(
+        egui::pos2(column.center().x, gap_top + gap * 0.5),
+        vec2(28.0, 3.0),
+    );
+    let color = if handle.dragged() || handle.hovered() {
+        app.palette.secondary
+    } else {
+        app.palette.outline
+    };
+    ui.painter().rect_filled(grip, 2.0, color);
+
+    if handle.drag_started()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+    {
+        ui.data_mut(|d| d.insert_temp(id, origin.y - nav_top - visible_height));
+        ui.ctx().request_repaint();
+    }
+    if handle.drag_stopped() || handle.double_clicked() {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        let preference = (!handle.double_clicked() && visible_height < menu.content_size.y)
+            .then(|| visible_height.round());
+        app.update_settings(ui.ctx(), |s| s.sidebar_menu_height = preference);
+    }
+    ui.add_space(4.0);
+    rail_list(app, ui, rail);
+}
+
+fn navigation(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     let providers = app.available_providers();
     let (discovery, discovery_label) = if providers.contains(&crate::model::Provider::YouTubeMusic)
     {
@@ -94,7 +174,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             let accepts = if session_queue {
                 drag.session_eligible()
             } else {
-                !drag.queue
+                drag.queue != Some(super::queue_edit::Scope::Personal)
             };
             if let Some(tracks) = super::song_drag::target(ui, &app.palette, response.rect, accepts)
             {
@@ -115,10 +195,6 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     if app.listening.error.is_some() {
         ui.colored_label(app.palette.danger, "Stats need attention");
     }
-    playlists(app, ui, rail);
-    // The card's rounded corners, over everything the rail drew: nav rows and playlist rows
-    // both run to the card's top and bottom edges now.
-    widgets::paint_corner_notches(ui, card, theme::CARD_INSET_X, &app.palette);
 }
 
 /// Only shown when playback could not start: libmpv never came up, or an attempt stalled until
@@ -155,14 +231,8 @@ fn audio_warning(app: &mut App, ui: &mut egui::Ui, rail: bool) {
     ui.add_space(10.0);
 }
 
-/// Your playlists, and a way to make another.
-///
-/// No "Library" header and no Playlists/Albums/Artists chips: the rail said Library twice — once
-/// as a nav item and once over chips that duplicated the page that item opens — and the chips now
-/// live on the Library page where they belong. No divider either; the card's own edge is the
-/// separation, which is what the divider was doing badly.
-fn playlists(app: &mut App, ui: &mut egui::Ui, rail: bool) {
-    ui.add_space(14.0);
+/// Draw the Playlists heading and creation menu; return the button bounds for the resize handle.
+fn playlist_header(app: &mut App, ui: &mut egui::Ui, rail: bool) -> Rect {
     let p = app.palette;
     let plus = if rail {
         ui.vertical_centered(|ui| widgets::icon_button(ui, &p, Icon::Plus, 18.0, false))
@@ -207,8 +277,7 @@ fn playlists(app: &mut App, ui: &mut egui::Ui, rail: bool) {
                 }
             }
         });
-    ui.add_space(4.0);
-    rail_list(app, ui, rail);
+    plus.rect
 }
 
 pub(crate) fn new_playlist_popup(app: &mut App, ctx: &egui::Context) {

@@ -2775,7 +2775,15 @@ fn track_row_inner<'a>(
             .as_ref()
             .and_then(|m| m.queue_index)
             .is_some_and(|index| {
-                crate::ui::queue_edit::interact(ui, &response, index, title, on_more, art)
+                crate::ui::queue_edit::interact(
+                    crate::ui::queue_edit::Scope::of(ui),
+                    ui,
+                    &response,
+                    index,
+                    title,
+                    on_more,
+                    art,
+                )
             });
     let song_suppress = !on_child_slot
         && menu
@@ -2823,7 +2831,13 @@ fn track_row_inner<'a>(
                 is_selected(ui.ctx(), m.track.video_id.as_str())
                     || crate::ui::song_drag::selected(ui.ctx(), ui.id(), id_salt)
             },
-            |index| crate::ui::queue_edit::selected(ui.ctx(), index),
+            |index| {
+                crate::ui::queue_edit::selected(
+                    crate::ui::queue_edit::Scope::of(ui),
+                    ui.ctx(),
+                    index,
+                )
+            },
         )
     });
     if ui.is_rect_visible(rect) {
@@ -3379,6 +3393,9 @@ fn row_menu_with_button(
     let t = menu.track;
     let spotify = t.is_spotify();
     let youtube = t.local_path.is_none() && !spotify;
+    let scope = menu
+        .queue_index
+        .map(|_| crate::ui::queue_edit::Scope::of(ui));
     let id = match menu.queue_index {
         Some(index) => ui.id().with(("ytm-queue-row-menu", index)),
         None if menu
@@ -3431,8 +3448,8 @@ fn row_menu_with_button(
     popup
         .show(|mui| {
             let mut choice = None;
-            if let Some(index) = menu.queue_index
-                && crate::ui::queue_edit::group_menu(mui, palette, index)
+            if let Some((scope, index)) = scope.zip(menu.queue_index)
+                && crate::ui::queue_edit::group_menu(scope, mui, palette, index)
             {
                 return None;
             }
@@ -3445,8 +3462,8 @@ fn row_menu_with_button(
                 mui.close();
             }
             if menu_item(mui, palette, Icon::ListStart, "Play next", None).clicked() {
-                if let Some(index) = menu.queue_index {
-                    crate::ui::queue_edit::play_next(mui.ctx(), index);
+                if let Some((scope, index)) = scope.zip(menu.queue_index) {
+                    crate::ui::queue_edit::play_next(scope, mui.ctx(), index);
                 } else {
                     choice = Some(RowAction::PlayNext(t.clone()));
                 }
@@ -3476,8 +3493,8 @@ fn row_menu_with_button(
                 mui.close();
             }
 
-            if menu.queue_index.is_some() {
-                crate::ui::queue_edit::single_move_menu(mui, palette);
+            if let Some(scope) = scope {
+                crate::ui::queue_edit::single_move_menu(scope, mui, palette);
             }
 
             if let Some(action) = sub_menu(

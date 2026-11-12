@@ -76,56 +76,105 @@ impl Selection {
 }
 #[derive(Clone)]
 struct QueueDrag {
+    scope: Scope,
     stamp: u64,
     order: Arc<Vec<usize>>,
     indices: Arc<Vec<usize>>,
     title: String,
     art: Option<egui::TextureHandle>,
 }
-fn key() -> Id {
-    Id::new("moosik-queue-selection")
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Scope {
+    Personal,
+    Session,
 }
-fn state(ctx: &Context) -> Selection {
-    ctx.data(|d| d.get_temp(key()).unwrap_or_default())
+impl Scope {
+    pub(crate) fn of(ui: &Ui) -> Self {
+        ui.ctx()
+            .data(|d| d.get_temp(ui.id().with("queue-scope")))
+            .unwrap_or(Self::Personal)
+    }
 }
-fn save(ctx: &Context, state: Selection) {
-    ctx.data_mut(|d| d.insert_temp(key(), state));
+
+fn key(scope: Scope) -> Id {
+    Id::new(("moosik-queue-selection", scope))
 }
-fn request(ctx: &Context, action: Action) {
-    let mut s = state(ctx);
+fn state(scope: Scope, ctx: &Context) -> Selection {
+    ctx.data(|d| d.get_temp(key(scope)).unwrap_or_default())
+}
+fn save(scope: Scope, ctx: &Context, state: Selection) {
+    ctx.data_mut(|d| d.insert_temp(key(scope), state));
+}
+fn request(scope: Scope, ctx: &Context, action: Action) {
+    let mut s = state(scope, ctx);
     s.action = Some(action);
-    save(ctx, s);
+    save(scope, ctx, s);
 }
 
 pub(crate) fn clear_selection(ctx: &Context) {
-    let mut s = state(ctx);
-    s.selected = Arc::default();
-    s.anchor = None;
-    s.focus = None;
-    s.action = None;
-    save(ctx, s);
+    for scope in [Scope::Personal, Scope::Session] {
+        ctx.data_mut(|d| d.remove::<Selection>(key(scope)));
+    }
     if egui::DragAndDrop::has_payload_of_type::<QueueDrag>(ctx) {
         egui::DragAndDrop::clear_payload(ctx);
     }
 }
 
-pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
-    let mut s = state(ui.ctx());
-    if s.stamp != stamp || s.order.as_slice() != order {
-        for index in s.order.iter() {
-            egui::Popup::close_id(ui.ctx(), ui.id().with(("ytm-queue-row-menu", *index)));
-        }
-        s = Selection {
+pub(crate) fn prepare(scope: Scope, ui: &mut Ui, stamp: u64, order: &[usize]) {
+    let previous = sync_order(scope, ui.ctx(), stamp, order);
+    prepare_rows(scope, ui, previous);
+}
+
+/// Update the selection before any controls read it. Return the old occurrences
+/// so their popups can be closed in the UI that owns the rows.
+pub(crate) fn sync_order(
+    scope: Scope,
+    ctx: &Context,
+    stamp: u64,
+    order: &[usize],
+) -> Option<Arc<Vec<usize>>> {
+    let s = state(scope, ctx);
+    if s.stamp == stamp && s.order.as_slice() == order {
+        return None;
+    }
+    save(
+        scope,
+        ctx,
+        Selection {
             stamp,
             order: Arc::new(order.to_vec()),
             ..Default::default()
-        };
-        if egui::DragAndDrop::has_payload_of_type::<QueueDrag>(ui.ctx()) {
-            egui::DragAndDrop::clear_payload(ui.ctx());
+        },
+    );
+    if egui::DragAndDrop::payload::<QueueDrag>(ctx).is_some_and(|d| d.scope == scope) {
+        egui::DragAndDrop::clear_payload(ctx);
+    }
+    Some(s.order)
+}
+
+pub(crate) fn prepare_rows(scope: Scope, ui: &mut Ui, previous: Option<Arc<Vec<usize>>>) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(ui.id().with("queue-scope"), scope));
+    if let Some(previous) = previous {
+        for index in previous.iter() {
+            egui::Popup::close_id(ui.ctx(), ui.id().with(("ytm-queue-row-menu", *index)));
         }
     }
+    let mut s = state(scope, ui.ctx());
     let focused = s.focus.is_some_and(|id| ui.memory(|m| m.has_focus(id)));
-    let over = ui.rect_contains_pointer(ui.clip_rect()) && !ui.ctx().egui_wants_keyboard_input();
+    let top = ui.cursor().top();
+    let bottom = match scope {
+        Scope::Session => {
+            top + (theme::ROW_HEIGHT + ui.spacing().item_spacing.y) * s.order.len().max(1) as f32
+        }
+        Scope::Personal => ui.clip_rect().bottom(),
+    };
+    let bounds = Rect::from_min_max(
+        pos2(ui.max_rect().left(), top),
+        pos2(ui.max_rect().right(), bottom),
+    );
+    let over = ui.rect_contains_pointer(bounds.intersect(ui.clip_rect()))
+        && !ui.ctx().egui_wants_keyboard_input();
     if focused || over {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             s.selected = s.order.clone();
@@ -140,7 +189,7 @@ pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
                     || i.consume_key(Modifiers::NONE, Key::Backspace)
             }) {
                 s.action = Some(Action::Remove {
-                    stamp,
+                    stamp: s.stamp,
                     indices: s.selected.as_ref().clone(),
                 });
             }
@@ -156,7 +205,7 @@ pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
             }
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            if egui::DragAndDrop::has_payload_of_type::<QueueDrag>(ui.ctx()) {
+            if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.scope == scope) {
                 egui::DragAndDrop::clear_payload(ui.ctx());
             } else {
                 s.selected = Arc::default();
@@ -164,12 +213,13 @@ pub(crate) fn prepare(ui: &mut Ui, stamp: u64, order: &[usize]) {
             }
         }
     }
-    save(ui.ctx(), s);
+    save(scope, ui.ctx(), s);
 }
 
 /// Modifier clicks select without following a link or playing. A selected group is
 /// frozen at drag start; pressing an already selected row never collapses it first.
 pub(crate) fn interact(
+    scope: Scope,
     ui: &Ui,
     response: &egui::Response,
     index: usize,
@@ -177,7 +227,7 @@ pub(crate) fn interact(
     on_more: bool,
     art: Option<&egui::TextureHandle>,
 ) -> bool {
-    let mut s = state(ui.ctx());
+    let mut s = state(scope, ui.ctx());
     if !s.order.contains(&index) {
         return false;
     }
@@ -210,6 +260,7 @@ pub(crate) fn interact(
         egui::DragAndDrop::set_payload(
             ui.ctx(),
             QueueDrag {
+                scope,
                 stamp: s.stamp,
                 order: s.order.clone(),
                 indices: s.selected.clone(),
@@ -228,26 +279,31 @@ pub(crate) fn interact(
             .on_hover_text("Drag to reorder · ⌘/Ctrl-click to select · Shift-click for a range");
     }
     if changed {
-        save(ui.ctx(), s);
+        save(scope, ui.ctx(), s);
     }
     modified && over || dragging || response.drag_stopped()
 }
-pub(crate) fn selected(ctx: &Context, index: usize) -> bool {
-    state(ctx).selected.contains(&index)
+pub(crate) fn selected(scope: Scope, ctx: &Context, index: usize) -> bool {
+    state(scope, ctx).selected.contains(&index)
 }
 
-pub(crate) fn play_next(ctx: &Context, index: usize) {
-    let mut s = state(ctx);
+pub(crate) fn play_next(scope: Scope, ctx: &Context, index: usize) {
+    let mut s = state(scope, ctx);
     if !s.selected.contains(&index) {
         s.choose(index, false, false);
     }
-    request(ctx, s.moving(0));
+    request(scope, ctx, s.moving(0));
 }
 
 /// Return true for a group menu, which replaces single-song actions consistently
 /// for both right-click and the row's dots button.
-pub(crate) fn group_menu(ui: &mut Ui, palette: &theme::Palette, index: usize) -> bool {
-    let s = state(ui.ctx());
+pub(crate) fn group_menu(
+    scope: Scope,
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    index: usize,
+) -> bool {
+    let s = state(scope, ui.ctx());
     if !s.selected.contains(&index) || s.selected.len() < 2 {
         return false;
     }
@@ -268,14 +324,14 @@ pub(crate) fn group_menu(ui: &mut Ui, palette: &theme::Palette, index: usize) ->
         ),
     ] {
         if widgets::menu_item(ui, palette, icon, label, None).clicked() {
-            request(ui.ctx(), action);
+            request(scope, ui.ctx(), action);
             ui.close();
         }
     }
-    move_menu(ui, palette, &s);
+    move_menu(scope, ui, palette, &s);
     true
 }
-fn move_menu(ui: &mut Ui, palette: &theme::Palette, s: &Selection) {
+fn move_menu(scope: Scope, ui: &mut Ui, palette: &theme::Palette, s: &Selection) {
     let positions: Vec<_> = s
         .order
         .iter()
@@ -293,17 +349,24 @@ fn move_menu(ui: &mut Ui, palette: &theme::Palette, s: &Selection) {
         ),
     ] {
         if widgets::menu_item(ui, palette, Icon::ArrowUpDown, label, None).clicked() {
-            request(ui.ctx(), s.moving(boundary));
+            request(scope, ui.ctx(), s.moving(boundary));
             ui.close();
         }
     }
 }
-pub(crate) fn single_move_menu(ui: &mut Ui, palette: &theme::Palette) {
-    move_menu(ui, palette, &state(ui.ctx()));
+pub(crate) fn single_move_menu(scope: Scope, ui: &mut Ui, palette: &theme::Palette) {
+    move_menu(scope, ui, palette, &state(scope, ui.ctx()));
 }
 
-pub(crate) fn toolbar(ui: &mut Ui, palette: &theme::Palette, title: &str, undo: bool) {
-    let mut s = state(ui.ctx());
+pub(crate) fn toolbar(
+    scope: Scope,
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    title: &str,
+    undo: bool,
+    trailing: impl FnOnce(&mut Ui),
+) {
+    let mut s = state(scope, ui.ctx());
     let width = ui.available_width();
     let compact = width < 400.0;
     let selecting = !s.selected.is_empty();
@@ -322,8 +385,9 @@ pub(crate) fn toolbar(ui: &mut Ui, palette: &theme::Palette, title: &str, undo: 
                 ui.label(egui::RichText::new(title).font(heading).color(palette.text));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                trailing(ui);
                 queue_actions(ui, palette, undo, &mut s);
-                if !selecting && !s.order.is_empty() {
+                if scope == Scope::Personal && !selecting && !s.order.is_empty() {
                     let count = s.order.len();
                     let label = if count == 1 { "song" } else { "songs" };
                     ui.add(
@@ -338,7 +402,7 @@ pub(crate) fn toolbar(ui: &mut Ui, palette: &theme::Palette, title: &str, undo: 
             });
         },
     );
-    save(ui.ctx(), s);
+    save(scope, ui.ctx(), s);
 }
 
 fn queue_actions(ui: &mut Ui, palette: &theme::Palette, undo: bool, s: &mut Selection) {
@@ -405,11 +469,21 @@ pub(crate) fn drop_boundary(
     top: f32,
     count: usize,
 ) -> Option<usize> {
+    boundary_in(ui, palette, top, count, ui.clip_rect().bottom())
+}
+
+fn boundary_in(
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    top: f32,
+    count: usize,
+    bottom: f32,
+) -> Option<usize> {
     let pointer = ui.input(|i| i.pointer.interact_pos())?;
     let clip = ui.clip_rect();
     let bounds = Rect::from_min_max(
         pos2(ui.min_rect().left(), top),
-        pos2(ui.max_rect().right(), clip.bottom()),
+        pos2(ui.max_rect().right(), bottom),
     )
     .intersect(clip);
     let hovered = ui.rect_contains_pointer(bounds);
@@ -437,19 +511,34 @@ pub(crate) fn drop_boundary(
     Some(boundary)
 }
 
-pub(crate) fn drop_target(ui: &mut Ui, palette: &theme::Palette, top: f32, count: usize) {
+pub(crate) fn drop_target(
+    scope: Scope,
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    top: f32,
+    count: usize,
+) {
     let Some(drag) = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()) else {
         return;
     };
-    let s = state(ui.ctx());
+    if drag.scope != scope {
+        return;
+    }
+    let s = state(scope, ui.ctx());
     if drag.stamp != s.stamp || drag.order != s.order {
         egui::DragAndDrop::clear_payload(ui.ctx());
         return;
     }
-    if let Some(boundary) = drop_boundary(ui, palette, top, count)
+    let bottom = if scope == Scope::Session {
+        ui.min_rect().bottom()
+    } else {
+        ui.clip_rect().bottom()
+    };
+    if let Some(boundary) = boundary_in(ui, palette, top, count, bottom)
         && ui.input(|i| i.pointer.primary_released())
     {
         request(
+            scope,
             ui.ctx(),
             Action::Move {
                 stamp: drag.stamp,
@@ -464,7 +553,7 @@ pub(crate) fn drop_target(ui: &mut Ui, palette: &theme::Palette, top: f32, count
         return;
     };
     if ui.input(|i| i.pointer.any_released()) {
-        egui::DragAndDrop::clear_payload(ui.ctx());
+        // Another visible queue view can still receive this release before end-of-frame cleanup.
         return;
     }
     // A compact floating label, outside normal layout and without hit testing.
@@ -506,10 +595,10 @@ pub(crate) fn drop_target(ui: &mut Ui, palette: &theme::Palette, top: f32, count
         palette.text,
     );
 }
-pub(crate) fn take_action(ctx: &Context) -> Option<Action> {
-    let mut s = state(ctx);
+pub(crate) fn take_action(scope: Scope, ctx: &Context) -> Option<Action> {
+    let mut s = state(scope, ctx);
     let action = s.action.take();
-    save(ctx, s);
+    save(scope, ctx, s);
     action
 }
 
@@ -525,17 +614,17 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                prepare(ui, stamp, &[10, 20, 30]);
+                prepare(Scope::Personal, ui, stamp, &[10, 20, 30]);
                 let top = ui.cursor().top();
                 for index in [10, 20, 30] {
                     let (rect, response) = ui.allocate_exact_size(
                         vec2(ui.available_width(), theme::ROW_HEIGHT),
                         egui::Sense::click_and_drag(),
                     );
-                    interact(ui, &response, index, "Song", false, None);
+                    interact(Scope::Personal, ui, &response, index, "Song", false, None);
                     rects.push(rect);
                 }
-                drop_target(ui, &theme::Palette::dark(), top, 3);
+                drop_target(Scope::Personal, ui, &theme::Palette::dark(), top, 3);
             },
         );
         output.textures_delta.clear();
@@ -550,13 +639,57 @@ mod tests {
         }
     }
     #[test]
+    fn session_toolbar_clear_uses_the_order_received_on_click_release() {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        crate::icons::register(&ctx);
+        let draw = |events, stamp, order: &[usize]| {
+            let mut clear = egui::Pos2::ZERO;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let previous = sync_order(Scope::Session, &ctx, stamp, order);
+                    toolbar(
+                        Scope::Session,
+                        ui,
+                        &theme::Palette::dark(),
+                        "Session queue",
+                        false,
+                        |ui| {
+                            clear = ui.available_rect_before_wrap().right_top() + vec2(-15.0, 15.0);
+                        },
+                    );
+                    egui::Frame::new().show(ui, |ui| prepare_rows(Scope::Session, ui, previous));
+                },
+            )
+            .drop_without_applying_deltas();
+            clear
+        };
+        let clear = draw(vec![], 1, &[10]);
+        draw(
+            vec![egui::Event::PointerMoved(clear), pointer(clear, true)],
+            1,
+            &[10],
+        );
+        draw(vec![pointer(clear, false)], 2, &[10, 20]);
+        assert!(matches!(
+            take_action(Scope::Session, &ctx),
+            Some(Action::Clear { stamp: 2 })
+        ));
+    }
+
+    #[test]
     fn dragging_selected_songs_keeps_the_group_and_can_append() {
         let ctx = Context::default();
         theme::install_fonts(&ctx);
         let rects = frame(&ctx, vec![], 7);
-        let mut s = state(&ctx);
+        let mut s = state(Scope::Personal, &ctx);
         s.selected = Arc::new(vec![10, 30]);
-        save(&ctx, s);
+        save(Scope::Personal, &ctx, s);
         let start = rects[0].center();
         // Drop in the open space well below the final row.
         let end = rects[2].center_bottom() + vec2(0.0, 110.0);
@@ -576,7 +709,7 @@ mod tests {
         );
         frame(&ctx, vec![egui::Event::PointerMoved(end)], 7);
         frame(&ctx, vec![pointer(end, false)], 7);
-        match take_action(&ctx).unwrap() {
+        match take_action(Scope::Personal, &ctx).unwrap() {
             Action::Move {
                 indices, boundary, ..
             } => {
@@ -627,8 +760,8 @@ mod tests {
                 },
                 |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        prepare(ui, 7, &[10, 20, 30]);
-                        toolbar(ui, &palette, "Next up", false);
+                        prepare(Scope::Personal, ui, 7, &[10, 20, 30]);
+                        toolbar(Scope::Personal, ui, &palette, "Next up", false, |_| {});
                         let top = ui.cursor().top();
                         for (i, index) in [10, 20, 30].into_iter().enumerate() {
                             let hit = widgets::track_row(
@@ -668,7 +801,7 @@ mod tests {
                             assert!(!hit.activate, "drag must not start playback");
                             rects.push(hit.response.rect);
                         }
-                        drop_target(ui, &palette, top, 3);
+                        drop_target(Scope::Personal, ui, &palette, top, 3);
                     });
                 },
             )
@@ -686,7 +819,7 @@ mod tests {
         assert_eq!(dragging[2].top(), rects[2].top());
         frame(vec![pointer(end, false)]);
         assert!(matches!(
-            take_action(&ctx),
+            take_action(Scope::Personal, &ctx),
             Some(Action::Move { boundary: 3, .. })
         ));
     }
@@ -695,10 +828,11 @@ mod tests {
         let ctx = Context::default();
         theme::install_fonts(&ctx);
         frame(&ctx, vec![], 7);
-        let mut s = state(&ctx);
+        let mut s = state(Scope::Personal, &ctx);
         s.selected = Arc::new(vec![10, 30]);
-        save(&ctx, s);
+        save(Scope::Personal, &ctx, s);
         let drag = QueueDrag {
+            scope: Scope::Personal,
             stamp: 7,
             order: Arc::new(vec![10, 20, 30]),
             indices: Arc::new(vec![10, 30]),
@@ -718,8 +852,8 @@ mod tests {
             7,
         );
         assert!(!egui::DragAndDrop::has_payload_of_type::<QueueDrag>(&ctx));
-        assert_eq!(state(&ctx).selected.as_slice(), &[10, 30]);
-        assert!(take_action(&ctx).is_none());
+        assert_eq!(state(Scope::Personal, &ctx).selected.as_slice(), &[10, 30]);
+        assert!(take_action(Scope::Personal, &ctx).is_none());
         egui::DragAndDrop::set_payload(&ctx, drag.clone());
         frame(&ctx, vec![], 8);
         assert!(!egui::DragAndDrop::has_payload_of_type::<QueueDrag>(&ctx));
@@ -732,7 +866,7 @@ mod tests {
             ],
             7,
         );
-        assert!(take_action(&ctx).is_none());
+        assert!(take_action(Scope::Personal, &ctx).is_none());
         egui::DragAndDrop::set_payload(&ctx, 42usize);
         frame(&ctx, vec![], 9);
         assert_eq!(*egui::DragAndDrop::payload::<usize>(&ctx).unwrap(), 42);

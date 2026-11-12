@@ -33,6 +33,9 @@ pub(crate) struct Snapshot {
     pub(super) skip_target: Option<String>,
     #[serde(default)]
     pub(super) skip_requested: bool,
+    #[serde(default)]
+    pub(crate) can_edit_queue: bool,
+    pub(crate) undo_edit: Option<u64>,
     pub current_by: Option<Member>,
     pub(super) state: Option<Song>,
     pub(super) error: Option<String>,
@@ -41,6 +44,12 @@ pub(crate) struct Snapshot {
 }
 
 impl Snapshot {
+    pub(crate) fn queue_stamp(&self, room: Option<&str>) -> egui::Id {
+        self.queue
+            .iter()
+            .fold(egui::Id::new(room), |id, entry| id.with(entry.entry))
+    }
+
     pub(crate) fn playing_credit(&self, id: &str) -> Option<(&Member, String)> {
         if self.state.as_ref()?.id != id {
             return None;
@@ -55,9 +64,40 @@ impl Snapshot {
 }
 
 #[derive(Clone, Serialize)]
-struct Addition {
-    seq: u64,
-    song: Song,
+#[serde(untagged)]
+pub(super) enum QueueEdit {
+    Move {
+        entries: Vec<u64>,
+        before: Option<u64>,
+    },
+    Remove {
+        entries: Vec<u64>,
+    },
+    Undo {
+        undo: u64,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Command {
+    Add {
+        seq: u64,
+        song: Song,
+    },
+    Edit {
+        seq: u64,
+        #[serde(flatten)]
+        edit: QueueEdit,
+    },
+}
+
+#[derive(Serialize)]
+struct Heartbeat<'a> {
+    #[serde(flatten)]
+    profile: &'a SessionProfile,
+    #[serde(flatten)]
+    command: Option<&'a Command>,
 }
 
 // A host may make several playback choices between heartbeats. Keep the last choice and
@@ -70,12 +110,12 @@ struct Played {
 }
 
 impl Played {
-    fn consume(&mut self, entry: u64, remaining: &[Entry]) {
-        self.through = self.through.max(entry);
+    fn consume(&mut self, entry: u64, through: u64, remaining: &[Entry]) {
+        self.through = self.through.max(through);
         self.keep_entries = remaining
             .iter()
             .map(|e| e.entry)
-            .take_while(|&id| id <= self.through)
+            .filter(|&id| id <= self.through)
             .collect();
         self.play_entry = (entry != self.through).then_some(entry);
     }
@@ -90,7 +130,8 @@ struct Commands {
     room: String,
     profile: SessionProfile,
     sequence: u64,
-    pending: VecDeque<Addition>,
+    pending: VecDeque<Command>,
+    consumed: Vec<u64>,
     skip: Option<String>,
     played: Played,
     sent_played: Played,
@@ -98,7 +139,7 @@ struct Commands {
 }
 
 /// UI writes into a room-scoped outbox. Each heartbeat retries its oldest unacknowledged
-/// addition with the same sequence number, including when a response was lost after commit.
+/// queue change with the same sequence number, including when a response was lost after commit.
 #[derive(Clone, Default)]
 pub(super) struct Outbox(Arc<Mutex<Commands>>);
 
@@ -108,6 +149,7 @@ impl Outbox {
         if cmd.room != id {
             cmd.room = id.to_owned();
             cmd.pending.clear();
+            cmd.consumed.clear();
             cmd.skip = None;
             cmd.played = Played::default();
             cmd.sent_played = Played::default();
@@ -119,13 +161,21 @@ impl Outbox {
     }
 
     pub(super) fn add(&self, id: &str, song: Song) -> bool {
+        self.enqueue(id, |seq| Command::Add { seq, song })
+    }
+
+    pub(super) fn edit(&self, room: &str, edit: QueueEdit) -> bool {
+        self.enqueue(room, |seq| Command::Edit { seq, edit })
+    }
+
+    fn enqueue(&self, room: &str, command: impl FnOnce(u64) -> Command) -> bool {
         let mut cmd = self.0.lock().unwrap();
-        if cmd.room != id || cmd.pending.len() >= 48 {
+        if cmd.room != room || cmd.pending.len() >= 48 {
             return false;
         }
         cmd.sequence += 1;
-        let seq = cmd.sequence;
-        cmd.pending.push_back(Addition { seq, song });
+        let next = command(cmd.sequence);
+        cmd.pending.push_back(next);
         true
     }
 
@@ -136,21 +186,33 @@ impl Outbox {
         }
     }
 
-    pub(super) fn played(&self, id: &str, entry: u64, remaining: &[Entry]) {
+    pub(super) fn played(&self, id: &str, entry: u64, consumed: &[u64], remaining: &[Entry]) {
         let mut cmd = self.0.lock().unwrap();
         if cmd.room == id {
-            cmd.played.consume(entry, remaining);
+            cmd.played.consume(
+                entry,
+                consumed.iter().copied().max().unwrap_or(entry),
+                remaining,
+            );
+            cmd.consumed.extend_from_slice(consumed);
         }
     }
 
     pub(super) fn has_changes(&self) -> bool {
         let cmd = self.0.lock().unwrap();
-        !cmd.pending.is_empty() || cmd.played != cmd.sent_played || cmd.profile != cmd.sent_profile
+        !cmd.consumed.is_empty()
+            || !cmd.pending.is_empty()
+            || cmd.played != cmd.sent_played
+            || cmd.profile != cmd.sent_profile
     }
 
     pub(super) fn filter_played(&self, snapshot: &mut Snapshot) {
         let cmd = self.0.lock().unwrap();
-        snapshot.queue.retain(|e| cmd.played.keep(e.entry));
+        if snapshot.can_edit_queue {
+            snapshot.queue.retain(|e| !cmd.consumed.contains(&e.entry));
+        } else {
+            snapshot.queue.retain(|e| cmd.played.keep(e.entry));
+        }
     }
 
     pub(super) async fn sync(
@@ -158,10 +220,15 @@ impl Outbox {
         request: reqwest::RequestBuilder,
         host_state: Option<&Option<Song>>,
     ) -> anyhow::Result<Snapshot> {
-        let (body, seq, profile, played, skip) = {
+        let (body, sent_add, profile, played, consumed, skip) = {
             let cmd = self.0.lock().unwrap();
-            let mut body = serde_json::to_value(&cmd.profile)?;
+            let command = cmd.pending.front();
+            let mut body = serde_json::to_value(Heartbeat {
+                profile: &cmd.profile,
+                command,
+            })?;
             if let Some(state) = host_state {
+                body["played_entries"] = serde_json::to_value(&cmd.consumed)?;
                 if let Some(target) = state.as_ref().and_then(|s| s.skip_target.as_deref()) {
                     body["skip_target"] = target.into();
                 }
@@ -179,15 +246,12 @@ impl Outbox {
             {
                 body["skip"] = target.as_str().into();
             }
-            let add = cmd.pending.front();
-            if let Some(add) = add {
-                body["add"] = serde_json::to_value(add)?;
-            }
             (
                 body,
-                add.map(|a| a.seq),
+                command.map(|c| matches!(c, Command::Add { .. })),
                 cmd.profile.clone(),
                 cmd.played.clone(),
+                cmd.consumed.clone(),
                 cmd.skip.clone(),
             )
         };
@@ -209,13 +273,12 @@ impl Outbox {
         if cmd.skip == skip {
             cmd.skip = None;
         }
+        cmd.consumed.retain(|id| !consumed.contains(id));
         cmd.sent_played = played;
         cmd.sent_profile = profile;
-        if let Some(seq) = seq {
-            snapshot.added = snapshot.error.is_none();
-            if cmd.pending.front().is_some_and(|a| a.seq == seq) {
-                cmd.pending.pop_front();
-            }
+        if let Some(added) = sent_add {
+            snapshot.added = added && snapshot.error.is_none();
+            cmd.pending.pop_front();
         }
         Ok(snapshot)
     }
