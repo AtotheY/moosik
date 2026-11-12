@@ -334,7 +334,14 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
                 .clicked();
         }
     };
-    if let Some(room) = app.room_snapshot().filter(|room| room.can_edit_queue) {
+    let room = app
+        .together
+        .snapshot()
+        .map(|room| (room, room.queue_stamp(app.together.session_id())));
+    let mut previous_order = None;
+    if let Some((room, stamp)) = room.filter(|(room, _)| room.can_edit_queue) {
+        let entries: Vec<_> = room.queue.iter().map(|e| e.entry as usize).collect();
+        previous_order = queue_edit::sync_order(Scope::Session, ui.ctx(), stamp.value(), &entries);
         queue_edit::toolbar(
             Scope::Session,
             ui,
@@ -366,10 +373,9 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         return;
     }
     ui.add_space(if page { 8.0 } else { 4.0 });
-    let Some(room) = app.together.snapshot() else {
+    let Some((room, stamp)) = room else {
         return;
     };
-    let stamp = room.queue_stamp(app.together.session_id());
     let signed_in = app.signed_in();
     let tracks: Vec<_> = room.queue.iter().map(|entry| entry.song.track()).collect();
     let box_response = with_avatar_inset(
@@ -384,8 +390,7 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         let list_id = ui.id();
         let list_top = ui.cursor().top();
         if room.can_edit_queue {
-            let entries: Vec<_> = room.queue.iter().map(|e| e.entry as usize).collect();
-            queue_edit::prepare(Scope::Session, ui, stamp.value(), &entries);
+            queue_edit::prepare_rows(Scope::Session, ui, previous_order);
         } else {
             super::song_drag::sync_list_order(ui.ctx(), list_id, stamp);
         }

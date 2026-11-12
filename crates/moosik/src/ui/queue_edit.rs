@@ -121,27 +121,51 @@ pub(crate) fn clear_selection(ctx: &Context) {
 }
 
 pub(crate) fn prepare(scope: Scope, ui: &mut Ui, stamp: u64, order: &[usize]) {
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(ui.id().with("queue-scope"), scope));
-    let mut s = state(scope, ui.ctx());
-    if s.stamp != stamp || s.order.as_slice() != order {
-        for index in s.order.iter() {
-            egui::Popup::close_id(ui.ctx(), ui.id().with(("ytm-queue-row-menu", *index)));
-        }
-        s = Selection {
+    let previous = sync_order(scope, ui.ctx(), stamp, order);
+    prepare_rows(scope, ui, previous);
+}
+
+/// Update the selection before any controls read it. Return the old occurrences
+/// so their popups can be closed in the UI that owns the rows.
+pub(crate) fn sync_order(
+    scope: Scope,
+    ctx: &Context,
+    stamp: u64,
+    order: &[usize],
+) -> Option<Arc<Vec<usize>>> {
+    let s = state(scope, ctx);
+    if s.stamp == stamp && s.order.as_slice() == order {
+        return None;
+    }
+    save(
+        scope,
+        ctx,
+        Selection {
             stamp,
             order: Arc::new(order.to_vec()),
             ..Default::default()
-        };
-        if egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).is_some_and(|d| d.scope == scope) {
-            egui::DragAndDrop::clear_payload(ui.ctx());
+        },
+    );
+    if egui::DragAndDrop::payload::<QueueDrag>(ctx).is_some_and(|d| d.scope == scope) {
+        egui::DragAndDrop::clear_payload(ctx);
+    }
+    Some(s.order)
+}
+
+pub(crate) fn prepare_rows(scope: Scope, ui: &mut Ui, previous: Option<Arc<Vec<usize>>>) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(ui.id().with("queue-scope"), scope));
+    if let Some(previous) = previous {
+        for index in previous.iter() {
+            egui::Popup::close_id(ui.ctx(), ui.id().with(("ytm-queue-row-menu", *index)));
         }
     }
+    let mut s = state(scope, ui.ctx());
     let focused = s.focus.is_some_and(|id| ui.memory(|m| m.has_focus(id)));
     let top = ui.cursor().top();
     let bottom = match scope {
         Scope::Session => {
-            top + (theme::ROW_HEIGHT + ui.spacing().item_spacing.y) * order.len().max(1) as f32
+            top + (theme::ROW_HEIGHT + ui.spacing().item_spacing.y) * s.order.len().max(1) as f32
         }
         Scope::Personal => ui.clip_rect().bottom(),
     };
@@ -165,7 +189,7 @@ pub(crate) fn prepare(scope: Scope, ui: &mut Ui, stamp: u64, order: &[usize]) {
                     || i.consume_key(Modifiers::NONE, Key::Backspace)
             }) {
                 s.action = Some(Action::Remove {
-                    stamp,
+                    stamp: s.stamp,
                     indices: s.selected.as_ref().clone(),
                 });
             }
@@ -614,6 +638,50 @@ mod tests {
             modifiers: Modifiers::NONE,
         }
     }
+    #[test]
+    fn session_toolbar_clear_uses_the_order_received_on_click_release() {
+        let ctx = Context::default();
+        theme::install_fonts(&ctx);
+        crate::icons::register(&ctx);
+        let draw = |events, stamp, order: &[usize]| {
+            let mut clear = egui::Pos2::ZERO;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(500.0, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let previous = sync_order(Scope::Session, &ctx, stamp, order);
+                    toolbar(
+                        Scope::Session,
+                        ui,
+                        &theme::Palette::dark(),
+                        "Session queue",
+                        false,
+                        |ui| {
+                            clear = ui.available_rect_before_wrap().right_top() + vec2(-15.0, 15.0);
+                        },
+                    );
+                    egui::Frame::new().show(ui, |ui| prepare_rows(Scope::Session, ui, previous));
+                },
+            )
+            .drop_without_applying_deltas();
+            clear
+        };
+        let clear = draw(vec![], 1, &[10]);
+        draw(
+            vec![egui::Event::PointerMoved(clear), pointer(clear, true)],
+            1,
+            &[10],
+        );
+        draw(vec![pointer(clear, false)], 2, &[10, 20]);
+        assert!(matches!(
+            take_action(Scope::Session, &ctx),
+            Some(Action::Clear { stamp: 2 })
+        ));
+    }
+
     #[test]
     fn dragging_selected_songs_keeps_the_group_and_can_append() {
         let ctx = Context::default();
