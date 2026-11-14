@@ -22,6 +22,7 @@ pub(crate) enum Event {
     Current,
     Finished,
     Failed(String),
+    InstallBlocked(&'static str),
     Relaunch,
 }
 static EVENTS: Mutex<VecDeque<Event>> = Mutex::new(VecDeque::new());
@@ -35,6 +36,8 @@ struct Native {
 thread_local! {
     static NATIVE: RefCell<Option<Native>> = const { RefCell::new(None) };
     static REQUEST: RefCell<Option<InstallRequest>> = const { RefCell::new(None) };
+    // A standard Sparkle alert may be waiting behind Moosik for the badge to focus it.
+    static NATIVE_OFFER: Cell<bool> = const { Cell::new(false) };
     static DIRECT_INSTALL: Cell<bool> = const { Cell::new(false) };
     static RELAUNCH: RefCell<Option<RcBlock<dyn Fn()>>> = const { RefCell::new(None) };
 }
@@ -49,21 +52,19 @@ fn emit(event: Event) {
 pub(crate) fn poll() -> Option<Event> {
     // Canceling a staged installer finishes its Sparkle cycle before its XPC
     // service exits. Allow that service to withdraw before looking for a new item.
-    let due = REQUEST.with(|r| r.borrow().as_ref().and_then(|r| r.check_at));
-    if let Some(due) = due {
-        let wait = due.saturating_duration_since(Instant::now());
-        if wait.is_zero() {
-            if !session_busy() {
-                REQUEST.with(|r| {
-                    if let Some(r) = r.borrow_mut().as_mut() {
-                        r.check_at = None;
-                    }
-                });
-                check();
+    let action =
+        REQUEST.with(|slot| next_check(&mut slot.borrow_mut(), Instant::now(), session_busy));
+    match action {
+        NextCheck::Idle => {}
+        NextCheck::Focus | NextCheck::Start => check(),
+        NextCheck::Wait(delay) => {
+            if let Some(ctx) = CONTEXT.get() {
+                ctx.request_repaint_after(delay);
             }
-        } else if let Some(ctx) = CONTEXT.get() {
-            ctx.request_repaint_after(wait);
         }
+        NextCheck::TimedOut => emit(Event::InstallBlocked(
+            "The updater is still busy. Try Update again in a moment.",
+        )),
     }
     EVENTS.lock().ok()?.pop_front()
 }
@@ -101,12 +102,59 @@ struct InstallRequest {
     check_at: Option<Instant>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum NextCheck {
+    Idle,
+    Focus,
+    Start,
+    Wait(Duration),
+    TimedOut,
+}
+
+// A background download can be in progress when the badge is clicked. Wait for
+// its cycle to finish, but never leave a click queued indefinitely.
+fn next_check(
+    slot: &mut Option<InstallRequest>,
+    now: Instant,
+    busy: impl FnOnce() -> bool,
+) -> NextCheck {
+    let Some(request) = slot else {
+        return NextCheck::Idle;
+    };
+    let Some(due) = request.check_at else {
+        return NextCheck::Idle;
+    };
+    if NATIVE_OFFER.get() {
+        *slot = None;
+        NextCheck::Focus
+    } else if due > now {
+        NextCheck::Wait(due - now)
+    } else if !busy() {
+        request.check_at = None;
+        NextCheck::Start
+    } else if now - due >= Duration::from_secs(30) {
+        *slot = None;
+        NextCheck::TimedOut
+    } else {
+        NextCheck::Wait(Duration::from_millis(500))
+    }
+}
+
+pub(crate) fn focus_active_install() -> bool {
+    if NATIVE_OFFER.get() || DIRECT_INSTALL.get() {
+        check(); // Sparkle brings its existing offer, progress or retry-relaunch window forward.
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) fn install_in_progress() -> bool {
     DIRECT_INSTALL.get() || REQUEST.with(|slot| slot.borrow().is_some())
 }
 
 pub(crate) fn install_latest(version: String) {
-    if install_in_progress() {
+    if focus_active_install() || install_in_progress() {
         return;
     }
     REQUEST.with(|slot| {
@@ -119,6 +167,10 @@ pub(crate) fn install_latest(version: String) {
     if let Some(ctx) = CONTEXT.get() {
         ctx.request_repaint();
     }
+}
+
+fn awaiting_check() -> bool {
+    REQUEST.with(|slot| slot.borrow().as_ref().is_some_and(|r| r.check_at.is_some()))
 }
 
 fn session_busy() -> bool {
@@ -138,14 +190,17 @@ enum OfferAction {
     Changed,
 }
 
-fn select_offer(request: &mut Option<InstallRequest>, version: &str) -> OfferAction {
+fn select_offer(request: &mut Option<InstallRequest>, version: &str, staged: bool) -> OfferAction {
     let Some(target) = request else {
         return OfferAction::Notify;
     };
+    if target.check_at.is_some() {
+        return OfferAction::Notify;
+    }
     if target.version == version {
         *request = None;
         OfferAction::Install
-    } else if !target.skipped_stale {
+    } else if staged && !target.skipped_stale && super::newer(&target.version, version) {
         target.skipped_stale = true;
         target.check_at = Some(Instant::now() + Duration::from_secs(2));
         OfferAction::SkipStale
@@ -165,13 +220,21 @@ extern "C" fn offer(
     reply: &Block<dyn Fn(isize)>,
 ) {
     let version: Retained<NSString> = unsafe { msg_send![item, versionString] };
-    let action = REQUEST.with(|slot| select_offer(&mut slot.borrow_mut(), &version.to_string()));
+    // SPUUserUpdateStage: 0 = not downloaded, 1 = downloaded, 2 = installing.
+    let stage: isize = unsafe { msg_send![state, stage] };
+    let action = REQUEST.with(|slot| {
+        select_offer(
+            &mut slot.borrow_mut(),
+            &version.to_string(),
+            matches!(stage, 1 | 2),
+        )
+    });
     match action {
         OfferAction::SkipStale => reply.call((0,)),
         OfferAction::Changed => {
             reply.call((2,));
-            emit(Event::Failed(
-                "The release feed changed. Click Update to check again.".into(),
+            emit(Event::InstallBlocked(
+                "The release feed changed. Click Update to check again.",
             ));
         }
         action => {
@@ -232,11 +295,15 @@ fn user_driver_class() -> Result<&'static AnyClass> {
     }))
 }
 extern "C" fn showing(_: &AnyObject, _: Sel, _: Bool, item: &AnyObject, _: &AnyObject) {
+    NATIVE_OFFER.set(true);
     found(item);
 }
 extern "C" fn current(_: &AnyObject, _: Sel, _: &AnyObject) {
-    REQUEST.with(|slot| slot.borrow_mut().take());
-    emit(Event::Current);
+    // A background result doesn't answer an install check we haven't started.
+    if !awaiting_check() {
+        REQUEST.with(|slot| slot.borrow_mut().take());
+        emit(Event::Current);
+    }
 }
 extern "C" fn failed(_: &AnyObject, _: Sel, _: &AnyObject, error: &NSError) {
     // Sparkle also reports SUNoUpdateError after the ordinary "current" callback.
@@ -244,10 +311,15 @@ extern "C" fn failed(_: &AnyObject, _: Sel, _: &AnyObject, error: &NSError) {
         return;
     }
     // Sparkle presents manual errors itself; the app records the status without a second alert.
+    tracing::warn!(code = error.code(), reason = %error.localizedDescription(), "Sparkle update failed");
+    if awaiting_check() {
+        return; // The queued interactive check gets its own result.
+    }
     REQUEST.with(|slot| slot.borrow_mut().take());
     emit(Event::Failed(error.localizedDescription().to_string()));
 }
 extern "C" fn finished(_: &AnyObject, _: Sel, _: &AnyObject, _: isize, _: *const NSError) {
+    NATIVE_OFFER.set(false);
     DIRECT_INSTALL.set(false);
     REQUEST.with(|r| {
         if r.borrow().as_ref().is_some_and(|r| r.check_at.is_none()) {
@@ -428,6 +500,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_check_cannot_consume_a_queued_install() {
+        install_latest("0.1.66".into());
+        let obj = NSObject::new();
+        // A launch check can still offer its staged item, or end empty or with an error.
+        REQUEST.with(|slot| {
+            assert_eq!(
+                select_offer(&mut slot.borrow_mut(), "0.1.60", true),
+                OfferAction::Notify
+            );
+        });
+        current(&obj, sel!(updaterDidNotFindUpdate:), &obj);
+        let error = unsafe {
+            NSError::errorWithDomain_code_userInfo(&NSString::from_str("fixture"), 1, None)
+        };
+        failed(&obj, sel!(updater:didAbortWithError:), &obj, &error);
+        finished(
+            &obj,
+            sel!(updater:didFinishUpdateCycleForUpdateCheck:error:),
+            &obj,
+            0,
+            std::ptr::null(),
+        );
+        REQUEST.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let now = Instant::now();
+            assert!(matches!(
+                next_check(&mut slot, now, || true),
+                NextCheck::Wait(_)
+            ));
+            assert_eq!(next_check(&mut slot, now, || false), NextCheck::Start);
+            assert_eq!(
+                select_offer(&mut slot, "0.1.66", false),
+                OfferAction::Install
+            );
+        });
+    }
+
+    #[test]
+    fn busy_updater_releases_the_request_for_retry_or_focuses_a_pending_offer() {
+        let now = Instant::now();
+        install_latest("0.1.66".into());
+        REQUEST.with(|s| {
+            assert_eq!(
+                next_check(&mut s.borrow_mut(), now + Duration::from_secs(31), || true),
+                NextCheck::TimedOut
+            )
+        });
+        assert!(!install_in_progress());
+        install_latest("0.1.66".into());
+        NATIVE_OFFER.set(true);
+        REQUEST.with(|s| {
+            assert_eq!(
+                next_check(&mut s.borrow_mut(), Instant::now(), || true),
+                NextCheck::Focus
+            )
+        });
+        assert!(!install_in_progress());
+        NATIVE_OFFER.set(false);
+    }
+
+    #[test]
     fn discard_one_superseded_installer_and_only_accept_the_refreshed_version() {
         let request = || {
             Some(InstallRequest {
@@ -436,14 +569,48 @@ mod tests {
                 check_at: None,
             })
         };
+        // A changed live offer is never marked skipped, nor is a newer staged release.
+        for (version, staged) in [("0.1.1", false), ("0.1.3", true)] {
+            assert_eq!(
+                select_offer(&mut request(), version, staged),
+                OfferAction::Changed
+            );
+        }
         let mut target = request();
-        assert_eq!(select_offer(&mut target, "0.1.1"), OfferAction::SkipStale);
+        assert_eq!(
+            select_offer(&mut target, "0.1.1", true),
+            OfferAction::SkipStale
+        );
         assert!(target.as_ref().unwrap().check_at.is_some());
-        assert_eq!(select_offer(&mut target, "0.1.2"), OfferAction::Install);
+        assert_eq!(
+            next_check(&mut target, Instant::now() + Duration::from_secs(3), || {
+                false
+            }),
+            NextCheck::Start
+        );
+        assert_eq!(
+            select_offer(&mut target, "0.1.2", false),
+            OfferAction::Install
+        );
         assert!(target.is_none());
         let mut target = request();
-        assert_eq!(select_offer(&mut target, "0.1.1"), OfferAction::SkipStale);
-        assert_eq!(select_offer(&mut target, "0.1.1"), OfferAction::Changed);
-        assert_eq!(select_offer(&mut target, "0.1.1"), OfferAction::Notify);
+        assert_eq!(
+            select_offer(&mut target, "0.1.1", true),
+            OfferAction::SkipStale
+        );
+        assert_eq!(
+            next_check(&mut target, Instant::now() + Duration::from_secs(3), || {
+                false
+            }),
+            NextCheck::Start
+        );
+        assert_eq!(
+            select_offer(&mut target, "0.1.1", true),
+            OfferAction::Changed
+        );
+        assert_eq!(
+            select_offer(&mut target, "0.1.1", true),
+            OfferAction::Notify
+        );
     }
 }

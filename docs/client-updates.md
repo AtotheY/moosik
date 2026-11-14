@@ -15,6 +15,11 @@ installer, verifies its checksum and restarts Moosik. Portable builds offer the 
 On macOS, Sparkle can prepare the signed update in the background and the button restarts
 into it if it still matches the published appcast. A superseded installer is discarded before
 Sparkle fetches the current release. Sparkle handles authorization and any updates that need its native dialog.
+If Sparkle is still busy, Moosik keeps the click queued briefly and tells you if you need
+to retry. Clicking Update again brings an existing Sparkle offer or installer window forward.
+If an older Mac version cannot update itself, quit Moosik, download the DMG from the
+[latest release](https://github.com/AtotheY/moosik/releases/latest), and use Finder to
+replace Moosik in Applications. Reopen that copy.
 Manual checks are available in **Settings → About → Updates**.
 
 Before the first release is published, a manual check shows “Updates aren’t
