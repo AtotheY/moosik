@@ -2949,8 +2949,18 @@ impl App {
     /// Every install action resolves the release again, including manual installs.
     pub(crate) fn activate_update(&mut self) {
         #[cfg(target_os = "macos")]
-        if crate::update::macos::install_in_progress() {
-            return;
+        if self.update.native {
+            if crate::update::macos::focus_active_install() {
+                return;
+            }
+            if crate::update::macos::install_in_progress() {
+                self.toast("Waiting for the updater…");
+                return;
+            }
+            if !self.update.refreshing {
+                self.toast("Checking for the latest release…");
+                tracing::info!("macOS update requested");
+            }
         }
         if self.update.progress.is_none() && !self.update.refreshing {
             self.update.install_requested = true;
@@ -3004,6 +3014,7 @@ impl App {
                 });
             }
             Err(error) => {
+                tracing::warn!(%error, "could not refresh the release for installation");
                 self.update.error = Some(error.clone());
                 self.toast_error(&failure_text("Could not check for updates", &error));
             }
@@ -10375,6 +10386,11 @@ impl eframe::App for App {
                     self.update.error = None;
                 }
                 Event::Finished => self.update.checking = false,
+                Event::InstallBlocked(message) => {
+                    tracing::warn!(reason = message, "macOS update could not start");
+                    self.update.error = Some(message.into());
+                    self.toast_error(message);
+                }
                 Event::Failed(error) => {
                     self.update.checking = false;
                     self.update.not_published = false;

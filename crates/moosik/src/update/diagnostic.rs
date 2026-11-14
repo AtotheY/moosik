@@ -37,6 +37,7 @@ impl eframe::App for Probe {
                 }
                 Event::ShowOffer => {}
                 Event::Current => self.status = "Up to date".into(),
+                Event::InstallBlocked(message) => self.status = message.into(),
                 Event::Failed(error) => self.status = error,
                 Event::Finished => {}
                 Event::Relaunch => {
@@ -65,6 +66,9 @@ impl eframe::App for Probe {
                 )
                 && self.refresh.is_none()
             {
+                if macos::focus_active_install() {
+                    return;
+                }
                 let url = macos::feed_url().unwrap();
                 let ctx = ui.ctx().clone();
                 let (tx, rx) = std::sync::mpsc::channel();
