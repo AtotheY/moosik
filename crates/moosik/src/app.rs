@@ -1033,11 +1033,7 @@ pub(crate) fn build_local_playlist(
         author_id: None,
         year: None,
         duration_text: None,
-        track_count: Some(format!(
-            "{} {}",
-            tracks.len(),
-            if tracks.len() == 1 { "track" } else { "tracks" }
-        )),
+        track_count: Some(local_track_count(tracks.len())),
         thumbnail,
         editable: lp.rule.is_none(),
         in_library: false,
@@ -1048,6 +1044,11 @@ pub(crate) fn build_local_playlist(
         source: crate::model::PlaylistSource::Local,
         extras: None,
     }
+}
+
+fn local_track_count(count: usize) -> String {
+    let unit = if count == 1 { "track" } else { "tracks" };
+    format!("{count} {unit}")
 }
 
 /// A local playlist as the `PlaylistRef` the sidebar and Library page already know how to
@@ -1066,14 +1067,11 @@ fn local_playlist_ref(lp: &crate::local_playlists::LocalPlaylist) -> crate::mode
         track_count: Some(if lp.rule.is_some() {
             "Smart playlist".into()
         } else {
-            format!(
-                "{} tracks",
-                if lp.is_private() {
-                    lp.tracks.len()
-                } else {
-                    lp.track_paths.len()
-                }
-            )
+            local_track_count(if lp.is_private() {
+                lp.tracks.len()
+            } else {
+                lp.track_paths.len()
+            })
         }),
         thumbnail: lp
             .tracks
@@ -8706,33 +8704,21 @@ impl App {
                     }
                     return;
                 }
-                if playlist_id.starts_with("private:") {
+                if let Some(index) = self
+                    .local_playlists
+                    .iter()
+                    .position(|p| p.id == playlist_id)
+                {
                     let mut lists = self.local_playlists.clone();
-                    if let Some(lp) = lists.iter_mut().find(|p| p.id == playlist_id) {
-                        lp.added_ms.remove(&video_id);
-                        lp.tracks.retain(|t| t.id != video_id);
+                    let playlist = &mut lists[index];
+                    playlist.added_ms.remove(&video_id);
+                    if playlist.is_private() {
+                        playlist.tracks.retain(|t| t.id != video_id);
+                    } else {
+                        let path = std::path::Path::new(&video_id);
+                        playlist.track_paths.retain(|p| p != path);
                     }
                     self.persist_private_lists(lists);
-                    return;
-                }
-                if self.is_local_playlist(&playlist_id) {
-                    // `video_id` is the track's own canonical path, per `Track.local_path`'s
-                    // own doc comment — the same string `local_playlist_as_playlist` gave this
-                    // row as its `set_video_id` so this action could even be offered.
-                    let path = std::path::PathBuf::from(&video_id);
-                    if let Some(lp) = self
-                        .local_playlists
-                        .iter_mut()
-                        .find(|p| p.id == playlist_id)
-                    {
-                        lp.added_ms.remove(&video_id);
-                        lp.track_paths.retain(|p| p != &path);
-                    }
-                    if let Err(e) = crate::local_playlists::save(&self.local_playlists) {
-                        tracing::warn!(error = %format!("{e:#}"), "could not save local playlists");
-                    }
-                    self.remove_playlist_row(&playlist_id, &set_video_id);
-                    self.resync_local_playlists();
                     return;
                 }
                 if !self.signed_in() {
