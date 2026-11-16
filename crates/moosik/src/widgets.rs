@@ -834,6 +834,21 @@ pub struct RowMenu<'a> {
     pub queue_index: Option<usize>,
 }
 
+impl<'a> RowMenu<'a> {
+    fn removal_target(&self) -> Option<(&'a str, &'a str)> {
+        let id = self.playlist_id?;
+        let item = self.track.set_video_id.as_deref()?;
+        let can_remove = if id.starts_with("spotify:playlist:") {
+            self.track.is_spotify() && crate::spotify::is_signed_in()
+        } else {
+            id.starts_with("private:")
+                || id.starts_with("local:")
+                || self.signed_in && !self.track.is_spotify()
+        };
+        can_remove.then_some((id, item))
+    }
+}
+
 /// The fields a [`track_row`] shows, grouped so the function stays under clippy's arity limit
 /// and the call sites read like a row.
 pub struct TrackRow<'a> {
@@ -2526,11 +2541,7 @@ fn track_row_inner<'a>(
     let spotify_row = menu.as_ref().filter(|menu| menu.track.is_spotify());
     let spotify_actions =
         spotify_row.filter(|_| show_rating && add_to.is_none() && crate::spotify::is_signed_in());
-    let spotify_removal = spotify_actions.and_then(|menu| {
-        menu.playlist_id
-            .filter(|id| id.starts_with("spotify:playlist:"))
-            .zip(menu.track.set_video_id.as_deref())
-    });
+    let removal = menu.as_ref().and_then(RowMenu::removal_target);
     let show_rating = show_rating && spotify_row.is_none();
     let mut link = None;
     // `click_and_drag`, not `click`: a row inside the open playlist's own editable track list
@@ -2618,15 +2629,7 @@ fn track_row_inner<'a>(
     // and a readable title in a 300pt rail.
     // Wide enough for the pair: two 30pt buttons at offsets 50/18 span 62pt, and anything
     // narrower paints the Like button over the title's tail.
-    let spotify_action_w = if spotify_actions.is_some() {
-        if spotify_removal.is_some() {
-            72.0
-        } else {
-            36.0
-        }
-    } else {
-        0.0
-    };
+    let spotify_action_w = if spotify_actions.is_some() { 36.0 } else { 0.0 };
     let thumb_w = if add_to.is_some() {
         ADD_W
     } else if spotify_action_w > 0.0 {
@@ -2669,19 +2672,29 @@ fn track_row_inner<'a>(
     } else {
         rect.right() - right_pad - duration_w
     };
-    let session_track = menu
+    let session = session_queue_host(ui.ctx());
+    let queue_track = menu
         .as_ref()
-        .filter(|m| show_rating && add_to.is_none() && m.track.can_share_in_session())
-        .filter(|_| session_queue_host(ui.ctx()).is_some())
+        .filter(|m| {
+            (session.is_some() && show_rating && add_to.is_none() && m.track.can_share_in_session())
+                || (removal.is_some() && session != Some(false))
+        })
         .map(|m| m.track);
-    let session_slot = session_track.map(|_| {
-        let offset = if has_thumbs { 82.0 } else { 18.0 };
-        Rect::from_center_size(
-            egui::pos2(thumb_right - offset, rect.center().y),
-            vec2(30.0, 30.0),
-        )
-    });
-    let text_right = session_slot.map_or(text_right, |slot| text_right.min(slot.left() - 4.0));
+    let hover_right = if spotify_actions.is_some() {
+        spotify_actions_right - spotify_action_w
+    } else if has_thumbs {
+        thumb_right - 64.0
+    } else {
+        thumb_right
+    };
+    let hover_slot =
+        |right| Rect::from_center_size(egui::pos2(right - 18.0, rect.center().y), vec2(30.0, 30.0));
+    let queue_slot = queue_track.map(|_| hover_slot(hover_right));
+    let removal_slot =
+        removal.map(|_| hover_slot(hover_right - if queue_slot.is_some() { 32.0 } else { 0.0 }));
+    let text_right = removal_slot
+        .or(queue_slot)
+        .map_or(text_right, |slot| text_right.min(slot.left() - 4.0));
 
     // A narrow row — the open queue on a small window — compresses instead of starving: the
     // number column and the art yield first, and what they give back is the title's room. A
@@ -2736,7 +2749,8 @@ fn track_row_inner<'a>(
     let on_child_slot = [
         subtitle_slot,
         spotify_slot,
-        session_slot,
+        removal_slot,
+        queue_slot,
         queue_remove.map(|(_, rect)| rect),
     ]
     .into_iter()
@@ -3194,29 +3208,48 @@ fn track_row_inner<'a>(
         link = None;
     }
     let mut action = None;
-    if let Some((track, slot)) = session_track.zip(session_slot) {
-        let button = ui.interact(slot, row_id.with("session-add"), Sense::click());
-        let label = "Add to session queue";
-        button.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    if let (Some((playlist_id, item)), Some(slot), Some(m)) = (removal, removal_slot, menu.as_ref())
+        && row_hover_button(
+            ui,
+            palette,
+            slot,
+            row_id.with("playlist-remove"),
+            Icon::ListX,
+            "Remove from playlist",
+            over,
+        )
+        .clicked()
+    {
+        action = Some(super::ui::RowAction::RemoveFromPlaylist {
+            playlist_id: playlist_id.to_owned(),
+            video_id: m.track.video_id.clone(),
+            set_video_id: item.to_owned(),
         });
-        if ui.is_rect_visible(slot) && (over || button.hovered() || button.has_focus()) {
-            if let Some(fill) = shell_state_fill(ui, palette, &button) {
-                ui.painter().circle_filled(slot.center(), 15.0, fill);
-            }
-            Icon::ListPlus
-                .image(mix(palette.secondary, palette.text, lit(ui, &button)), 17.0)
-                .paint_at(
-                    ui,
-                    Rect::from_center_size(slot.center() + press_offset(&button), vec2(17.0, 17.0)),
-                );
+    }
+    if let Some((track, slot)) = queue_track.zip(queue_slot) {
+        let shared = session.is_some() && track.can_share_in_session();
+        let label = if shared {
+            "Add to session queue"
+        } else {
+            "Add to queue"
+        };
+        if row_hover_button(
+            ui,
+            palette,
+            slot,
+            row_id.with("queue-add"),
+            Icon::ListPlus,
+            label,
+            over,
+        )
+        .clicked()
+        {
+            action = Some(if shared {
+                super::ui::RowAction::AddToSession(track.clone())
+            } else {
+                super::ui::RowAction::AddToQueue(track.clone())
+            });
         }
-        if button.clicked() {
-            action = Some(crate::ui::RowAction::AddToSession(track.clone()));
-        }
-        button
-            .on_hover_text(label)
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
     }
     if let (Some(menu), Some(slot)) = (spotify_actions, spotify_slot)
         && ui.is_rect_visible(slot)
@@ -3232,15 +3265,6 @@ fn track_row_inner<'a>(
             action = Some(super::ui::RowAction::SetSpotifyLiked {
                 track: menu.track.clone(),
                 liked: !menu.track.in_library,
-            });
-        }
-        if let Some((playlist_id, uid)) = spotify_removal
-            && spotify_remove_button(&mut actions, palette).clicked()
-        {
-            action = Some(super::ui::RowAction::RemoveFromPlaylist {
-                playlist_id: playlist_id.to_owned(),
-                video_id: menu.track.video_id.clone(),
-                set_video_id: uid.to_owned(),
             });
         }
     }
@@ -3313,6 +3337,38 @@ fn track_row_inner<'a>(
         },
         custom_slot,
     )
+}
+
+fn row_hover_button(
+    ui: &mut Ui,
+    palette: &Palette,
+    slot: Rect,
+    id: egui::Id,
+    icon: Icon,
+    label: &str,
+    row_hovered: bool,
+) -> egui::Response {
+    let button = ui.interact(slot, id, Sense::click());
+    button.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if ui.is_rect_visible(slot) && (row_hovered || button.hovered() || button.has_focus()) {
+        if let Some(fill) = shell_state_fill(ui, palette, &button) {
+            ui.painter().circle_filled(slot.center(), 15.0, fill);
+        }
+        if button.has_focus() {
+            ui.painter()
+                .circle_stroke(slot.center(), 14.0, egui::Stroke::new(1.0, palette.accent));
+        }
+        icon.image(mix(palette.secondary, palette.text, lit(ui, &button)), 17.0)
+            .paint_at(
+                ui,
+                Rect::from_center_size(slot.center() + press_offset(&button), vec2(17.0, 17.0)),
+            );
+    }
+    button
+        .on_hover_text(label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The room a row's + button takes, left of the duration.
@@ -3616,16 +3672,7 @@ fn row_menu_with_button(
                 })
                 .collect();
             let spotify_signed_in = spotify && crate::spotify::is_signed_in();
-            let removable = menu
-                .playlist_id
-                .zip(t.set_video_id.as_deref())
-                .filter(|(id, _)| {
-                    if id.starts_with("spotify:playlist:") {
-                        spotify_signed_in
-                    } else {
-                        id.starts_with("private:") || !spotify
-                    }
-                });
+            let removable = menu.removal_target();
             // A download item shows for every YouTube song, so the block is there whenever the
             // song is one, or has a library or playlist move to offer.
             if token.is_some()
