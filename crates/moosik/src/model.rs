@@ -82,6 +82,8 @@ pub struct Track {
     /// captured card, and the thumbnail URLs arrive square even for videos, so the kind is
     /// the only signal that survives.
     pub wide: bool,
+    /// This queue occurrence was added as a YouTube upload to watch in a room.
+    pub room_video: bool,
     /// A chart rank (`"1"`), from the row's `customIndexColumn`. Only chart playlists carry
     /// one; everywhere else this is `None` and the row shows its position instead.
     pub rank: Option<String>,
@@ -1644,6 +1646,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,

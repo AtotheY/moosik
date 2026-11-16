@@ -3920,12 +3920,7 @@ impl App {
     /// and reloads the current track as video; closing hands playback back to the audio resolver
     /// — both at the current position.
     pub(crate) fn toggle_video(&mut self) {
-        if self
-            .now
-            .track
-            .as_ref()
-            .is_some_and(|t| self.watching_video(&t.video_id))
-        {
+        if self.now.track.as_ref().is_some_and(|t| t.room_video) {
             // Browsing the queue changes only this listener's layout, never the room clock.
             self.video_open = !self.video_open;
             return;
@@ -3981,8 +3976,13 @@ impl App {
             ?start_at,
             "starting track"
         );
-        self.leave_video_on_track_change(&track.video_id);
-        let room_video = self.watching_video(&track.video_id);
+        let room_video = track.room_video;
+        let previous_video = self.now.track.as_ref().filter(|t| t.room_video);
+        if room_video && previous_video.is_none_or(|t| t.video_id != track.video_id) {
+            self.video_open = true;
+        } else if !room_video && previous_video.is_some() {
+            self.video_open = false;
+        }
         self.stall.on_load(&track.video_id, start_at);
         if let PlaybackHandle::Mpv(mpv) = &handle
             && !track.is_spotify()
@@ -4134,12 +4134,7 @@ impl App {
     }
 
     pub(crate) fn navigate(&mut self, route: Route) {
-        if self
-            .now
-            .track
-            .as_ref()
-            .is_some_and(|t| self.watching_video(&t.video_id))
-        {
+        if self.now.track.as_ref().is_some_and(|t| t.room_video) {
             self.video_open = false;
         }
         if self.history.push(route.canonical()) {
@@ -7647,7 +7642,7 @@ impl App {
                         "playback failed"
                     );
                     let was_video = self.play_is_video;
-                    let room_video = self.watching_video(&track.video_id);
+                    let room_video = track.room_video;
                     self.play_is_video = false;
                     self.now = NowPlaying {
                         track: Some(track),
@@ -11472,6 +11467,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,

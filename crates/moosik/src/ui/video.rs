@@ -55,21 +55,35 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         );
         response.clicked()
     };
+    // A double-click changes only the local window. Wait until the second click has
+    // been ruled out before sending a single click to the host's transport.
+    let track_id = app.now.track.as_ref().map(|t| t.video_id.as_str());
+    let key = surface.id.with(("play-pause", track_id));
+    let frame = ui.ctx().cumulative_frame_nr();
+    let now = ui.input(|i| i.time);
+    let pending = ui.data_mut(|d| d.remove_temp::<(f64, u64)>(key));
     if toggle || surface.double_clicked() {
         if full {
             app.fs_exit(ui.ctx());
         } else {
             app.fs_enter(ui.ctx());
         }
-    } else if surface.clicked()
-        && !app.following()
-        && !app
-            .now
-            .track
-            .as_ref()
-            .is_some_and(|t| app.watching_video(&t.video_id))
-    {
-        app.toggle_playback();
+    } else if !app.following() {
+        let deadline = if surface.clicked() {
+            Some(now + ui.ctx().options(|o| o.input_options.max_double_click_delay))
+        } else {
+            pending
+                .filter(|(_, seen)| frame.saturating_sub(*seen) <= 1)
+                .map(|(at, _)| at)
+        };
+        if let Some(at) = deadline {
+            if now >= at {
+                app.toggle_playback();
+            } else {
+                ui.data_mut(|d| d.insert_temp(key, (at, frame)));
+                ui.ctx().request_repaint_after_secs((at - now) as f32);
+            }
+        }
     }
 }
 

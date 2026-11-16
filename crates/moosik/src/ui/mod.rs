@@ -4052,6 +4052,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,

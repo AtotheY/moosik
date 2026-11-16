@@ -32,21 +32,32 @@ impl Song {
     }
 
     pub(crate) fn track(&self) -> Track {
-        crate::listening::Metadata {
+        let room_video = self.is_watch_video();
+        let mut track = crate::listening::Metadata {
             id: self.id.clone(),
             title: self.title.clone(),
-            artists: if self.is_watch_video() {
+            artists: if room_video {
                 vec![("YouTube".into(), None)]
             } else if self.artist.is_empty() {
                 Vec::new()
             } else {
                 vec![(self.artist.clone(), None)]
             },
-            video: self.is_watch_video() || self.audio_alternative,
+            video: room_video || self.audio_alternative,
             artwork: Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.id)),
             ..Default::default()
         }
-        .to_track()
+        .to_track();
+        track.room_video = room_video;
+        track
+    }
+
+    fn credit(track: &Track) -> String {
+        if track.room_video {
+            format!("https://www.youtube.com/watch?v={}", track.video_id)
+        } else {
+            track.artist_line().chars().take(128).collect()
+        }
     }
 }
 
@@ -71,7 +82,6 @@ struct Session {
 
 #[derive(Default)]
 struct Watch {
-    video: Option<String>,
     guest_paused: bool,
     lookup: Option<Receiver<Song>>,
 }
@@ -384,28 +394,11 @@ impl App {
         self.together.snapshot()
     }
 
-    pub(crate) fn watching_video(&self, id: &str) -> bool {
-        self.together
-            .session
-            .as_ref()
-            .and_then(|s| s.watch.video.as_deref())
-            == Some(id)
-    }
-
     pub(super) fn watch_starts_paused(&self) -> bool {
         self.together
             .session
             .as_ref()
             .is_some_and(|s| s.publish.is_none() && s.watch.guest_paused)
-    }
-
-    pub(super) fn leave_video_on_track_change(&mut self, id: &str) {
-        if let Some(s) = &mut self.together.session
-            && s.watch.video.as_ref().is_some_and(|v| v != id)
-        {
-            s.watch.video = None;
-            self.video_open = false;
-        }
     }
 
     pub(crate) fn queue_video_link(&mut self, raw: &str) -> bool {
@@ -443,10 +436,10 @@ impl App {
         let song = Song {
             id: track.video_id.clone(),
             title: track.title.chars().take(128).collect(),
-            artist: track.artist_line().chars().take(128).collect(),
+            artist: Song::credit(track),
             position: 0.0,
             playing: false,
-            audio_alternative: track.wide,
+            audio_alternative: track.wide && !track.room_video,
             skip_target: None,
         };
         if !track.can_share_in_session() || !song.valid() {
@@ -551,10 +544,8 @@ impl App {
         };
         let song = &snapshot.queue[index].song;
         let track = song.track();
-        let was_watching = session.watch.video.is_some();
-        session.watch.video = song.is_watch_video().then(|| song.id.clone());
-        if was_watching || session.watch.video.is_some() {
-            self.video_open = session.watch.video.is_some();
+        if track.room_video {
+            self.video_open = true;
         }
         // Older rooms only understand a FIFO acknowledgement. A host who keeps skipped songs
         // can still play the choice immediately there without discarding anyone's contributions.
@@ -779,20 +770,12 @@ impl App {
                     .map(|track| Song {
                         id: track.video_id.clone(),
                         title: track.title.chars().take(128).collect(),
-                        artist: if session.watch.video.as_deref() == Some(&track.video_id) {
-                            moosik_resolve::VideoId::new(&track.video_id)
-                                .unwrap()
-                                .video_url()
-                        } else {
-                            track.artist_line().chars().take(128).collect()
-                        },
+                        artist: Song::credit(track),
                         position: position.clamp(0.0, 604800.0),
-                        audio_alternative: track.wide
-                            && !self.play_is_video
-                            && session.watch.video.is_none(),
+                        audio_alternative: track.wide && !self.play_is_video && !track.room_video,
                         skip_target: Some(skip_target(self.play_generation, self.playback_choice)),
                         playing: self.playback_started
-                            && !(session.watch.video.is_some()
+                            && !(track.room_video
                                 && self.player.as_ref().is_some_and(|p| {
                                     let sample = p.listening_sample();
                                     sample.buffering || sample.seeking
@@ -872,14 +855,12 @@ impl App {
                         0.0
                     };
                 let watch = song.is_watch_video();
-                let changed_mode = watch != self.watching_video(&song.id);
                 self.together.session.as_mut().unwrap().watch.guest_paused = !song.playing;
-                if changed_mode
-                    || self
-                        .now
-                        .track
-                        .as_ref()
-                        .is_none_or(|t| t.video_id != song.id)
+                if self
+                    .now
+                    .track
+                    .as_ref()
+                    .is_none_or(|t| t.video_id != song.id || t.room_video != watch)
                     || (!self.playback_started
                         && !self.now.resolving
                         && song.playing
@@ -890,8 +871,6 @@ impl App {
                     self.q
                         .restore_session(vec![song.track()], Some(0), None, false, None);
                     self.q.set_resume(Some((0, position)));
-                    self.together.session.as_mut().unwrap().watch.video =
-                        watch.then(|| song.id.clone());
                     self.video_open = watch;
                     if song.playing || watch {
                         self.play_index_restore(0);
@@ -937,6 +916,35 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previous_keeps_the_video_choice_for_each_occurrence_of_an_upload() {
+        let id = moosik_resolve::VideoId::new("abcdefghijk").unwrap();
+        let upload = Song::upload(&id, Some("Upload"));
+        let audio = Song {
+            artist: "Artist".into(),
+            audio_alternative: true,
+            ..upload.clone()
+        };
+        let mut queue = PlayQueue::new(1);
+        queue.restore_session(
+            vec![upload.track(), audio.track()],
+            Some(0),
+            None,
+            false,
+            None,
+        );
+        queue.remember_current();
+        queue.set_current(1);
+        assert!(!queue.current_track().unwrap().room_video);
+        let Some(crate::queue::Rewind::WithinQueue { index, .. }) = queue.rewind() else {
+            panic!("Previous should restore the earlier occurrence");
+        };
+        let earlier =
+            crate::playback::PersistedTrack::from_track(queue.get(index).unwrap()).into_track();
+        assert!(earlier.room_video);
+        assert_eq!(Song::credit(&earlier), upload.artist);
+    }
 
     #[test]
     fn a_room_cannot_open_local_paths_or_seek_to_invalid_positions() {

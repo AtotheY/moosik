@@ -264,7 +264,7 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
             .inner
         })
         .inner;
-    if !app.video_open && app.watching_video(&track.video_id) {
+    if !app.video_open && track.room_video {
         ui.add_space(4.0);
         if widgets::outline_button(ui, &app.palette, "Watch video").clicked() {
             app.toggle_video();

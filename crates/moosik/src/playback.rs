@@ -70,6 +70,8 @@ pub struct PersistedTrack {
     pub thumbnail: Option<String>,
     #[serde(default)]
     pub wide: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub room_video: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<String>,
 }
@@ -92,6 +94,7 @@ impl PersistedTrack {
             duration: t.duration,
             thumbnail: t.thumbnail.as_deref().map(str::to_owned),
             wide: t.wide,
+            room_video: t.room_video,
             local_path: t
                 .local_path
                 .as_deref()
@@ -123,6 +126,7 @@ impl PersistedTrack {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: self.room_video,
             playlist_added_ms: None,
             set_video_id: None,
             wide: self.wide,
@@ -206,6 +210,7 @@ mod tests {
             in_library: true,
             library_add: Some(Arc::from("add-token")),
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: Some(Arc::from("set-id")),
             wide: true,

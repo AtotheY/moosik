@@ -774,6 +774,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn split_video_load_selects_the_external_audio_even_with_a_comma_in_its_url() {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        super::restore_c_locale();
+        let mpv = libmpv2::Mpv::with_initializer(|init| {
+            init.set_property("ao", "null")?;
+            init.set_property("terminal", "no")
+        })
+        .unwrap();
+        let audio = "av://lavfi:sine=frequency=440,volume=0.1";
+        load_video(&mpv, "av://lavfi:anullsrc", Some(audio), 0.0, None, true).unwrap();
+        let until = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = mpv.get_property::<i64>("track-list/count").unwrap_or(0);
+            if (0..count).any(|i| {
+                let prop = |name: &str| format!("track-list/{i}/{name}");
+                mpv.get_property::<String>(&prop("external-filename"))
+                    .ok()
+                    .as_deref()
+                    == Some(audio)
+                    && mpv.get_property::<bool>(&prop("selected")).unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "mpv did not select the separate audio URL"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     /// The lines mpv really prints for a stream it cannot open and a missing local file: no IP,
     /// no signature and no username may survive into the log.
     #[test]

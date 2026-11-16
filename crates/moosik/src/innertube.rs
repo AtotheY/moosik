@@ -1067,6 +1067,7 @@ fn parse_search_row(row: &Value) -> Option<Entry> {
                 // Only playlist rows carry one; only it makes "Remove from playlist"
                 // offerable, so a wrong assumption about its location disables the button
                 // rather than corrupting a playlist.
+                room_video: false,
                 playlist_added_ms: None,
                 set_video_id: row
                     .pointer("/playlistItemData/playlistSetVideoId")
@@ -2028,6 +2029,7 @@ fn parse_watch_row(row: &Value) -> Option<Track> {
         in_library: toggle.as_ref().map(|t| t.in_library).unwrap_or(false),
         library_add: toggle.as_ref().and_then(|t| t.add.clone()),
         library_remove: toggle.as_ref().and_then(|t| t.remove.clone()),
+        room_video: false,
         playlist_added_ms: None,
         set_video_id: None,
         thumbnail: thumbnail(row),
@@ -2487,6 +2489,7 @@ fn parse_artist_songs(shelf: &Value, artist_name: &str, artist_id: &str) -> Vec<
                 in_library: toggle.as_ref().map(|t| t.in_library).unwrap_or(false),
                 library_add: toggle.as_ref().and_then(|t| t.add.clone()),
                 library_remove: toggle.as_ref().and_then(|t| t.remove.clone()),
+                room_video: false,
                 playlist_added_ms: None,
                 set_video_id: None,
                 // The whole reason this parser exists.
@@ -2732,6 +2735,7 @@ fn parse_card(item: &Value) -> Option<Entry> {
                 in_library: false,
                 library_add: None,
                 library_remove: None,
+                room_video: false,
                 playlist_added_ms: None,
                 set_video_id: None,
                 thumbnail: thumb,
