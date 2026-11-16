@@ -94,6 +94,7 @@ impl Metrics {
 /// What the view remembers between frames. Never saved: leaving the app closes it.
 pub struct State {
     pub open: bool,
+    pub cinema: bool,
     /// Whether the lyrics column is asked for: seeded from the saved setting on opening, flipped by
     /// the Lyrics button (which saves it). A song with no lyrics hides the column without
     /// touching this.
@@ -133,6 +134,7 @@ impl Default for State {
         let now = Instant::now();
         Self {
             open: false,
+            cinema: false,
             lyrics: false,
             queue: false,
             last_motion: now,
@@ -174,6 +176,10 @@ impl State {
     }
 
     /// A sign of life: the controls come back and the countdown starts over.
+    pub(super) fn remaining_controls_time(&self) -> Duration {
+        HIDE_AFTER.saturating_sub(self.last_motion.elapsed())
+    }
+
     pub fn touch(&mut self) {
         self.last_motion = Instant::now();
     }

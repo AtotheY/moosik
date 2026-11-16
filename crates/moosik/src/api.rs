@@ -2859,6 +2859,7 @@ fn map_song(s: SearchResultSong) -> Track {
         in_library: false,
         library_add: None,
         library_remove: None,
+        room_video: false,
         playlist_added_ms: None,
         set_video_id: None,
         // The typed parsers carry no video kind, so a typed track is never wide.
@@ -2926,6 +2927,7 @@ fn map_video_ref(v: ytmapi_rs::parse::SearchResultVideo) -> Option<Track> {
         in_library: false,
         library_add: None,
         library_remove: None,
+        room_video: false,
         playlist_added_ms: None,
         set_video_id: None,
         // A dedicated video search result is always a real video, never the plain
@@ -3004,6 +3006,7 @@ fn map_artist(a: GetArtist) -> model::Artist {
                     in_library: false,
                     library_add: None,
                     library_remove: None,
+                    room_video: false,
                     playlist_added_ms: None,
                     set_video_id: None,
                     // The typed parsers carry no video kind, so a typed track is never wide.
@@ -3116,6 +3119,7 @@ fn map_album(id: &str, a: GetAlbum) -> model::Album {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: None,
             wide: false,
@@ -3163,6 +3167,7 @@ fn map_playlist_song(s: PlaylistSong) -> Track {
         in_library: false,
         library_add: None,
         library_remove: None,
+        room_video: false,
         playlist_added_ms: None,
         set_video_id: None,
         // The typed parsers carry no video kind, so a typed track is never wide.
@@ -3447,6 +3452,7 @@ mod tests {
             in_library: false,
             library_add: None,
             library_remove: None,
+            room_video: false,
             playlist_added_ms: None,
             set_video_id: None,
             thumbnail: None,
