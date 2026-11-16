@@ -286,9 +286,9 @@ impl YtDlpResolver {
     ///
     /// A Premium-only refusal also retries signed in, but is not remembered: it is about one
     /// song, and the next one still starts anonymously.
-    async fn run_gated(&self, id: &VideoId, format: &str) -> Result<YtDlpFormat> {
+    async fn run_gated(&self, id: &VideoId, format: &str, page: &str) -> Result<YtDlpFormat> {
         let signed_in = |cookies: CookieFile| async move {
-            self.run_json(id, &format!("{format}/best"), Some(&cookies))
+            self.run_json(id, page, &format!("{format}/best"), Some(&cookies))
                 .await
         };
         let cookies = || self.session.as_ref().and_then(CookieFile::for_session);
@@ -305,7 +305,7 @@ impl YtDlpResolver {
         {
             return signed_in(cookies).await;
         }
-        let anonymous = self.run_json(id, format, None).await;
+        let anonymous = self.run_json(id, page, format, None).await;
         let Err(refusal) = &anonymous else {
             return anonymous;
         };
@@ -356,6 +356,7 @@ impl YtDlpResolver {
     async fn run_json(
         &self,
         id: &VideoId,
+        page: &str,
         format: &str,
         cookies: Option<&CookieFile>,
     ) -> Result<YtDlpFormat> {
@@ -367,7 +368,7 @@ impl YtDlpResolver {
         if let Some(file) = cookies {
             cmd.arg("--cookies").arg(file.path());
         }
-        cmd.arg(id.watch_url())
+        cmd.arg(page)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -399,7 +400,7 @@ impl StreamResolver for YtDlpResolver {
             .lock()
             .map(|f| f.clone())
             .unwrap_or_else(|_| DEFAULT_FORMAT.to_owned());
-        let parsed = self.run_gated(id, &format).await?;
+        let parsed = self.run_gated(id, &format, &id.watch_url()).await?;
 
         if parsed.url.is_empty() {
             bail!("yt-dlp returned no URL for {id}");
@@ -485,7 +486,7 @@ impl VideoResolver for YtDlpResolver {
     }
 
     async fn resolve_video(&self, id: &VideoId) -> Result<VideoStream> {
-        let parsed = self.run_gated(id, VIDEO_FORMAT).await?;
+        let parsed = self.run_gated(id, VIDEO_FORMAT, &id.video_url()).await?;
         video_stream_from(&parsed, id)
     }
 }

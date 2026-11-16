@@ -52,3 +52,19 @@ Cmd/Ctrl-click and Shift-click also select groups in ordinary song lists.
 Use **Save as private playlist** on the queue page to keep the current song and its
 upcoming sequence. Choose a name in the dialog. It saves song references on this Mac,
 without uploading a playlist to YouTube or downloading the audio.
+
+## Watch a YouTube video together
+
+In a Listen along room, open **Queue → Session queue**, paste a YouTube video link,
+and press **Enter**. Either person can add videos. Videos keep their place among
+songs in the shared queue. The host can also click the play icon on a video's cover
+to start it immediately.
+
+The original video opens in the center of both windows. The host's play, pause and
+seek keep the room together, including someone who joins partway through or while
+paused. Click the fullscreen icon on the video, double-click it, or press **F**;
+**Esc** returns to the center view. Fullscreen only affects your own window.
+You can open Queue while a video plays and select **Watch video** to return to it.
+
+Both people need a Moosik build with video rooms. Each device streams directly from
+YouTube, so the video needs to be playable on both.

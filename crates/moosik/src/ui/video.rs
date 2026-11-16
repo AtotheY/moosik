@@ -14,20 +14,62 @@ const MAX_PX: f32 = 1280.0;
 
 pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
-    let radius = egui::CornerRadius::same(theme::PANEL_RADIUS);
+    let full = app.fs.open && app.fs.cinema;
+    let radius = egui::CornerRadius::same(if full { 0 } else { theme::PANEL_RADIUS });
     ui.painter().rect_filled(rect, radius, egui::Color32::BLACK);
     paint_frame(app, ui, rect, radius);
-
-    // The surface is a transport control, like the player bar's play button: click to pause,
-    // double-click for fullscreen, Escape back out of it.
-    let response = ui.interact(rect, ui.id().with("video-surface"), egui::Sense::click());
-    let fullscreen = crate::window_fullscreen::is(ui.ctx());
-    if response.double_clicked() {
-        crate::window_fullscreen::set(ui.ctx(), !fullscreen);
-    } else if response.clicked() {
+    let surface = ui.interact(rect, ui.id().with("video-surface"), egui::Sense::click());
+    if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed()) {
+        app.fs.touch();
+    }
+    let remaining = app.fs.remaining_controls_time();
+    let show = !full || !remaining.is_zero();
+    let button = egui::Rect::from_min_size(
+        rect.right_bottom() - egui::vec2(47.0, 47.0),
+        egui::Vec2::splat(35.0),
+    );
+    let toggle = show && {
+        if full {
+            ui.ctx().request_repaint_after(remaining);
+        }
+        let (icon, label) = if full {
+            (crate::icons::Icon::Minimize2, "Exit fullscreen (Esc)")
+        } else {
+            (crate::icons::Icon::Maximize2, "Fullscreen (F)")
+        };
+        let response = ui
+            .interact(
+                button,
+                ui.id().with("video-fullscreen"),
+                egui::Sense::click(),
+            )
+            .on_hover_text(label);
+        ui.painter().rect_filled(
+            button,
+            theme::RADIUS,
+            egui::Color32::from_black_alpha(if response.hovered() { 225 } else { 155 }),
+        );
+        icon.image(egui::Color32::WHITE, 17.0).paint_at(
+            ui,
+            egui::Rect::from_center_size(button.center(), egui::Vec2::splat(17.0)),
+        );
+        response.clicked()
+    };
+    if toggle || surface.double_clicked() {
+        if full {
+            app.fs_exit(ui.ctx());
+        } else {
+            app.fs_enter(ui.ctx());
+        }
+    } else if surface.clicked()
+        && !app.following()
+        && !app
+            .now
+            .track
+            .as_ref()
+            .is_some_and(|t| app.watching_video(&t.video_id))
+    {
         app.toggle_playback();
-    } else if fullscreen && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
-        crate::window_fullscreen::set(ui.ctx(), false);
     }
 }
 
@@ -86,7 +128,7 @@ pub(crate) fn paint_frame(
             .paint_at(ui, fitted);
     }
 
-    if app.now.resolving {
+    if app.now.resolving || app.now.error.is_some() {
         loading_caption(app, ui, rect);
     }
 }
@@ -94,7 +136,12 @@ pub(crate) fn paint_frame(
 /// A quiet caption while the video is being fetched, low in the card so the still stays readable.
 fn loading_caption(app: &App, ui: &egui::Ui, rect: egui::Rect) {
     let galley = ui.painter().layout_no_wrap(
-        "Loading video…".to_owned(),
+        if app.now.error.is_some() {
+            "Video unavailable"
+        } else {
+            "Loading video…"
+        }
+        .into(),
         theme::regular(12.0),
         app.palette.dim,
     );

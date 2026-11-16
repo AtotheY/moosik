@@ -85,6 +85,11 @@ impl VideoId {
         &self.0
     }
 
+    /// Ordinary uploads may not have a playable YouTube Music page.
+    pub fn video_url(&self) -> String {
+        format!("https://www.youtube.com/watch?v={}", self.0)
+    }
+
     pub fn watch_url(&self) -> String {
         format!("https://music.youtube.com/watch?v={}", self.0)
     }

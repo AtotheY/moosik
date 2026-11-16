@@ -570,6 +570,7 @@ pub fn load_video(
     audio_url: Option<&str>,
     volume: f64,
     start_at: Option<f64>,
+    paused: bool,
 ) -> Result<()> {
     // The software render context was created before this call, and `libmpv` is the vo that
     // hands frames to it. Without this the file plays into nothing and every frame is black.
@@ -579,7 +580,7 @@ pub fn load_video(
     // A video carries no loudness figure, and the song before it may have set a gain.
     let _ = mpv.set_property("volume-gain", 0.0);
     let _ = mpv.set_property("volume", mpv_volume(volume));
-    let _ = mpv.set_property("pause", false);
+    let _ = mpv.set_property("pause", paused);
     // Decode on the GPU when the platform can, copying frames back into the software surface;
     // mpv falls back to software decoding when it cannot. The buffer is what makes this
     // affordable, not the renderer.
@@ -592,17 +593,22 @@ pub fn load_video(
     // scaler entirely, and bilinear is a fraction of Lanczos' cost when it cannot.
     let _ = mpv.set_property("sws-scaler", "bilinear");
     set_start(mpv, start_at);
-    // The fourth `loadfile` argument is a per-file option list, so the external audio applies
-    // to this file only and is gone when the next one loads. Commas inside the URL are safe:
-    // the option parser takes the value to the end of the entry.
-    let options = audio_url.map(|a| format!("audio-files-append={a}"));
-    let mut args: Vec<&str> = vec![video_url, "replace"];
-    if let Some(options) = &options {
-        args.push("-1");
-        args.push(options);
-    }
-    mpv.command("loadfile", &args)
-        .context("mpv refused the video URL")
+    // A direct audio URL is a single per-file option even if its query contains commas.
+    // mpv 0.38 inserted a playlist index before the options. Older system libraries reject
+    // that argument before loading anything; retry their three-argument form.
+    let load = if let Some(audio) = audio_url {
+        let option = format!("audio-files-append=%{}%{audio}", audio.len());
+        mpv.command("loadfile", &[video_url, "replace", "-1", &option])
+            .or_else(|error| match error {
+                libmpv2::Error::Raw(-4) => {
+                    mpv.command("loadfile", &[video_url, "replace", &option])
+                }
+                other => Err(other),
+            })
+    } else {
+        mpv.command("loadfile", &[video_url, "replace"])
+    };
+    load.context("mpv refused the video URL")
 }
 
 /// What the player bar shows about the track currently loaded.
@@ -760,7 +766,7 @@ mod tests {
                 assert_eq!(mpv.get_property::<f64>("volume-gain").unwrap(), -6.0);
             }
 
-            load_video(&mpv, "av://lavfi:anullsrc", None, volume, None).unwrap();
+            load_video(&mpv, "av://lavfi:anullsrc", None, volume, None, false).unwrap();
             assert!((mpv.get_property::<f64>("volume").unwrap() - expected).abs() < 1e-5);
             if supports_gain {
                 assert_eq!(mpv.get_property::<f64>("volume-gain").unwrap(), 0.0);

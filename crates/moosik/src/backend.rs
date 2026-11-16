@@ -3635,6 +3635,7 @@ impl Backend {
         mpv: Arc<Mpv>,
         volume: f64,
         start_at: Option<f64>,
+        paused: bool,
     ) -> u64 {
         let generation = self.cancel_play();
         if track.is_spotify() {
@@ -3678,6 +3679,7 @@ impl Backend {
                     stream.audio.as_ref().map(|a| a.as_str()),
                     volume,
                     start_at,
+                    paused,
                 ),
                 Err(e) => {
                     warn!(
@@ -3687,10 +3689,11 @@ impl Backend {
                     );
                     player::load_video(
                         &mpv,
-                        &crate::model::track_url(&track.video_id),
+                        &format!("https://www.youtube.com/watch?v={}", track.video_id),
                         None,
                         volume,
                         start_at,
+                        paused,
                     )
                 }
             };

@@ -1,6 +1,7 @@
 //! Ephemeral listening rooms. Invite holders can follow playback and contribute songs.
 use super::*;
 mod session;
+mod video;
 use serde::{Deserialize, Serialize};
 pub(crate) use session::Member;
 use session::{Outbox, Snapshot};
@@ -34,12 +35,14 @@ impl Song {
         crate::listening::Metadata {
             id: self.id.clone(),
             title: self.title.clone(),
-            artists: if self.artist.is_empty() {
+            artists: if self.is_watch_video() {
+                vec![("YouTube".into(), None)]
+            } else if self.artist.is_empty() {
                 Vec::new()
             } else {
                 vec![(self.artist.clone(), None)]
             },
-            video: self.audio_alternative,
+            video: self.is_watch_video() || self.audio_alternative,
             artwork: Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.id)),
             ..Default::default()
         }
@@ -63,6 +66,14 @@ struct Session {
     publish: Option<watch::Sender<Option<Song>>>,
     id: Option<String>,
     next_sample: Instant,
+    watch: Watch,
+}
+
+#[derive(Default)]
+struct Watch {
+    video: Option<String>,
+    guest_paused: bool,
+    lookup: Option<Receiver<Song>>,
 }
 
 #[derive(Default)]
@@ -293,6 +304,7 @@ async fn follow(
     let mut session = false;
     let mut failures = 0;
     loop {
+        let requested = Instant::now();
         let result: anyhow::Result<Option<Song>> = async {
             if session {
                 let snapshot = outbox.sync(guest(), None).await?;
@@ -313,7 +325,16 @@ async fn follow(
         .await;
         match result {
             Ok(song) => {
-                if !notify(&tx, &ctx, Update::Follow(song, Instant::now())) {
+                let now = Instant::now();
+                let transit = if song
+                    .as_ref()
+                    .is_some_and(|s| s.is_watch_video() && s.playing)
+                {
+                    (now.duration_since(requested) / 2).min(Duration::from_millis(500))
+                } else {
+                    Duration::ZERO
+                };
+                if !notify(&tx, &ctx, Update::Follow(song, now - transit)) {
                     break;
                 }
                 failures = 0;
@@ -361,6 +382,57 @@ impl App {
 
     pub(crate) fn room_snapshot(&self) -> Option<&Snapshot> {
         self.together.snapshot()
+    }
+
+    pub(crate) fn watching_video(&self, id: &str) -> bool {
+        self.together
+            .session
+            .as_ref()
+            .and_then(|s| s.watch.video.as_deref())
+            == Some(id)
+    }
+
+    pub(super) fn watch_starts_paused(&self) -> bool {
+        self.together
+            .session
+            .as_ref()
+            .is_some_and(|s| s.publish.is_none() && s.watch.guest_paused)
+    }
+
+    pub(super) fn leave_video_on_track_change(&mut self, id: &str) {
+        if let Some(s) = &mut self.together.session
+            && s.watch.video.as_ref().is_some_and(|v| v != id)
+        {
+            s.watch.video = None;
+            self.video_open = false;
+        }
+    }
+
+    pub(crate) fn queue_video_link(&mut self, raw: &str) -> bool {
+        let Some(id) = video::from_link(raw) else {
+            self.toast("Paste a YouTube video link");
+            return false;
+        };
+        let Some(session) = self
+            .together
+            .session
+            .as_mut()
+            .filter(|s| s.snapshot.is_some())
+        else {
+            return false;
+        };
+        if session.watch.lookup.is_some() {
+            self.toast("Adding the previous video…");
+            return false;
+        }
+        let (tx, rx) = channel();
+        session.watch.lookup = Some(rx);
+        let ctx = self.ctx.clone();
+        self.backend.runtime().spawn(async move {
+            let _ = tx.send(video::lookup(id).await);
+            ctx.request_repaint();
+        });
+        true
     }
 
     pub(crate) fn add_session_song(&mut self, track: &Track) {
@@ -477,7 +549,13 @@ impl App {
         else {
             return false;
         };
-        let track = snapshot.queue[index].song.track();
+        let song = &snapshot.queue[index].song;
+        let track = song.track();
+        let was_watching = session.watch.video.is_some();
+        session.watch.video = song.is_watch_video().then(|| song.id.clone());
+        if was_watching || session.watch.video.is_some() {
+            self.video_open = session.watch.video.is_some();
+        }
         // Older rooms only understand a FIFO acknowledgement. A host who keeps skipped songs
         // can still play the choice immediately there without discarding anyone's contributions.
         if index == 0 || !self.settings.queue_click_keeps_order || snapshot.can_pick_entry {
@@ -552,6 +630,7 @@ impl App {
             publish: Some(publish),
             id: None,
             next_sample: Instant::now(),
+            watch: Watch::default(),
         });
     }
 
@@ -627,6 +706,7 @@ impl App {
                     publish: None,
                     id: Some(id),
                     next_sample: Instant::now(),
+                    watch: Watch::default(),
                 });
             }
         }
@@ -671,6 +751,22 @@ impl App {
         let Some(session) = self.together.session.as_mut() else {
             return;
         };
+        if let Some(song) = session
+            .watch
+            .lookup
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            session.watch.lookup = None;
+            if !session
+                .id
+                .as_ref()
+                .is_some_and(|id| session.outbox.add(id, song))
+            {
+                self.toast("Couldn’t add this video to the session");
+                return;
+            }
+        }
         if let Some(profile) = profile {
             session.next_sample = Instant::now() + Duration::from_secs(1);
             session.outbox.set_profile(profile);
@@ -683,11 +779,24 @@ impl App {
                     .map(|track| Song {
                         id: track.video_id.clone(),
                         title: track.title.chars().take(128).collect(),
-                        artist: track.artist_line().chars().take(128).collect(),
+                        artist: if session.watch.video.as_deref() == Some(&track.video_id) {
+                            moosik_resolve::VideoId::new(&track.video_id)
+                                .unwrap()
+                                .video_url()
+                        } else {
+                            track.artist_line().chars().take(128).collect()
+                        },
                         position: position.clamp(0.0, 604800.0),
-                        audio_alternative: track.wide && !self.play_is_video,
+                        audio_alternative: track.wide
+                            && !self.play_is_video
+                            && session.watch.video.is_none(),
                         skip_target: Some(skip_target(self.play_generation, self.playback_choice)),
                         playing: self.playback_started
+                            && !(session.watch.video.is_some()
+                                && self.player.as_ref().is_some_and(|p| {
+                                    let sample = p.listening_sample();
+                                    sample.buffering || sample.seeking
+                                }))
                             && !self.player_state.paused
                             && !self.player_state.idle,
                     });
@@ -762,22 +871,29 @@ impl App {
                     } else {
                         0.0
                     };
-                if self
-                    .now
-                    .track
-                    .as_ref()
-                    .is_none_or(|t| t.video_id != song.id)
+                let watch = song.is_watch_video();
+                let changed_mode = watch != self.watching_video(&song.id);
+                self.together.session.as_mut().unwrap().watch.guest_paused = !song.playing;
+                if changed_mode
+                    || self
+                        .now
+                        .track
+                        .as_ref()
+                        .is_none_or(|t| t.video_id != song.id)
                     || (!self.playback_started
                         && !self.now.resolving
                         && song.playing
-                        && self.player_error.is_none())
+                        && self.player_error.is_none()
+                        && self.now.error.is_none())
                 {
                     self.radio = None;
                     self.q
                         .restore_session(vec![song.track()], Some(0), None, false, None);
                     self.q.set_resume(Some((0, position)));
-                    self.video_open = false;
-                    if song.playing {
+                    self.together.session.as_mut().unwrap().watch.video =
+                        watch.then(|| song.id.clone());
+                    self.video_open = watch;
+                    if song.playing || watch {
                         self.play_index_restore(0);
                     } else {
                         self.play_generation = self.backend.cancel_play();
@@ -793,7 +909,17 @@ impl App {
                         };
                     }
                 } else if self.playback_started && !self.player_state.idle {
-                    if (position - self.player_state.position).abs() > 1.5 {
+                    let threshold = if watch {
+                        if song.playing { 0.45 } else { 0.12 }
+                    } else {
+                        1.5
+                    };
+                    let settling = watch
+                        && self.player.as_ref().is_some_and(|p| {
+                            let sample = p.listening_sample();
+                            sample.seeking || sample.buffering
+                        });
+                    if !settling && (position - self.player_state.position).abs() > threshold {
                         self.seek_to(position);
                     }
                     if song.playing == self.player_state.paused
@@ -985,10 +1111,12 @@ mod tests {
         };
         assert_eq!(first, Some(song.clone()));
         let skipped = Song {
-            id: "abcdefghijk".into(),
             position: 30.0,
             playing: true,
-            ..song
+            ..Song::upload(
+                &moosik_resolve::VideoId::new("abcdefghijk").unwrap(),
+                Some("Guest video"),
+            )
         };
         assert!(guest_commands.add(&room, skipped.clone()));
         let until = Instant::now() + Duration::from_secs(8);
@@ -1001,6 +1129,7 @@ mod tests {
             {
                 assert_eq!(entry.by.name, "Guest");
                 assert_eq!(entry.song.id, skipped.id);
+                assert!(entry.song.is_watch_video() && entry.song.track().wide);
                 assert_eq!(s.members.len(), 2);
                 guest_commands.request_skip(
                     &room,
@@ -1041,6 +1170,7 @@ mod tests {
                 .unwrap()
                 && next.id == skipped.id
             {
+                assert!(next.is_watch_video());
                 assert!(next.playing && next.position >= 30.0 && next.position < 38.0);
                 break;
             }

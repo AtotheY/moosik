@@ -3920,6 +3920,16 @@ impl App {
     /// and reloads the current track as video; closing hands playback back to the audio resolver
     /// — both at the current position.
     pub(crate) fn toggle_video(&mut self) {
+        if self
+            .now
+            .track
+            .as_ref()
+            .is_some_and(|t| self.watching_video(&t.video_id))
+        {
+            // Browsing the queue changes only this listener's layout, never the room clock.
+            self.video_open = !self.video_open;
+            return;
+        }
         if self.video_open {
             self.video_open = false;
             self.reload_current();
@@ -3971,16 +3981,37 @@ impl App {
             ?start_at,
             "starting track"
         );
+        self.leave_video_on_track_change(&track.video_id);
+        let room_video = self.watching_video(&track.video_id);
         self.stall.on_load(&track.video_id, start_at);
         if let PlaybackHandle::Mpv(mpv) = &handle
             && !track.is_spotify()
-            && plays_as_video(self.video_open, track.wide)
+            && (room_video || plays_as_video(self.video_open, track.wide))
             && self.ensure_video_surface()
         {
             self.play_is_video = true;
-            return self
-                .backend
-                .play_video(track, Arc::clone(mpv), volume, start_at);
+            return self.backend.play_video(
+                track,
+                Arc::clone(mpv),
+                volume,
+                start_at,
+                room_video && self.watch_starts_paused(),
+            );
+        }
+        if room_video {
+            // Never substitute a song for an upload the rest of the room is watching.
+            let generation = self.backend.cancel_play();
+            if let Some(player) = &self.player {
+                player.stop();
+            }
+            self.play_is_video = false;
+            self.now = NowPlaying {
+                track: Some(track),
+                error: Some("Couldn’t open the video player".into()),
+                ..Default::default()
+            };
+            self.toast_error("Couldn’t open the video player");
+            return generation;
         }
         // An audio-only track cannot stay in the video view.
         self.video_open = false;
@@ -4103,6 +4134,14 @@ impl App {
     }
 
     pub(crate) fn navigate(&mut self, route: Route) {
+        if self
+            .now
+            .track
+            .as_ref()
+            .is_some_and(|t| self.watching_video(&t.video_id))
+        {
+            self.video_open = false;
+        }
         if self.history.push(route.canonical()) {
             self.scroll_to_top = true;
             self.note_route_entered();
@@ -7608,6 +7647,7 @@ impl App {
                         "playback failed"
                     );
                     let was_video = self.play_is_video;
+                    let room_video = self.watching_video(&track.video_id);
                     self.play_is_video = false;
                     self.now = NowPlaying {
                         track: Some(track),
@@ -7621,7 +7661,12 @@ impl App {
                     // what failed, play the song's audio rather than leaving the view over a
                     // frozen frame. `reload_current` picks the audio path now that the flag is
                     // clear, and its own generation supersedes this failed attempt.
-                    if was_video {
+                    if room_video {
+                        self.toast_error("This YouTube video couldn’t be played");
+                        if let Some(player) = &self.player {
+                            player.stop();
+                        }
+                    } else if was_video {
                         self.video_open = false;
                         self.toast("Video failed — playing the song instead");
                         self.reload_current();
@@ -8211,6 +8256,7 @@ impl App {
         let was_fullscreen = crate::window_fullscreen::is(ctx);
         tracing::debug!(was_fullscreen, "fullscreen view: entering");
         self.fs = ui::fullscreen::State::entering(self.settings.fullscreen_lyrics, was_fullscreen);
+        self.fs.cinema = self.video_open;
         if !self.fs.window_was_fullscreen {
             crate::window_fullscreen::set(ctx, true);
         }
@@ -10511,12 +10557,16 @@ impl eframe::App for App {
                     self.fs.queue = false;
                 }
             }
-            if self.now.track.is_none() {
+            if self.now.track.is_none() || (self.fs.cinema && !self.video_open) {
                 self.fs_exit(&ctx);
             }
         }
 
-        if self.fs.open {
+        if self.fs.open && self.fs.cinema {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(Color32::BLACK))
+                .show(ui, |ui| ui::video::panel(self, ui));
+        } else if self.fs.open {
             ui::fullscreen::view(self, ui);
         } else {
             let route = self.current_route();
@@ -10573,7 +10623,7 @@ impl eframe::App for App {
             let screen_w = ctx.input(|i| i.raw.screen_rect.map_or(0.0, |r| r.width()));
             // The full queue already shows these rows; preserve the panel preference for
             // other pages while giving this page its room.
-            let queue_panel_open = self.upnext_open && route != Route::Queue;
+            let queue_panel_open = self.upnext_open && (route != Route::Queue || self.video_open);
             let right_open =
                 (queue_panel_open || self.lyrics_open) && theme::right_panel_fits(screen_w);
             let sidebar_pref = self.settings.sidebar_width.unwrap_or(theme::SIDEBAR_WIDTH);
@@ -10760,12 +10810,12 @@ impl eframe::App for App {
                     self.content_rect = top;
                     // The video view takes the content card; the page it was opened from is still
                     // behind it, one toggle away.
-                    let card = widgets::card_rect(top, theme::PAGE_INSET);
-                    let _edge = widgets::CardEdge::new(ui, card, &p);
                     if self.video_open {
                         ui::video::panel(self, ui);
                         return;
                     }
+                    let card = widgets::card_rect(top, theme::PAGE_INSET);
+                    let _edge = widgets::CardEdge::new(ui, card, &p);
                     widgets::clip_card_content(ui, card, theme::PAGE_INSET_X, &p);
                     // Last frame's answer: the page draws after the banner, and a page that is itself
                     // the offline screen says it in full, so the strip would only repeat it.

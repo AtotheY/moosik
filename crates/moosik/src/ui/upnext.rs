@@ -264,6 +264,12 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, page: bool) {
             .inner
         })
         .inner;
+    if !app.video_open && app.watching_video(&track.video_id) {
+        ui.add_space(4.0);
+        if widgets::outline_button(ui, &app.palette, "Watch video").clicked() {
+            app.toggle_video();
+        }
+    }
     if let Some(action) = clicked.action {
         app.row_action(action);
     }
@@ -370,6 +376,41 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
         return;
     }
     ui.add_space(if page { 8.0 } else { 4.0 });
+    if let Some(id) = app.together.session_id().filter(|_| room.is_some()) {
+        let key = egui::Id::new(("queue-video-link", id));
+        let mut draft = ui
+            .data_mut(|d| d.get_temp::<String>(key))
+            .unwrap_or_default();
+        let submit = ui
+            .horizontal(|ui| {
+                let width = (ui.available_width() - 40.0).clamp(48.0, 440.0);
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .desired_width(width)
+                        .char_limit(2048)
+                        .hint_text("Paste a YouTube link"),
+                );
+                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let add = ui
+                    .add_enabled_ui(!draft.trim().is_empty(), |ui| {
+                        widgets::icon_button(ui, &p, Icon::ListPlus, 16.0, false)
+                            .on_hover_text("Add video to session queue")
+                            .clicked()
+                    })
+                    .inner;
+                enter || add
+            })
+            .inner;
+        if submit && app.queue_video_link(&draft) {
+            draft.clear();
+        }
+        ui.data_mut(|d| d.insert_temp(key, draft));
+        ui.add_space(4.0);
+    }
+    let room = app
+        .together
+        .snapshot()
+        .map(|room| (room, room.queue_stamp(app.together.session_id())));
     let Some((room, stamp)) = room else {
         return;
     };
@@ -457,6 +498,9 @@ fn session_queue(app: &mut App, ui: &mut egui::Ui, page: bool) {
             Some(ListClick::Row(i)) if app.hosting() => {
                 let entry = room.queue[i].entry;
                 app.play_session_entry(entry);
+            }
+            Some(ListClick::Row(i)) if room.queue[i].song.is_watch_video() => {
+                app.toast("The host controls playback. Use Next to skip together.");
             }
             Some(ListClick::Row(i)) => app.play_row(tracks, i),
             Some(ListClick::Link(route)) => app.navigate(route),
