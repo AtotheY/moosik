@@ -7,6 +7,7 @@ pub(super) struct Sync {
     corrected: Option<Instant>,
     error: Option<f64>,
     far_samples: u8,
+    pending_jump: bool,
 }
 
 #[derive(Debug)]
@@ -33,14 +34,7 @@ impl Sync {
             speed: 1.0,
             seek: None,
         };
-        if local.buffering || local.seeking || local.idle {
-            self.error = None;
-            self.far_samples = 0;
-            self.corrected = Some(now);
-            return result;
-        }
-        let drift = target - local.position;
-        let jump = previous.is_some_and(|(at, pos, was_playing)| {
+        self.pending_jump |= previous.is_some_and(|(at, pos, was_playing)| {
             let expected = pos
                 + if was_playing {
                     now.duration_since(at).as_secs_f64()
@@ -49,6 +43,18 @@ impl Sync {
                 };
             (target - expected).abs() > 1.5
         });
+        if local.buffering || local.seeking || local.idle {
+            self.error = None;
+            self.far_samples = 0;
+            self.corrected = Some(now);
+            return result;
+        }
+        let drift = target - local.position;
+        // Preserve a host seek observed while the guest was buffering or in cooldown.
+        // It can be forgotten only after applying it, or naturally reaching its new clock.
+        if drift.abs() <= 0.5 {
+            self.pending_jump = false;
+        }
         let settled = self
             .corrected
             .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(3));
@@ -59,13 +65,14 @@ impl Sync {
         };
         if settled
             && ((!playing && drift.abs() > 0.15)
-                || (jump && drift.abs() > 0.5)
+                || self.pending_jump
                 || (drift.abs() > 2.0 && (previous.is_none() || self.far_samples >= 2)))
         {
             result.seek = Some(target);
             self.corrected = Some(now);
             self.error = None;
             self.far_samples = 0;
+            self.pending_jump = false;
             return result;
         }
         if playing && !local.paused && settled {
@@ -111,6 +118,45 @@ mod tests {
             assert!((0.98..=1.02).contains(&speed));
         }
         assert!((local.position - 600.0).abs() < 0.4);
+    }
+
+    #[test]
+    fn host_seek_during_buffering_is_applied_after_the_cooldown() {
+        let start = Instant::now();
+        let mut sync = Sync::default();
+        let mut local = crate::listening::Sample {
+            position: 10.0,
+            ..Default::default()
+        };
+        sync.update(start, 10.0, true, &local);
+        local.buffering = true;
+        sync.update(start + Duration::from_secs(1), 11.0, true, &local);
+        // A 1.8s host seek, smaller than the fallback threshold, arrives during buffering.
+        assert!(
+            sync.update(start + Duration::from_secs(2), 13.8, true, &local)
+                .seek
+                .is_none()
+        );
+        local.buffering = false;
+        for second in 3..5 {
+            local.position = 10.0 + second as f64;
+            assert!(
+                sync.update(
+                    start + Duration::from_secs(second),
+                    local.position + 1.8,
+                    true,
+                    &local
+                )
+                .seek
+                .is_none()
+            );
+        }
+        local.position = 15.0;
+        assert_eq!(
+            sync.update(start + Duration::from_secs(5), 16.8, true, &local)
+                .seek,
+            Some(16.8)
+        );
     }
 
     #[test]
