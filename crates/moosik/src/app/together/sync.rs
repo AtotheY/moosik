@@ -42,7 +42,7 @@ impl Sync {
                 } else {
                     0.0
                 };
-            (target - expected).abs() > 1.5
+            (!was_playing && playing) || (target - expected).abs() > 1.5
         });
         if local.buffering || local.seeking || local.idle {
             self.error = None;
@@ -139,6 +139,24 @@ mod tests {
         let ongoing = sync.update(start + Duration::from_secs(5), 25.0, true, &local);
         assert!(ongoing.seek.is_none());
         assert_eq!(ongoing.speed, 1.02);
+    }
+
+    #[test]
+    fn resuming_a_paused_room_aligns_the_guests_clock() {
+        let start = Instant::now();
+        let mut sync = Sync::default();
+        let local = crate::listening::Sample {
+            position: 20.0,
+            paused: true,
+            ..Default::default()
+        };
+        assert!(sync.update(start, 20.0, false, &local).seek.is_none());
+        // The play update arrives after the host has already advanced.
+        assert_eq!(
+            sync.update(start + Duration::from_secs(1), 20.8, true, &local)
+                .seek,
+            Some(20.8)
+        );
     }
 
     #[test]
