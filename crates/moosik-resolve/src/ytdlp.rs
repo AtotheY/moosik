@@ -5,6 +5,7 @@
 //! downloader. This is what keeps the application alive on the day the native path breaks,
 //! without us having to ship a release.
 
+use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -267,6 +268,61 @@ struct YtDlpFormat {
     /// so this is the only place the playable URLs exist.
     #[serde(default)]
     requested_formats: Option<Vec<YtDlpFormat>>,
+    #[serde(default)]
+    subtitles: BTreeMap<String, Vec<Subtitle>>,
+    #[serde(default)]
+    automatic_captions: BTreeMap<String, Vec<Subtitle>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Subtitle {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    ext: String,
+    name: Option<String>,
+}
+
+fn caption_tracks(parsed: &YtDlpFormat) -> Vec<crate::CaptionTrack> {
+    let mut tracks = BTreeMap::new();
+    // Prefer authored captions where both sources have the same language.
+    for (languages, automatic) in [
+        (&parsed.subtitles, false),
+        (&parsed.automatic_captions, true),
+    ] {
+        for (language, formats) in languages {
+            if tracks.contains_key(language) || language == "live_chat" {
+                continue;
+            }
+            let Some((subtitle, url)) = formats.iter().filter(|s| s.ext == "vtt").find_map(|s| {
+                Url::parse(&s.url)
+                    .ok()
+                    .filter(|u| matches!(u.scheme(), "https" | "http"))
+                    .map(|url| (s, url))
+            }) else {
+                continue;
+            };
+            let name = subtitle
+                .name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(language);
+            let label = if automatic {
+                format!("{name} (auto)")
+            } else {
+                name.to_owned()
+            };
+            tracks.insert(
+                language.clone(),
+                crate::CaptionTrack {
+                    language: language.clone(),
+                    label,
+                    url,
+                },
+            );
+        }
+    }
+    tracks.into_values().collect()
 }
 
 impl YtDlpResolver {
@@ -474,6 +530,7 @@ fn video_stream_from(parsed: &YtDlpFormat, id: &VideoId) -> Result<VideoStream> 
         expires_at: parse_expiry(&video),
         video,
         audio,
+        captions: caption_tracks(parsed),
         duration: parsed.duration.map(Duration::from_secs_f64),
         resolved_by: "yt-dlp",
     })
@@ -494,6 +551,29 @@ impl VideoResolver for YtDlpResolver {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn captions_prefer_authored_vtt_and_keep_automatic_fallbacks() {
+        let parsed: YtDlpFormat = serde_json::from_value(serde_json::json!({
+            "subtitles": {
+                "en": [{"ext":"json3", "url":"https://example.com/en.json"},
+                       {"ext":"vtt", "url":"https://example.com/en.vtt", "name":"English"}],
+                "bad": [{"ext":"vtt", "url":"file:///tmp/no.vtt"}],
+                "live_chat": [{"ext":"vtt", "url":"https://example.com/chat"}]
+            },
+            "automatic_captions": {
+                "en": [{"ext":"vtt", "url":"https://example.com/en-auto.vtt"}],
+                "fr": [{"ext":"vtt", "url":"https://example.com/fr.vtt", "name":"French"}]
+            }
+        }))
+        .unwrap();
+        let tracks = caption_tracks(&parsed);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].label, "English");
+        assert_eq!(tracks[0].url.as_str(), "https://example.com/en.vtt");
+        assert_eq!(tracks[1].label, "French (auto)");
+        assert!(caption_tracks(&serde_json::from_str("{}").unwrap()).is_empty());
+    }
 
     /// The bot check and the age gate retry signed in; anything else (a removed video, a
     /// network failure) does not, since a session changes nothing there.

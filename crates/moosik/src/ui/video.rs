@@ -23,37 +23,16 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
         app.fs.touch();
     }
     let remaining = app.fs.remaining_controls_time();
-    let show = !full || !remaining.is_zero();
-    let button = egui::Rect::from_min_size(
-        rect.right_bottom() - egui::vec2(47.0, 47.0),
-        egui::Vec2::splat(35.0),
-    );
-    let toggle = show && {
-        if full {
+    let menu_id = ui.id().with("video-captions");
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), menu_id);
+    let show = !full || !remaining.is_zero() || menu_open;
+    let (toggle, controls_used) = if show {
+        if full && !remaining.is_zero() {
             ui.ctx().request_repaint_after(remaining);
         }
-        let (icon, label) = if full {
-            (crate::icons::Icon::Minimize2, "Exit fullscreen (Esc)")
-        } else {
-            (crate::icons::Icon::Maximize2, "Fullscreen (F)")
-        };
-        let response = ui
-            .interact(
-                button,
-                ui.id().with("video-fullscreen"),
-                egui::Sense::click(),
-            )
-            .on_hover_text(label);
-        ui.painter().rect_filled(
-            button,
-            theme::RADIUS,
-            egui::Color32::from_black_alpha(if response.hovered() { 225 } else { 155 }),
-        );
-        icon.image(egui::Color32::WHITE, 17.0).paint_at(
-            ui,
-            egui::Rect::from_center_size(button.center(), egui::Vec2::splat(17.0)),
-        );
-        response.clicked()
+        controls(app, ui, rect, full, menu_id, menu_open)
+    } else {
+        (false, false)
     };
     // A double-click changes only the local window. Wait until the second click has
     // been ruled out before sending a single click to the host's transport.
@@ -62,13 +41,13 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
     let frame = ui.ctx().cumulative_frame_nr();
     let now = ui.input(|i| i.time);
     let pending = ui.data_mut(|d| d.remove_temp::<(f64, u64)>(key));
-    if toggle || surface.double_clicked() {
+    if toggle || (!controls_used && surface.double_clicked()) {
         if full {
             app.fs_exit(ui.ctx());
         } else {
             app.fs_enter(ui.ctx());
         }
-    } else if !app.following() {
+    } else if !controls_used && !app.following() {
         let deadline = if surface.clicked() {
             Some(now + ui.ctx().options(|o| o.input_options.max_double_click_delay))
         } else {
@@ -85,6 +64,114 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     }
+}
+
+/// A small local control strip, available even when fullscreen hides the player bar.
+fn controls(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    full: bool,
+    menu_id: egui::Id,
+    menu_open: bool,
+) -> (bool, bool) {
+    use crate::{icons::Icon, widgets};
+    let bar = egui::Rect::from_min_size(
+        rect.right_bottom() - egui::vec2(254.0, 50.0),
+        egui::vec2(242.0, 38.0),
+    );
+    ui.painter()
+        .rect_filled(bar, theme::RADIUS, egui::Color32::from_black_alpha(190));
+    let mut controls = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("video-controls")
+            .max_rect(bar.shrink2(egui::vec2(6.0, 0.0)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    controls.spacing_mut().item_spacing.x = 8.0;
+    // The video always has a dark backdrop, including when the rest of the app is light.
+    let mut p = theme::Palette::dark();
+    p.accent = app.palette.accent;
+    let (icon, label) = if full {
+        (Icon::Minimize2, "Exit fullscreen (Esc)")
+    } else {
+        (Icon::Maximize2, "Fullscreen (F)")
+    };
+    let toggle = widgets::icon_button(&mut controls, &p, icon, 17.0, false)
+        .on_hover_text(label)
+        .clicked();
+    let cc = widgets::chip(&mut controls, &p, "CC", app.captions.selected.is_some()).on_hover_text(
+        if app.captions.loading {
+            "Loading captions…"
+        } else {
+            "Captions"
+        },
+    );
+    let menu_palette = app.palette;
+    let mut selection = None;
+    egui::Popup::from_response(&cc)
+        .id(menu_id)
+        .kind(egui::PopupKind::Menu)
+        .frame(widgets::menu_frame(ui, &menu_palette))
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .align(egui::RectAlign::TOP_END)
+        .width(240.0)
+        .gap(6.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .open_memory(if cc.clicked() {
+            Some(egui::SetOpenCommand::Toggle)
+        } else {
+            None
+        })
+        .show(|ui| {
+            let off = app.captions.selected.is_none();
+            if widgets::menu_item_plain(ui, &menu_palette, "Off", off.then_some("✓")).clicked() {
+                selection = Some(None);
+                ui.close();
+            }
+            widgets::menu_divider(ui, &menu_palette);
+            if app.captions.tracks.is_empty() {
+                ui.label(
+                    egui::RichText::new(if app.captions.ready || app.now.error.is_some() {
+                        "No captions available"
+                    } else {
+                        "Loading languages…"
+                    })
+                    .font(theme::regular(12.0))
+                    .color(menu_palette.dim),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        for (i, track) in app.captions.tracks.iter().enumerate() {
+                            let chosen = app.captions.selected == Some(i);
+                            let mark =
+                                chosen.then_some(if app.captions.loading { "…" } else { "✓" });
+                            if widgets::menu_item_plain(ui, &menu_palette, &track.label, mark)
+                                .clicked()
+                            {
+                                selection = Some(Some(i));
+                                ui.close();
+                            }
+                        }
+                    });
+            }
+        });
+    if let Some(selected) = selection {
+        app.select_caption(selected);
+    }
+    let volume = if app.muted { 0.0 } else { app.last_volume };
+    if let Some(v) = widgets::volume_slider(&mut controls, &p, volume, app.last_volume) {
+        app.set_user_volume(v);
+    }
+    let used = menu_open
+        || cc.clicked()
+        || ui.input(|i| i.pointer.hover_pos().is_some_and(|pos| bar.contains(pos)));
+    if used {
+        app.fs.touch();
+    }
+    (toggle, used)
 }
 
 /// The video frame (or the track's still while it loads) fitted inside `rect`, rounded to

@@ -381,6 +381,7 @@ impl Player {
     /// Unload whatever is playing. mpv keeps the outgoing file until the next one loads, so a
     /// track that never loads would otherwise leave the previous song playing under it.
     pub fn stop(&self) {
+        self.set_sync_speed(1.0);
         if let Some(PlaybackHandle::Spotify(handle)) = &self.active {
             handle.stop();
         }
@@ -409,6 +410,54 @@ impl Player {
 
     pub fn volume(&self) -> f64 {
         self.volume
+    }
+
+    /// A small local clock correction for Watch Together, never a shared playback setting.
+    pub fn set_sync_speed(&self, speed: f64) {
+        if let Some(mpv) = &self.mpv {
+            let speed = speed.clamp(0.98, 1.02);
+            if mpv
+                .get_property::<f64>("speed")
+                .is_ok_and(|old| old == speed || (speed != 1.0 && (old - speed).abs() < 0.001))
+            {
+                return;
+            }
+            let _ = mpv.set_property("speed", speed);
+        }
+    }
+
+    pub fn seek_exact(&self, seconds: f64) {
+        self.seek_serial
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.command("seek", &[&format!("{seconds:.3}"), "absolute+exact"]);
+        }
+    }
+
+    pub fn hide_captions(&self) {
+        if let Some(mpv) = &self.mpv {
+            let _ = mpv.set_property("sub-visibility", false);
+        }
+    }
+
+    pub fn show_captions(&self, path: &std::path::Path, label: &str, language: &str) -> Result<()> {
+        let mpv = self.mpv.as_ref().context("video player unavailable")?;
+        // Only our selected external subtitle is loaded at a time.
+        if let Ok(sid) = mpv.get_property::<i64>("sid") {
+            let _ = mpv.command("sub-remove", &[&sid.to_string()]);
+        }
+        mpv.command(
+            "sub-add",
+            &[
+                path.to_str().context("invalid caption path")?,
+                "select",
+                label,
+                language,
+            ],
+        )
+        .context("could not open captions")?;
+        mpv.set_property("sub-visibility", true)
+            .context("could not show captions")
     }
 
     pub fn set_volume(&mut self, volume: f64) {
@@ -525,6 +574,7 @@ pub fn load(
     normalise: bool,
     start_at: Option<f64>,
 ) -> Result<()> {
+    let _ = mpv.set_property("speed", 1.0);
     // Apply YouTube's own loudness measurement so tracks don't jump in level. It rides mpv's
     // `volume-gain` (dB, on top of `volume`), so the slider, mute and media keys can set `volume`
     // later without dropping this song's correction.
@@ -572,6 +622,9 @@ pub fn load_video(
     start_at: Option<f64>,
     paused: bool,
 ) -> Result<()> {
+    let _ = mpv.set_property("speed", 1.0);
+    let _ = mpv.set_property("sid", "no");
+    let _ = mpv.set_property("sub-visibility", false);
     // The software render context was created before this call, and `libmpv` is the vo that
     // hands frames to it. Without this the file plays into nothing and every frame is black.
     let _ = mpv.set_property("vo", "libmpv");

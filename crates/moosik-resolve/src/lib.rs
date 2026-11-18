@@ -136,13 +136,21 @@ impl AudioStream {
     }
 }
 
-/// A resolved music video: a video stream, plus its audio when YouTube served the two as
-/// separate adaptive streams — which is what `bestvideo+bestaudio` selects, and what mpv then
-/// plays as one file with the audio attached as an external track.
+/// One available subtitle language, fetched only when selected.
+#[derive(Debug, Clone)]
+pub struct CaptionTrack {
+    pub language: String,
+    pub label: String,
+    pub url: Url,
+}
+
+/// A video stream, plus its separate audio and available caption languages.
 #[derive(Debug, Clone)]
 pub struct VideoStream {
     pub video: Url,
     pub audio: Option<Url>,
+    /// Available VTT tracks. Download only the viewer's selected language.
+    pub captions: Vec<CaptionTrack>,
     pub duration: Option<Duration>,
     /// From the video URL's `expire` parameter, like [`AudioStream::expires_at`].
     pub expires_at: Option<SystemTime>,
