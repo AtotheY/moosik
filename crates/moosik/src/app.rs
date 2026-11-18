@@ -4,6 +4,7 @@
 //! (Back / Forward in the titlebar). This file holds the state and the wiring: what the route
 //! currently is, what has been fetched for it, and how playback advances.
 
+mod captions;
 mod together;
 pub(crate) use together::Member as SessionMember;
 
@@ -2012,6 +2013,7 @@ pub struct App {
     pub(crate) video_open: bool,
     /// The software render surface, created the first time a video is opened.
     pub(crate) video: Option<crate::video::Video>,
+    pub(crate) captions: captions::Captions,
 }
 
 impl Drop for App {
@@ -2504,6 +2506,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             video_open: false,
             video: None,
+            captions: Default::default(),
             local_tracks: Arc::new(Vec::new()),
             local_tracks_generation: 0,
             local_view_cache: None,
@@ -3969,6 +3972,10 @@ impl App {
         volume: f64,
         start_at: Option<f64>,
     ) -> u64 {
+        self.captions = Default::default();
+        if let Some(player) = &self.player {
+            player.hide_captions();
+        }
         tracing::debug!(
             video_open = self.video_open,
             wide = track.wide,
@@ -7158,6 +7165,10 @@ impl App {
                         playlist_playing: self.now.playlist_playing.clone(),
                     };
                     self.playback_started = true;
+                    if self.play_is_video {
+                        // A viewer may have changed volume while yt-dlp was resolving.
+                        self.set_user_volume(if self.muted { 0.0 } else { self.last_volume });
+                    }
                     self.listening.ready();
                     // A track with no video cannot keep the video view up.
                     if self.video_open && !wide {
@@ -7174,6 +7185,20 @@ impl App {
                     }
                 }
                 Event::Playing(..) => {}
+                Event::VideoCaptions { generation, tracks }
+                    if generation == self.play_generation =>
+                {
+                    self.captions.tracks = tracks;
+                    self.captions.ready = true;
+                }
+                Event::CaptionLoaded {
+                    generation,
+                    request,
+                    result,
+                } if generation == self.play_generation => {
+                    self.caption_loaded(request, result);
+                }
+                Event::VideoCaptions { .. } | Event::CaptionLoaded { .. } => {}
                 Event::SpotifyAutoplay { generation, result } => {
                     if let Some(autoplay) = &mut self.spotify_autoplay
                         && generation == self.play_generation

@@ -296,6 +296,7 @@ mod tests {
             Ok(VideoStream {
                 video: Url::parse("https://example.com/v").unwrap(),
                 audio: Some(Url::parse("https://example.com/a").unwrap()),
+                captions: Vec::new(),
                 duration: None,
                 expires_at: self.expires_in.map(|d| SystemTime::now() + d),
                 resolved_by: "counting-video",

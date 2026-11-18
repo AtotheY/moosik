@@ -595,6 +595,15 @@ pub enum Event {
     /// carries it.
     Resolving(Track, u64),
     Playing(Track, u64),
+    VideoCaptions {
+        generation: u64,
+        tracks: Vec<moosik_resolve::CaptionTrack>,
+    },
+    CaptionLoaded {
+        generation: u64,
+        request: u64,
+        result: Result<tempfile::NamedTempFile, String>,
+    },
     PlaybackFailed {
         track: Track,
         error: String,
@@ -3705,6 +3714,10 @@ impl Backend {
                     generation,
                 },
             };
+            if matches!(event, Event::Playing(..)) {
+                let tracks = direct.map(|stream| stream.captions).unwrap_or_default();
+                Self::emit(&tx, &ctx, Event::VideoCaptions { generation, tracks });
+            }
             // A music video is a real YouTube play like any other; the tracker reads mpv's own
             // position, which is the same handle the video runs on.
             if let Event::Playing(ref track, _) = event {
@@ -3713,6 +3726,46 @@ impl Backend {
             Self::emit(&tx, &ctx, event);
         });
         generation
+    }
+
+    /// Fetch only the selected captions off-thread. The UI checks the play and selection
+    /// generations before attaching this local file, so a late response cannot affect Next.
+    pub fn load_caption(&self, url: url::Url, generation: u64, request: u64) {
+        let http = self.http.clone();
+        let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
+        self.rt.spawn(async move {
+            let result = async {
+                use std::io::Write;
+                let mut response = http
+                    .get(url)
+                    .timeout(Duration::from_secs(20))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                let mut file = tempfile::Builder::new().suffix(".vtt").tempfile()?;
+                let mut size = 0;
+                while let Some(bytes) = response.chunk().await? {
+                    size += bytes.len();
+                    anyhow::ensure!(size <= 4 * 1024 * 1024, "caption file is too large");
+                    file.write_all(&bytes)?;
+                }
+                anyhow::ensure!(size > 0, "caption file is empty");
+                file.flush()?;
+                anyhow::Ok(file)
+            }
+            .await
+            .map_err(|e| format!("{e:#}"));
+            Self::emit(
+                &tx,
+                &ctx,
+                Event::CaptionLoaded {
+                    generation,
+                    request,
+                    result,
+                },
+            );
+        });
     }
 
     /// Warm the video resolver's cache for a track the queue is about to reach, so Next in the

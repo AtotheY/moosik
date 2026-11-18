@@ -1,0 +1,157 @@
+//! Correct clock drift without repeatedly flushing the guest's decoder and network cache.
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+pub(super) struct Sync {
+    last: Option<(Instant, f64, bool)>,
+    corrected: Option<Instant>,
+    error: Option<f64>,
+    far_samples: u8,
+}
+
+#[derive(Debug)]
+pub(super) struct Correction {
+    pub speed: f64,
+    pub seek: Option<f64>,
+}
+
+impl Sync {
+    pub fn stale(&self, now: Instant) -> bool {
+        self.last
+            .is_some_and(|(at, _, _)| now.duration_since(at) > Duration::from_secs(3))
+    }
+
+    pub fn update(
+        &mut self,
+        now: Instant,
+        target: f64,
+        playing: bool,
+        local: &crate::listening::Sample,
+    ) -> Correction {
+        let previous = self.last.replace((now, target, playing));
+        let mut result = Correction {
+            speed: 1.0,
+            seek: None,
+        };
+        if local.buffering || local.seeking || local.idle {
+            self.error = None;
+            self.far_samples = 0;
+            self.corrected = Some(now);
+            return result;
+        }
+        let drift = target - local.position;
+        let jump = previous.is_some_and(|(at, pos, was_playing)| {
+            let expected = pos
+                + if was_playing {
+                    now.duration_since(at).as_secs_f64()
+                } else {
+                    0.0
+                };
+            (target - expected).abs() > 1.5
+        });
+        let settled = self
+            .corrected
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(3));
+        self.far_samples = if drift.abs() > 2.0 {
+            self.far_samples.saturating_add(1)
+        } else {
+            0
+        };
+        if settled
+            && ((!playing && drift.abs() > 0.15)
+                || (jump && drift.abs() > 0.5)
+                || (drift.abs() > 2.0 && (previous.is_none() || self.far_samples >= 2)))
+        {
+            result.seek = Some(target);
+            self.corrected = Some(now);
+            self.error = None;
+            self.far_samples = 0;
+            return result;
+        }
+        if playing && !local.paused && settled {
+            let filtered = self.error.map_or(drift, |old| old * 0.75 + drift * 0.25);
+            self.error = Some(filtered);
+            if filtered.abs() > 0.15 {
+                result.speed = 1.0 + (filtered * 0.03).clamp(-0.02, 0.02);
+            }
+        } else {
+            self.error = None;
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ten_minutes_of_clock_drift_and_network_jitter_never_seek() {
+        let start = Instant::now();
+        let mut sync = Sync::default();
+        let mut local = crate::listening::Sample {
+            position: 0.6,
+            ..Default::default()
+        };
+        let mut speed = 1.0;
+        for second in 1..=600 {
+            local.position += speed * 0.998;
+            let jitter = [0.0, 0.20, -0.12, 0.45, -0.08][second % 5];
+            let correction = sync.update(
+                start + Duration::from_secs(second as u64),
+                second as f64 + jitter,
+                true,
+                &local,
+            );
+            assert!(
+                correction.seek.is_none(),
+                "unexpected seek at {second}: {correction:?}"
+            );
+            speed = correction.speed;
+            assert!((0.98..=1.02).contains(&speed));
+        }
+        assert!((local.position - 600.0).abs() < 0.4);
+    }
+
+    #[test]
+    fn host_seek_and_paused_seek_work_but_buffering_cannot_cause_a_seek_loop() {
+        let start = Instant::now();
+        let mut sync = Sync::default();
+        let mut local = crate::listening::Sample {
+            position: 10.0,
+            ..Default::default()
+        };
+        assert!(sync.update(start, 10.0, true, &local).seek.is_none());
+        assert_eq!(
+            sync.update(start + Duration::from_secs(1), 50.0, true, &local)
+                .seek,
+            Some(50.0)
+        );
+        local.seeking = true;
+        assert!(
+            sync.update(start + Duration::from_secs(2), 51.0, true, &local)
+                .seek
+                .is_none()
+        );
+        local.seeking = false;
+        local.position = 52.0;
+        assert!(
+            sync.update(start + Duration::from_secs(3), 52.0, true, &local)
+                .seek
+                .is_none()
+        );
+        local.paused = true;
+        assert_eq!(
+            sync.update(start + Duration::from_secs(6), 70.0, false, &local)
+                .seek,
+            Some(70.0)
+        );
+        local.position = 70.0;
+        assert!(
+            sync.update(start + Duration::from_secs(10), 70.0, false, &local)
+                .seek
+                .is_none()
+        );
+        assert!(sync.stale(start + Duration::from_secs(14)));
+    }
+}

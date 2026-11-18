@@ -1,6 +1,7 @@
 //! Ephemeral listening rooms. Invite holders can follow playback and contribute songs.
 use super::*;
 mod session;
+mod sync;
 mod video;
 use serde::{Deserialize, Serialize};
 pub(crate) use session::Member;
@@ -84,6 +85,8 @@ struct Session {
 struct Watch {
     guest_paused: bool,
     lookup: Option<Receiver<Song>>,
+    sync: sync::Sync,
+    buffering_since: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -626,6 +629,9 @@ impl App {
     }
 
     pub(crate) fn leave_room(&mut self) {
+        if let Some(player) = &self.player {
+            player.set_sync_speed(1.0);
+        }
         self.together.session = None;
         self.presence_key = None;
         if let Some(mut store) = self.together.backup.take() {
@@ -742,6 +748,12 @@ impl App {
         let Some(session) = self.together.session.as_mut() else {
             return;
         };
+        if session.watch.sync.stale(Instant::now()) {
+            if let Some(player) = &self.player {
+                player.set_sync_speed(1.0);
+            }
+            session.watch.sync = Default::default();
+        }
         if let Some(song) = session
             .watch
             .lookup
@@ -762,6 +774,24 @@ impl App {
             session.next_sample = Instant::now() + Duration::from_secs(1);
             session.outbox.set_profile(profile);
             if let Some(publish) = &session.publish {
+                // Brief cache/seek transitions must not toggle every guest's transport.
+                // A sustained host stall still freezes the room until the host can play.
+                let buffering = self.now.track.as_ref().is_some_and(|t| t.room_video)
+                    && self
+                        .player
+                        .as_ref()
+                        .is_some_and(|p| p.listening_sample().buffering);
+                let held = if buffering {
+                    session
+                        .watch
+                        .buffering_since
+                        .get_or_insert_with(Instant::now)
+                        .elapsed()
+                        >= Duration::from_secs(2)
+                } else {
+                    session.watch.buffering_since = None;
+                    false
+                };
                 let sample = self
                     .now
                     .track
@@ -775,11 +805,7 @@ impl App {
                         audio_alternative: track.wide && !self.play_is_video && !track.room_video,
                         skip_target: Some(skip_target(self.play_generation, self.playback_choice)),
                         playing: self.playback_started
-                            && !(track.room_video
-                                && self.player.as_ref().is_some_and(|p| {
-                                    let sample = p.listening_sample();
-                                    sample.buffering || sample.seeking
-                                }))
+                            && !held
                             && !self.player_state.paused
                             && !self.player_state.idle,
                     });
@@ -840,6 +866,8 @@ impl App {
                 if self.together.backup.is_some()
                     && let Some(player) = &self.player
                 {
+                    self.together.session.as_mut().unwrap().watch.sync = Default::default();
+                    player.set_sync_speed(1.0);
                     player.set_paused(true);
                 }
             }
@@ -867,6 +895,7 @@ impl App {
                         && self.player_error.is_none()
                         && self.now.error.is_none())
                 {
+                    self.together.session.as_mut().unwrap().watch.sync = Default::default();
                     self.radio = None;
                     self.q
                         .restore_session(vec![song.track()], Some(0), None, false, None);
@@ -888,17 +917,24 @@ impl App {
                         };
                     }
                 } else if self.playback_started && !self.player_state.idle {
-                    let threshold = if watch {
-                        if song.playing { 0.45 } else { 0.12 }
-                    } else {
-                        1.5
-                    };
-                    let settling = watch
-                        && self.player.as_ref().is_some_and(|p| {
-                            let sample = p.listening_sample();
-                            sample.seeking || sample.buffering
-                        });
-                    if !settling && (position - self.player_state.position).abs() > threshold {
+                    if watch && let Some(player) = &self.player {
+                        // Read the clock now, rather than comparing with an earlier UI frame.
+                        let sample = player.listening_sample();
+                        let correction = self.together.session.as_mut().unwrap().watch.sync.update(
+                            Instant::now(),
+                            position,
+                            song.playing,
+                            &sample,
+                        );
+                        player.set_sync_speed(correction.speed);
+                        if let Some(at) = correction.seek {
+                            tracing::debug!(
+                                drift = position - sample.position,
+                                "resyncing room video"
+                            );
+                            player.seek_exact(at);
+                        }
+                    } else if (position - self.player_state.position).abs() > 1.5 {
                         self.seek_to(position);
                     }
                     if song.playing == self.player_state.paused
