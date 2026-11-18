@@ -8,6 +8,7 @@ pub(super) struct Sync {
     error: Option<f64>,
     far_samples: u8,
     pending_jump: bool,
+    aligned: bool,
 }
 
 #[derive(Debug)]
@@ -63,8 +64,13 @@ impl Sync {
         } else {
             0
         };
+        let first_alignment = settled && !self.aligned;
+        if settled {
+            self.aligned = true;
+        }
         if settled
-            && ((!playing && drift.abs() > 0.15)
+            && ((first_alignment && drift.abs() > 0.5)
+                || (!playing && drift.abs() > 0.15)
                 || self.pending_jump
                 || (drift.abs() > 2.0 && (previous.is_none() || self.far_samples >= 2)))
         {
@@ -97,7 +103,7 @@ mod tests {
         let start = Instant::now();
         let mut sync = Sync::default();
         let mut local = crate::listening::Sample {
-            position: 0.6,
+            position: 0.35,
             ..Default::default()
         };
         let mut speed = 1.0;
@@ -118,6 +124,21 @@ mod tests {
             assert!((0.98..=1.02).contains(&speed));
         }
         assert!((local.position - 600.0).abs() < 0.4);
+    }
+
+    #[test]
+    fn a_late_join_aligns_once_then_corrects_small_drift_without_seeking() {
+        let start = Instant::now();
+        let mut sync = Sync::default();
+        let mut local = crate::listening::Sample {
+            position: 18.7,
+            ..Default::default()
+        };
+        assert_eq!(sync.update(start, 20.0, true, &local).seek, Some(20.0));
+        local.position = 23.7;
+        let ongoing = sync.update(start + Duration::from_secs(5), 25.0, true, &local);
+        assert!(ongoing.seek.is_none());
+        assert_eq!(ongoing.speed, 1.02);
     }
 
     #[test]
