@@ -3739,7 +3739,7 @@ impl Backend {
                 use std::io::Write;
                 let mut response = http
                     .get(url)
-                    .timeout(Duration::from_secs(20))
+                    .timeout(std::time::Duration::from_secs(20))
                     .send()
                     .await?
                     .error_for_status()?;
