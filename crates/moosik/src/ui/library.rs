@@ -125,18 +125,21 @@ fn prompt(app: &mut App, ui: &mut egui::Ui) {
 fn content(app: &mut App, ui: &mut egui::Ui) {
     // Skeletons are shaped like the section the chips are already showing, since Songs is a
     // list and the other three are grids: a page that loads as rows and lands as cards jumps.
-    if app.library_loading {
-        skeletons(app, ui);
-        return;
-    }
-    if let Some(err) = app.library_error.clone() {
-        failed(app, ui, err, App::retry_route);
-        return;
-    }
     if !app.library_loaded {
-        // The safety net in App will have fired the fetch; skeletons, not nothing.
-        skeletons(app, ui);
+        if let Some(error) = app.library_error.clone() {
+            failed(app, ui, error, App::retry_route);
+        } else {
+            skeletons(app, ui);
+        }
         return;
+    }
+    if refresh_status(
+        ui,
+        &app.palette,
+        app.library_loading,
+        app.library_error.as_deref(),
+    ) {
+        app.retry_route();
     }
     if let Some((provider, error)) = &app.library_failed_provider {
         let retrying = app.library_source_retry.is_some();
@@ -299,6 +302,84 @@ fn nothing_yet(app: &App, ui: &mut egui::Ui, text: &str) {
     );
 }
 
+fn refresh_status(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    refreshing: bool,
+    error: Option<&str>,
+) -> bool {
+    if refreshing {
+        ui.label(egui::RichText::new("Refreshing library…").color(palette.secondary));
+        ui.add_space(8.0);
+    } else if let Some(error) = error {
+        let retry = ui
+            .horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new("Couldn’t refresh the library").color(palette.secondary),
+                )
+                .on_hover_text(error);
+                let retry = widgets::outline_button(ui, palette, "Retry");
+                retry.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Retry")
+                });
+                retry.clicked()
+            })
+            .inner;
+        ui.add_space(8.0);
+        return retry;
+    }
+    false
+}
+
+#[cfg(all(test, feature = "ui-check"))]
+#[test]
+fn library_refresh_status_shows_progress_and_offers_retry() {
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    let palette = theme::Palette::dark();
+    for (size, width) in [("normal", 800.0), ("narrow", 320.0)] {
+        let mut initialized = false;
+        let mut harness = Harness::builder().with_size([width, 200.0]).build_ui_state(
+            |ui, refreshing: &mut bool| {
+                if !initialized {
+                    theme::install(ui.ctx());
+                    theme::apply(ui.ctx(), &palette);
+                    initialized = true;
+                    return;
+                }
+                egui::Frame::new()
+                    .fill(palette.card_fill())
+                    .inner_margin(theme::PAGE_INSET_X as i8)
+                    .show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        crate::ui::page_title(ui, &palette, "Your library");
+                        if refresh_status(ui, &palette, *refreshing, Some("Offline")) {
+                            *refreshing = true;
+                        }
+                    });
+            },
+            true,
+        );
+        harness.step();
+        harness.get_by_label("Refreshing library…");
+        let output = std::env::var_os("MOOSIK_UI_CHECK_DIR").map(std::path::PathBuf::from);
+        if let Some(dir) = &output {
+            let path = dir.join(format!("library-{size}-refreshing.png"));
+            harness.render().unwrap().save(path).unwrap();
+        }
+        *harness.state_mut() = false;
+        harness.step();
+        harness.get_by_label("Couldn’t refresh the library");
+        if let Some(dir) = &output {
+            let path = dir.join(format!("library-{size}-refresh-error.png"));
+            harness.render().unwrap().save(path).unwrap();
+        }
+        harness.get_by_label("Retry").click();
+        harness.step();
+        assert!(*harness.state());
+    }
+}
+
 /// Latest (server order) by default; the rest ask YouTube to resort the whole library. Same
 /// plain-icon control as the playlist page's own sort, for the same reason: none of these
 /// orders has a colour to show, so a swatch dot would only ever invent one.
@@ -320,14 +401,6 @@ fn sort_row(app: &mut App, ui: &mut egui::Ui) {
             &labels,
         ) {
             app.sort_library(OPTIONS[i]);
-        }
-        if app.library_loading {
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("…")
-                    .font(theme::regular(11.0))
-                    .color(app.palette.dim),
-            );
         }
     });
     ui.add_space(4.0);

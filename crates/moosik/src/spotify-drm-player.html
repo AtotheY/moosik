@@ -71,16 +71,10 @@ function startPlayback(prefix) {
     if (terminalStateQueued) return;
     queuedState = snapshot();
     terminalStateQueued = queuedState.ended || queuedState.errorCode !== null;
-    if (queuedState.playing) {
-      if (progressTimer === null) {
-        progressTimer = setTimeout(() => {
-          progressTimer = null;
-          publish();
-        }, 250);
-      }
-    } else if (progressTimer !== null) {
-      clearTimeout(progressTimer);
-      progressTimer = null;
+    clearTimeout(progressTimer);
+    progressTimer = null;
+    if (!terminalStateQueued && (mediaLoaded || audioStartedAt !== null)) {
+      progressTimer = setTimeout(publish, queuedState.playing ? 250 : 2000);
     }
     if (!sendingState) void sendStates();
   }
@@ -88,10 +82,16 @@ function startPlayback(prefix) {
   async function sendStates() {
     sendingState = true;
     let failures = 0;
+    let sendingTerminal = false;
     try {
       while (queuedState) {
         const state = queuedState;
         queuedState = null;
+        const terminal = state.ended || state.errorCode !== null;
+        if (terminal && !sendingTerminal) {
+          sendingTerminal = true;
+          failures = 0;
+        }
         try {
           const timeout = AbortSignal.timeout(5000);
           const response = await fetch(prefix + 'state', {
@@ -99,18 +99,17 @@ function startPlayback(prefix) {
             headers: {'content-type': 'application/json'},
             body: JSON.stringify(state),
             redirect: 'error',
-            signal: state.ended || state.errorCode !== null
+            signal: terminal
               ? timeout
               : AbortSignal.any([requests.signal, timeout]),
           });
           if (!response.ok) throw new Error();
           failures = 0;
         } catch (_) {
-          if (++failures < 3 && (state.ended || state.errorCode !== null || !requests.signal.aborted)) {
+          if (++failures < 3 && (terminal || !requests.signal.aborted)) {
             queuedState ??= state;
             await new Promise(resolve => setTimeout(resolve, 250 * failures));
-          } else if (!state.ended && !stopped && errorCode === null) {
-            failures = 0;
+          } else if (!terminalStateQueued) {
             fail(10);
           }
         }

@@ -41,6 +41,7 @@ pub(crate) struct State {
     sources: [Source; 2],
     removed_youtube: HashMap<String, Track>,
     removed_spotify: HashSet<String>,
+    spotify_saved_in_library: HashSet<String>,
     pub(crate) spotify_pending: HashSet<String>,
     filter: Option<Provider>,
     sort: PlaylistSort,
@@ -137,7 +138,7 @@ impl State {
         let spotify = self.source(Provider::Spotify);
         if self.removed_spotify.contains(id) {
             Some(false)
-        } else if spotify.ids.contains(id) {
+        } else if spotify.ids.contains(id) || self.spotify_saved_in_library.contains(id) {
             Some(true)
         } else {
             spotify.complete().then_some(false)
@@ -146,7 +147,18 @@ impl State {
 
     pub(crate) fn refresh_spotify(&mut self) {
         self.removed_spotify.clear();
+        self.spotify_saved_in_library.clear();
         self.source_mut(Provider::Spotify).restart();
+    }
+
+    pub(crate) fn note_library_songs<'a>(&mut self, tracks: impl IntoIterator<Item = &'a Track>) {
+        for track in tracks
+            .into_iter()
+            .filter(|track| track.is_spotify() && track.in_library)
+        {
+            self.removed_spotify.remove(&track.video_id);
+            self.spotify_saved_in_library.insert(track.video_id.clone());
+        }
     }
 
     pub(crate) fn save_spotify_track(&mut self, mut track: Track) {
@@ -169,6 +181,7 @@ impl State {
 
     pub(crate) fn remove_spotify_track(&mut self, id: &str) {
         self.removed_spotify.insert(id.to_owned());
+        self.spotify_saved_in_library.remove(id);
         let spotify = self.source_mut(Provider::Spotify);
         spotify.ids.remove(id);
         spotify.songs.items.retain(|track| track.video_id != id);
@@ -587,6 +600,27 @@ mod tests {
         state.loaded(spotify, Ok(Paged::new(vec![restored.clone()], None)));
         assert_eq!(state.spotify_liked(&removed.video_id), Some(false));
         assert_eq!(state.spotify_liked(&restored.video_id), Some(true));
+    }
+
+    #[test]
+    fn fresh_library_membership_overrides_an_older_complete_spotify_list() {
+        let [_, spotify] = SOURCES;
+        let mut track = song("spotify:track:0000000000000000000001");
+        track.in_library = true;
+        let mut state = State::default();
+        state.loaded(spotify, Ok(Paged::new(Vec::new(), None)));
+        assert_eq!(state.spotify_liked(&track.video_id), Some(false));
+
+        state.note_library_songs([&track]);
+        assert_eq!(state.spotify_liked(&track.video_id), Some(true));
+        state.remove_spotify_track(&track.video_id);
+        assert_eq!(state.spotify_liked(&track.video_id), Some(false));
+
+        state.note_library_songs([&track]);
+        assert_eq!(state.spotify_liked(&track.video_id), Some(true));
+        state.refresh_spotify();
+        state.loaded(spotify, Ok(Paged::new(Vec::new(), None)));
+        assert_eq!(state.spotify_liked(&track.video_id), Some(false));
     }
 
     #[test]

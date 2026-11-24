@@ -30,6 +30,7 @@ const FIRST_MEDIA_RANGE: u64 = 128 * 1024;
 const MEDIA_RANGE: u64 = 1024 * 1024;
 const MEDIA_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const RENDERER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const RENDERER_STATE_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDERER_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const PLAYBACK_READY_GRACE: Duration = Duration::from_secs(45);
 const REPORT_STARTED_MS: u64 = 1_000;
@@ -338,6 +339,7 @@ pub struct Handle(Arc<Inner>);
 struct Inner {
     ctx: egui::Context,
     state: Mutex<Snapshot>,
+    last_state_update: Mutex<Instant>,
     error: Mutex<Option<String>>,
     recoverable: AtomicBool,
     commands: Mutex<PlaybackCommands>,
@@ -348,6 +350,20 @@ struct Inner {
     canceled: AtomicBool,
     reporting: Mutex<Option<PlaybackReporting>>,
     resources: Mutex<Option<Resources>>,
+}
+
+impl Inner {
+    fn missing_state(&self, now: Instant) -> bool {
+        self.playing.load(Ordering::SeqCst)
+            && !self.paused.load(Ordering::SeqCst)
+            && !self.state.lock().unwrap_or_else(|e| e.into_inner()).idle
+            && now.duration_since(
+                *self
+                    .last_state_update
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ) >= RENDERER_STATE_TIMEOUT
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -375,7 +391,6 @@ impl PlaybackCommands {
     }
 
     fn acknowledge(&mut self, sequence: u64) {
-        // i fucking hate this, even localhost can lose a response after we send it.
         self.pending.retain(|command| command.sequence > sequence);
     }
 }
@@ -717,6 +732,7 @@ impl Handle {
         Self(Arc::new(Inner {
             ctx,
             state: Mutex::new(Snapshot::default()),
+            last_state_update: Mutex::new(Instant::now()),
             error: Mutex::new(None),
             recoverable: AtomicBool::new(false),
             commands: Mutex::new(PlaybackCommands::default()),
@@ -762,6 +778,13 @@ impl Handle {
     pub fn set_paused(&self, paused: bool) {
         if self.0.canceled.load(Ordering::SeqCst) {
             return;
+        }
+        if !paused && self.0.paused.load(Ordering::SeqCst) {
+            *self
+                .0
+                .last_state_update
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Instant::now();
         }
         self.0.paused.store(paused, Ordering::SeqCst);
         self.0
@@ -1207,7 +1230,13 @@ async fn start(
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_none_or(|resources| resources.renderer.exited());
-        ensure!(!exited, "Spotify protected renderer closed before playback");
+        if exited {
+            if let Some(error) = handle.last_error() {
+                bail!(error);
+            }
+            handle.0.recoverable.store(true, Ordering::SeqCst);
+            bail!("Spotify protected renderer closed before playback");
+        }
         ensure!(
             Instant::now() < deadline,
             "Spotify protected playback timed out"
@@ -1225,19 +1254,28 @@ async fn watch_renderer(active: Weak<Inner>) {
             break;
         }
         let mut resources = inner.resources.lock().unwrap_or_else(|e| e.into_inner());
-        let exited = resources
-            .as_ref()
-            .is_some_and(|resources| resources.renderer.exited());
-        if exited {
-            inner.recoverable.store(true, Ordering::SeqCst);
-            *inner.error.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some("Spotify protected renderer closed".to_owned());
-            resources.take();
-            drop(resources);
-            inner.started.notify_waiters();
-            inner.ctx.request_repaint();
+        let Some(active) = resources.as_ref() else {
             break;
+        };
+        let message = if active.renderer.exited() {
+            "Spotify protected renderer closed"
+        } else if inner.missing_state(Instant::now()) {
+            "Spotify protected renderer stopped reporting playback"
+        } else {
+            continue;
+        };
+        {
+            let mut error = inner.error.lock().unwrap_or_else(|e| e.into_inner());
+            if error.is_none() && !inner.canceled.load(Ordering::SeqCst) {
+                inner.recoverable.store(true, Ordering::SeqCst);
+                *error = Some(message.to_owned());
+            }
         }
+        resources.take();
+        drop(resources);
+        inner.started.notify_waiters();
+        inner.ctx.request_repaint();
+        break;
     }
 }
 
@@ -1641,6 +1679,10 @@ impl BrowserState {
                 && (0.0..=100.0).contains(&self.volume),
             "Invalid renderer state"
         );
+        *inner
+            .last_state_update
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Instant::now();
         {
             let mut reporting = inner.reporting.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(reporter) = reporting.as_mut() {
@@ -1868,6 +1910,28 @@ mod tests {
         state.update(&handle.0).unwrap();
         assert!(repaint_requested());
         assert!(handle.last_error().is_some());
+    }
+
+    #[test]
+    fn missing_renderer_updates_only_expire_after_playback_starts_and_while_unpaused() {
+        let handle = Handle::new(egui::Context::default());
+        let last_update = *handle.0.last_state_update.lock().unwrap();
+        let deadline = last_update + RENDERER_STATE_TIMEOUT;
+        assert!(!handle.0.missing_state(deadline));
+
+        handle.0.playing.store(true, Ordering::SeqCst);
+        assert!(!handle.0.missing_state(deadline - Duration::from_millis(1)));
+        assert!(handle.0.missing_state(deadline));
+
+        handle.set_paused(true);
+        assert!(!handle.0.missing_state(deadline));
+        handle.set_paused(false);
+        let resumed_at = *handle.0.last_state_update.lock().unwrap();
+        assert!(!handle.0.missing_state(resumed_at));
+        assert!(handle.0.missing_state(resumed_at + RENDERER_STATE_TIMEOUT));
+
+        handle.stop();
+        assert!(!handle.0.missing_state(resumed_at + RENDERER_STATE_TIMEOUT));
     }
 
     #[test]

@@ -1666,6 +1666,7 @@ pub struct App {
     /// The signed-in user's library, in sections.
     pub(crate) library: crate::model::Library,
     pub(crate) library_loading: bool,
+    library_refresh_pending: bool,
     pub(crate) library_error: Option<String>,
     pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
     library_songs_generation: u64,
@@ -2331,6 +2332,7 @@ impl App {
             sign_in_error: None,
             library: crate::model::Library::default(),
             library_loading: false,
+            library_refresh_pending: false,
             library_error: None,
             library_paging_errors: Vec::new(),
             library_songs_generation: 0,
@@ -4229,12 +4231,13 @@ impl App {
             self.history_error = None;
             self.history_invalidate();
         }
-        if crate::spotify::is_signed_in() {
-            match self.current_route() {
-                Route::LikedMusic => self.liked_music.refresh_spotify(),
-                Route::Library if self.can_retry_library_provider() => self.fetch_library(),
-                _ => {}
-            }
+        let route = self.current_route();
+        self.library_refresh_pending = route == Route::Library
+            && self.library_loaded
+            && !self.library_loading
+            && crate::spotify::is_signed_in();
+        if route == Route::LikedMusic && crate::spotify::is_signed_in() {
+            self.liked_music.refresh_spotify();
         }
     }
 
@@ -4341,7 +4344,13 @@ impl App {
             Route::Playlist(id) => self.load_playlist(id),
             Route::LikedMusic => self.load_liked_music(),
             Route::Mood(params) => self.load_mood_playlists(params),
-            Route::Library => self.load_library(),
+            Route::Library => {
+                if self.library_refresh_pending && self.can_retry_library_provider() {
+                    self.fetch_library();
+                } else {
+                    self.load_library();
+                }
+            }
             Route::Home => self.load_home(),
             // Its shelf comes from the home feed, so the feed must be there first.
             Route::HomeShelf(title) => {
@@ -4562,6 +4571,7 @@ impl App {
     }
 
     fn fetch_library(&mut self) {
+        self.library_refresh_pending = false;
         self.library_error = None;
         self.library_loading = true;
         self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
@@ -4570,6 +4580,7 @@ impl App {
             self.browsing_epoch,
             self.library_songs_generation,
             self.signed_in(),
+            self.library_loaded,
         );
     }
 
@@ -4911,8 +4922,8 @@ impl App {
     pub(crate) fn retry_profile(&mut self) {
         self.profile.spotify_error = None;
         self.profile.youtube_error = None;
-        if self.library_error.take().is_some() {
-            self.library_loaded = false;
+        if !self.library_loaded {
+            self.library_error = None;
         }
         self.load_profile();
     }
@@ -4975,9 +4986,7 @@ impl App {
             }
             Route::Library => {
                 self.library_error = None;
-                self.library_loaded = false;
-                self.library = crate::model::Library::default();
-                self.resync_local_playlists();
+                self.library_refresh_pending = self.library_loaded;
             }
             Route::Home => {
                 self.home_error = None;
@@ -5497,6 +5506,7 @@ impl App {
     /// Ask for the next page of one library section, if there is one and none is in flight.
     pub(crate) fn load_more_library(&mut self, section: crate::api::LibrarySection) {
         if self.library_loading
+            || self.library_refresh_pending
             || self.library_source_retry.is_some()
             || self
                 .library_paging_errors
@@ -5633,7 +5643,7 @@ impl App {
             (self.releases_loading, Load::Releases),
             (self.charts_loading, Load::Charts),
             (self.moods_loading, Load::Moods),
-            (self.library_loading, Load::Library),
+            (self.library_loading && !self.library_loaded, Load::Library),
             (self.home_shelf_loading.is_some(), Load::HomeShelf),
             (self.radio_loading, Load::Radio),
             (self.library.playlists.loading, Load::SidebarPlaylists),
@@ -6582,6 +6592,7 @@ impl App {
                 {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
+                    self.liked_music.note_library_songs(&library.songs.items);
                     self.library = library;
                     self.library_paging_errors.clear();
                     self.library_failed_provider = failed_provider;
@@ -6610,6 +6621,8 @@ impl App {
                     self.library_source_retry = None;
                     match result {
                         Ok(loaded) => {
+                            self.liked_music
+                                .note_library_songs(&loaded.value.songs.items);
                             crate::providers::merge_recovered_library(
                                 &mut self.library,
                                 loaded.value,
@@ -6692,6 +6705,9 @@ impl App {
                 {
                     match section {
                         crate::api::LibrarySection::Songs => {
+                            self.liked_music.note_library_songs(
+                                page.items.iter().filter_map(crate::model::Entry::track),
+                            );
                             crate::providers::append_library_songs(&mut self.library.songs, page)
                         }
                         crate::api::LibrarySection::Artists => self.library.artists.extend(
@@ -8580,6 +8596,7 @@ impl App {
 
     fn invalidate_browsing(&mut self) {
         self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
+        self.library_refresh_pending = false;
         self.backend.set_browsing_epoch(self.browsing_epoch);
         self.artist_sources.clear();
         self.releases = None;
