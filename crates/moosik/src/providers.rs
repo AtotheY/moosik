@@ -161,6 +161,7 @@ pub async fn library(
     sort: LibrarySortParam,
     youtube: bool,
     spotify: bool,
+    minimum_spotify_songs: usize,
 ) -> Result<LibraryLoad> {
     let spotify_requested = spotify;
     let sort_merged_songs = spotify && sort != LibrarySortParam::RecentlySaved;
@@ -174,7 +175,7 @@ pub async fn library(
         },
         async {
             if spotify {
-                Some(crate::spotify::library_with_warnings().await)
+                Some(crate::spotify::library_with_warnings(minimum_spotify_songs).await)
             } else {
                 None
             }
@@ -190,7 +191,7 @@ pub async fn library(
         && !loaded.source_failed(Source::Spotify, moosik_spotify::LibrarySection::Songs);
     if sort_merged_songs && loaded.spotify_songs_fresh && loaded.failed_provider.is_none() {
         match sorted_songs(loaded.value.songs.clone(), sort, |token| async move {
-            library_more(api, LibrarySection::Songs, &token).await
+            library_more(api, LibrarySection::Songs, &token, 0).await
         })
         .await
         {
@@ -229,8 +230,10 @@ fn assemble_library(
 
 impl LibraryLoad {
     pub(crate) fn song_sort_needs_refresh(&self, keeping_cached_sections: bool) -> bool {
-        self.failed_provider.is_some()
-            || (keeping_cached_sections && self.songs_sort_error.is_some())
+        self.failed_provider.as_ref().is_some_and(|(provider, _)| {
+            *provider != Provider::Spotify
+                || !spotify_songs_restart_pending(self.value.songs.next.as_deref())
+        }) || (keeping_cached_sections && self.songs_sort_error.is_some())
     }
 
     pub(crate) fn spotify_songs_head_failed(&self) -> bool {
@@ -392,7 +395,7 @@ pub(crate) async fn retry_library_provider(
     let (value, warnings) = match provider {
         Provider::YouTubeMusic => (api.library(sort).await?, Vec::new()),
         Provider::Spotify => {
-            let (library, warnings) = crate::spotify::library_with_warnings().await?;
+            let (library, warnings) = crate::spotify::library_with_warnings(0).await?;
             (
                 library,
                 warnings.into_iter().map(|(_, error)| error).collect(),
@@ -535,11 +538,19 @@ pub async fn sidebar_playlists(api: &Api, youtube: bool, spotify: bool) -> Resul
     })
 }
 
-pub async fn library_more(api: &Api, section: LibrarySection, token: &str) -> Result<Page> {
+pub async fn library_more(
+    api: &Api,
+    section: LibrarySection,
+    token: &str,
+    minimum_spotify_songs: usize,
+) -> Result<Page> {
     continued_page(Cursor::decode(token)?, |source, token| async move {
         match source {
             Source::YouTubeMusic => api.library_more(section, token).await,
-            Source::Spotify => crate::spotify::library_more(section, &token).await,
+            Source::Spotify => {
+                crate::spotify::library_more_with_depth(section, &token, minimum_spotify_songs)
+                    .await
+            }
         }
     })
     .await
@@ -567,18 +578,33 @@ fn spotify_songs_start() -> String {
     moosik_spotify::library_start_cursor(moosik_spotify::LibrarySection::Songs)
 }
 
-pub(crate) fn spotify_songs_head_recovered(previous: Option<&str>, next: Option<&str>) -> bool {
-    let start = spotify_songs_start();
-    let spotify_cursor = |token: Option<&str>| {
-        token
-            .and_then(|token| Cursor::decode(token).ok())
-            .and_then(|cursor| cursor.spotify)
-    };
-    spotify_cursor(previous).as_deref() == Some(start.as_str())
-        && spotify_cursor(next).as_deref() != Some(start.as_str())
+fn spotify_songs_restart_pending(next: Option<&str>) -> bool {
+    next.and_then(|next| Cursor::decode(next).ok())
+        .and_then(|cursor| cursor.spotify)
+        .is_some_and(|cursor| cursor == spotify_songs_start())
 }
 
-pub(crate) fn append_library_songs(songs: &mut Paged<Track>, page: Page) {
+pub(crate) fn spotify_songs_reload_depth(songs: &Paged<Track>) -> usize {
+    if spotify_songs_restart_pending(songs.next.as_deref()) {
+        songs
+            .items
+            .iter()
+            .filter(|track| track.is_spotify())
+            .count()
+    } else {
+        0
+    }
+}
+
+fn spotify_songs_head_recovered(previous: Option<&str>, next: Option<&str>) -> bool {
+    spotify_songs_restart_pending(previous) && !spotify_songs_restart_pending(next)
+}
+
+pub(crate) fn append_library_songs(songs: &mut Paged<Track>, page: Page) -> (bool, &[Track]) {
+    let restarted = spotify_songs_head_recovered(songs.next.as_deref(), page.next.as_deref());
+    if restarted {
+        songs.items.retain(|track| !track.is_spotify());
+    }
     let mut tracks: Vec<_> = page
         .items
         .into_iter()
@@ -595,7 +621,9 @@ pub(crate) fn append_library_songs(songs: &mut Paged<Track>, page: Page) {
             .collect();
         tracks.retain(|track| !track.is_spotify() || !existing.contains(track.video_id.as_str()));
     }
+    let start = songs.items.len();
     songs.extend(tracks, page.next);
+    (restarted, &songs.items[start..])
 }
 
 async fn continued_page<F, Fut>(mut cursor: Cursor, mut fetch: F) -> Result<Page>
@@ -774,6 +802,60 @@ mod tests {
             fallback.encode().as_deref()
         ));
         assert!(spotify_songs_head_recovered(Some(start), None));
+    }
+
+    #[test]
+    fn spotify_songs_recovery_keeps_its_restart_after_a_provider_failure() {
+        let removed = song("spotify:track:0000000000000000000001", "Removed");
+        let saved = song("spotify:track:0000000000000000000002", "Alpha");
+        let youtube = song("yt", "Zulu");
+        let mut cached = merge_library(
+            Library::default(),
+            Library {
+                songs: Paged::new(
+                    vec![removed.clone(), saved.clone()],
+                    Some("old-tail".into()),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(restart_spotify_song_paging(&mut cached.songs));
+        let mut refreshed = assemble_library(
+            Some(Ok(Library {
+                songs: Paged::new(vec![youtube.clone()], Some("yt-tail".into())),
+                ..Default::default()
+            })),
+            Some(Err(anyhow::anyhow!("Spotify unavailable"))),
+            Vec::new(),
+        )
+        .unwrap();
+        refreshed.preserve_unavailable_sections(&mut cached);
+        assert!(!refreshed.song_sort_needs_refresh(true));
+        assert_eq!(spotify_songs_reload_depth(&refreshed.value.songs), 2);
+        let songs = &mut refreshed.value.songs;
+        let mut cursor = Cursor::decode(songs.next.as_deref().unwrap()).unwrap();
+        cursor.advance(Source::YouTubeMusic, None).unwrap();
+        let (restarted, _) = append_library_songs(
+            songs,
+            Page {
+                items: vec![],
+                next: cursor.encode(),
+            },
+        );
+        assert!(!restarted);
+        assert_eq!(songs.items, [youtube.clone(), removed, saved.clone()]);
+
+        let (restarted, tracks) = append_library_songs(
+            songs,
+            Page {
+                items: vec![Entry::Song(saved.clone())],
+                next: None,
+            },
+        );
+        assert!(restarted);
+        assert_eq!(tracks, std::slice::from_ref(&saved));
+        sort_library_songs_if_complete(songs, LibrarySortParam::NameAsc, false);
+        assert_eq!(songs.items, [saved, youtube]);
     }
 
     #[test]

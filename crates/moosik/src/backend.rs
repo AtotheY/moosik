@@ -2107,6 +2107,7 @@ impl Backend {
         epoch: u64,
         songs_generation: u64,
         youtube: bool,
+        minimum_spotify_songs: usize,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
@@ -2115,6 +2116,7 @@ impl Backend {
                 sort,
                 youtube,
                 crate::spotify::is_signed_in(),
+                minimum_spotify_songs,
             )
             .await
             {
@@ -2437,23 +2439,27 @@ impl Backend {
         token: String,
         epoch: u64,
         songs_generation: u64,
+        minimum_spotify_songs: usize,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
-            let event = match crate::providers::library_more(&api, section, &token).await {
-                Ok(page) => Event::LibraryMore {
-                    section,
-                    page,
-                    epoch,
-                    songs_generation,
-                },
-                Err(e) => Event::LibraryMoreFailed {
-                    epoch,
-                    songs_generation,
-                    section,
-                    error: format!("{e:#}"),
-                },
-            };
+            let event =
+                match crate::providers::library_more(&api, section, &token, minimum_spotify_songs)
+                    .await
+                {
+                    Ok(page) => Event::LibraryMore {
+                        section,
+                        page,
+                        epoch,
+                        songs_generation,
+                    },
+                    Err(e) => Event::LibraryMoreFailed {
+                        epoch,
+                        songs_generation,
+                        section,
+                        error: format!("{e:#}"),
+                    },
+                };
             Self::emit(&tx, &ctx, event);
         });
     }
