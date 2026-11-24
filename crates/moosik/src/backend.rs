@@ -270,8 +270,7 @@ pub enum Event {
     /// `epoch` is the account epoch this fetch was issued under — see `App::account_epoch`'s own
     /// doc comment for why a reply whose epoch has since moved on must be dropped.
     LibraryLoaded {
-        library: Library,
-        failed_provider: Option<(Provider, String)>,
+        loaded: crate::providers::LibraryLoad,
         epoch: u64,
         songs_generation: u64,
     },
@@ -2108,7 +2107,6 @@ impl Backend {
         epoch: u64,
         songs_generation: u64,
         youtube: bool,
-        refreshing: bool,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
         self.rt.spawn(async move {
@@ -2120,33 +2118,11 @@ impl Backend {
             )
             .await
             {
-                Ok(loaded)
-                    if refreshing
-                        && (loaded.failed_provider.is_some() || !loaded.warnings.is_empty()) =>
-                {
-                    Event::LibraryFailed {
-                        error: loaded
-                            .failed_provider
-                            .into_iter()
-                            .map(|(provider, error)| format!("{}: {error}", provider.name()))
-                            .chain(loaded.warnings)
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        epoch,
-                        songs_generation,
-                    }
-                }
-                Ok(loaded) => {
-                    for message in loaded.warnings {
-                        Self::emit(&tx, &ctx, Event::ProviderBrowseWarning { message, epoch });
-                    }
-                    Event::LibraryLoaded {
-                        library: loaded.value,
-                        failed_provider: loaded.failed_provider,
-                        epoch,
-                        songs_generation,
-                    }
-                }
+                Ok(loaded) => Event::LibraryLoaded {
+                    loaded,
+                    epoch,
+                    songs_generation,
+                },
                 Err(e) => Event::LibraryFailed {
                     error: format!("{e:#}"),
                     epoch,

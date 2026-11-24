@@ -88,10 +88,13 @@ pub struct Loaded<T> {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug)]
 pub struct LibraryLoad {
     pub value: Library,
     pub failed_provider: Option<(Provider, String)>,
-    pub warnings: Vec<String>,
+    pub spotify_warnings: crate::spotify::LibraryWarnings,
+    pub spotify_songs_fresh: bool,
+    pub songs_sort_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -159,6 +162,7 @@ pub async fn library(
     youtube: bool,
     spotify: bool,
 ) -> Result<LibraryLoad> {
+    let spotify_requested = spotify;
     let sort_merged_songs = spotify && sort != LibrarySortParam::RecentlySaved;
     let (youtube, spotify) = tokio::join!(
         async {
@@ -182,17 +186,17 @@ pub async fn library(
         None => (None, Vec::new()),
     };
     let mut loaded = assemble_library(youtube, spotify, section_warnings)?;
-    if sort_merged_songs {
-        if let Some((provider, error)) = &loaded.failed_provider {
-            bail!(
-                "Could not load the complete library for sorting:\n{}: {error}",
-                provider.name()
-            );
-        }
-        loaded.value.songs = sorted_songs(loaded.value.songs, sort, |token| async move {
+    loaded.spotify_songs_fresh = spotify_requested
+        && !loaded.source_failed(Source::Spotify, moosik_spotify::LibrarySection::Songs);
+    if sort_merged_songs && loaded.spotify_songs_fresh && loaded.failed_provider.is_none() {
+        match sorted_songs(loaded.value.songs.clone(), sort, |token| async move {
             library_more(api, LibrarySection::Songs, &token).await
         })
-        .await?;
+        .await
+        {
+            Ok(songs) => loaded.value.songs = songs,
+            Err(error) => loaded.songs_sort_error = Some(format!("{error:#}")),
+        }
     }
     Ok(loaded)
 }
@@ -200,7 +204,7 @@ pub async fn library(
 fn assemble_library(
     youtube: Option<Result<Library>>,
     spotify: Option<Result<Library>>,
-    warnings: Vec<String>,
+    spotify_warnings: crate::spotify::LibraryWarnings,
 ) -> Result<LibraryLoad> {
     let failed_provider = [
         (Provider::YouTubeMusic, youtube.as_ref()),
@@ -217,7 +221,143 @@ fn assemble_library(
     Ok(LibraryLoad {
         value: merge_library(youtube, spotify),
         failed_provider,
-        warnings,
+        spotify_warnings,
+        spotify_songs_fresh: false,
+        songs_sort_error: None,
+    })
+}
+
+impl LibraryLoad {
+    fn source_failed(&self, source: Source, section: moosik_spotify::LibrarySection) -> bool {
+        match source {
+            Source::YouTubeMusic => self
+                .failed_provider
+                .as_ref()
+                .is_some_and(|(provider, _)| *provider == Provider::YouTubeMusic),
+            Source::Spotify => {
+                self.failed_provider
+                    .as_ref()
+                    .is_some_and(|(provider, _)| *provider == Provider::Spotify)
+                    || self
+                        .spotify_warnings
+                        .iter()
+                        .any(|(failed, _)| *failed == section)
+            }
+        }
+    }
+
+    pub(crate) fn preserve_unavailable_sections(&mut self, previous: &mut Library) {
+        use moosik_spotify::LibrarySection;
+        let unavailable = |section| {
+            [
+                self.source_failed(Source::YouTubeMusic, section),
+                self.source_failed(Source::Spotify, section),
+            ]
+        };
+        let songs = unavailable(LibrarySection::Songs);
+        let artists = unavailable(LibrarySection::Artists);
+        let albums = unavailable(LibrarySection::Albums);
+        let playlists = unavailable(LibrarySection::Playlists);
+        if self.songs_sort_error.is_some() {
+            self.value.songs = std::mem::take(&mut previous.songs);
+            self.value.songs.loading = false;
+        } else {
+            preserve_sources(
+                &mut self.value.songs,
+                &mut previous.songs,
+                songs,
+                |track| match track.provider() {
+                    Provider::Spotify => Some(Source::Spotify),
+                    Provider::YouTubeMusic => Some(Source::YouTubeMusic),
+                    Provider::Local => None,
+                },
+            );
+        }
+        preserve_sources(
+            &mut self.value.artists,
+            &mut previous.artists,
+            artists,
+            |artist| {
+                Some(if artist.id.starts_with("spotify:artist:") {
+                    Source::Spotify
+                } else {
+                    Source::YouTubeMusic
+                })
+            },
+        );
+        preserve_sources(
+            &mut self.value.albums,
+            &mut previous.albums,
+            albums,
+            |album| {
+                Some(if album.id.starts_with("spotify:album:") {
+                    Source::Spotify
+                } else {
+                    Source::YouTubeMusic
+                })
+            },
+        );
+        preserve_sources(
+            &mut self.value.playlists,
+            &mut previous.playlists,
+            playlists,
+            |playlist| match playlist.source {
+                crate::model::PlaylistSource::Spotify => Some(Source::Spotify),
+                crate::model::PlaylistSource::YouTube => Some(Source::YouTubeMusic),
+                crate::model::PlaylistSource::Local => None,
+            },
+        );
+    }
+}
+
+fn preserve_sources<T>(
+    fresh: &mut Paged<T>,
+    previous: &mut Paged<T>,
+    failed: [bool; 2],
+    item_source: impl Fn(&T) -> Option<Source>,
+) {
+    if failed == [false, false] {
+        return;
+    }
+    let mut fresh_cursor = fresh
+        .next
+        .as_deref()
+        .and_then(|token| Cursor::decode(token).ok())
+        .unwrap_or_default();
+    let previous_cursor = previous
+        .next
+        .as_deref()
+        .and_then(|token| Cursor::decode(token).ok())
+        .unwrap_or_default();
+    let cached = std::mem::take(&mut previous.items);
+    for (index, source) in [Source::YouTubeMusic, Source::Spotify]
+        .into_iter()
+        .enumerate()
+    {
+        if failed[index]
+            && (previous_cursor.token(source).is_some()
+                || cached.iter().any(|item| item_source(item) == Some(source)))
+        {
+            match source {
+                Source::YouTubeMusic => fresh_cursor.youtube = previous_cursor.youtube.clone(),
+                Source::Spotify => fresh_cursor.spotify = previous_cursor.spotify.clone(),
+            }
+        }
+    }
+    fresh
+        .items
+        .extend(cached.into_iter().filter(|item| match item_source(item) {
+            Some(Source::YouTubeMusic) => failed[0],
+            Some(Source::Spotify) => failed[1],
+            None => false,
+        }));
+    fresh.next = fresh_cursor.encode();
+}
+
+pub(crate) fn spotify_songs_complete(next: Option<&str>) -> bool {
+    next.is_none_or(|token| {
+        token.starts_with(CURSOR_PREFIX)
+            && Cursor::decode(token).is_ok_and(|cursor| cursor.spotify.is_none())
     })
 }
 
@@ -228,7 +368,13 @@ pub(crate) async fn retry_library_provider(
 ) -> Result<Loaded<Library>> {
     let (value, warnings) = match provider {
         Provider::YouTubeMusic => (api.library(sort).await?, Vec::new()),
-        Provider::Spotify => crate::spotify::library_with_warnings().await?,
+        Provider::Spotify => {
+            let (library, warnings) = crate::spotify::library_with_warnings().await?;
+            (
+                library,
+                warnings.into_iter().map(|(_, error)| error).collect(),
+            )
+        }
         Provider::Local => bail!("Local music does not use the online library"),
     };
     Ok(Loaded { value, warnings })
@@ -539,6 +685,61 @@ fn merge_release_shelves(shelves: impl IntoIterator<Item = Shelf>) -> Vec<Shelf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn library_refresh_replaces_successful_sections_and_preserves_failed_sources() {
+        let artist = |id: &str| crate::model::ArtistRef {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            subscribers: None,
+            thumbnail: None,
+            actions: Default::default(),
+        };
+        let mut previous = merge_library(
+            Library {
+                artists: Paged::new(vec![artist("youtube-old")], None),
+                ..Default::default()
+            },
+            Library {
+                artists: Paged::new(
+                    vec![artist("spotify:artist:cached")],
+                    Some("cached-more".into()),
+                ),
+                songs: Paged::new(
+                    vec![song("spotify:track:0000000000000000000001", "Unsaved")],
+                    None,
+                ),
+                ..Default::default()
+            },
+        );
+        let mut fresh = assemble_library(
+            Some(Ok(Library {
+                artists: Paged::new(vec![artist("youtube-fresh")], Some("youtube-more".into())),
+                songs: Paged::new(Vec::new(), Some("youtube-songs-more".into())),
+                ..Default::default()
+            })),
+            Some(Ok(Library {
+                artists: Paged::new(Vec::new(), Some("retry-first".into())),
+                ..Default::default()
+            })),
+            vec![(
+                moosik_spotify::LibrarySection::Artists,
+                "Artist request failed".into(),
+            )],
+        )
+        .unwrap();
+        fresh.preserve_unavailable_sections(&mut previous);
+
+        assert_eq!(
+            fresh.value.artists.items,
+            vec![artist("youtube-fresh"), artist("spotify:artist:cached")],
+        );
+        let artists = Cursor::decode(fresh.value.artists.next.as_deref().unwrap()).unwrap();
+        assert_eq!(artists.spotify.as_deref(), Some("cached-more"));
+        assert_eq!(artists.youtube.as_deref(), Some("youtube-more"));
+        assert!(fresh.value.songs.items.is_empty());
+        assert!(spotify_songs_complete(fresh.value.songs.next.as_deref()));
+    }
 
     #[test]
     fn failed_initial_provider_can_recover_without_replacing_healthy_pages() {

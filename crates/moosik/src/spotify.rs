@@ -415,7 +415,9 @@ pub async fn library() -> Result<Library> {
     Ok(library_with_warnings().await?.0)
 }
 
-pub async fn library_with_warnings() -> Result<(Library, Vec<String>)> {
+pub(crate) type LibraryWarnings = Vec<(moosik_spotify::LibrarySection, String)>;
+
+pub(crate) async fn library_with_warnings() -> Result<(Library, LibraryWarnings)> {
     use moosik_spotify::LibrarySection;
     let transport = transport().await?;
     let load = |section| {
@@ -437,13 +439,13 @@ fn assemble_library(
     artists: Result<moosik_spotify::Page<CatalogItem>>,
     albums: Result<moosik_spotify::Page<CatalogItem>>,
     playlists: Result<moosik_spotify::Page<CatalogItem>>,
-) -> Result<(Library, Vec<String>)> {
+) -> Result<(Library, LibraryWarnings)> {
     use moosik_spotify::LibrarySection;
     let mut warnings = Vec::new();
     let mut take = |result, section, name| match result {
         Ok(page) => page,
         Err(error) => {
-            warnings.push(format!("Spotify {name}: {error}"));
+            warnings.push((section, format!("Spotify {name}: {error}")));
             moosik_spotify::Page {
                 items: Vec::new(),
                 next: Some(moosik_spotify::library_start_cursor(section)),
@@ -455,7 +457,8 @@ fn assemble_library(
     let albums = take(albums, LibrarySection::Albums, "albums");
     let playlists = take(playlists, LibrarySection::Playlists, "playlists");
     if warnings.len() == 4 {
-        bail!("{}", warnings.join("\n"));
+        let errors: Vec<_> = warnings.into_iter().map(|(_, error)| error).collect();
+        bail!("{}", errors.join("\n"));
     }
     Ok((
         Library {
@@ -799,7 +802,8 @@ mod tests {
         );
         assert!(library.playlists.next.is_none());
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("saved songs"));
+        assert_eq!(warnings[0].0, moosik_spotify::LibrarySection::Songs);
+        assert!(warnings[0].1.contains("saved songs"));
     }
 
     #[test]

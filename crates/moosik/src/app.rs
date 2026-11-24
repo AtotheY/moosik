@@ -4580,7 +4580,6 @@ impl App {
             self.browsing_epoch,
             self.library_songs_generation,
             self.signed_in(),
-            self.library_loaded,
         );
     }
 
@@ -5582,6 +5581,7 @@ impl App {
             self.retry_library_provider();
         } else if crate::providers::restart_spotify_song_paging(&mut self.library.songs) {
             self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
+            self.liked_music.begin_library_songs(&[], false);
             self.library_paging_errors
                 .retain(|(section, _)| *section != crate::api::LibrarySection::Songs);
         }
@@ -6583,8 +6583,7 @@ impl App {
                 // See `App::account_epoch`'s own doc comment: a reply for an account already
                 // switched away from is dropped rather than repopulating cleared state.
                 Event::LibraryLoaded {
-                    library,
-                    failed_provider,
+                    mut loaded,
                     epoch,
                     songs_generation,
                 } if epoch == self.browsing_epoch
@@ -6592,22 +6591,44 @@ impl App {
                 {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
-                    self.liked_music.note_library_songs(&library.songs.items);
-                    self.library = library;
+                    if loaded.spotify_songs_fresh
+                        && (loaded.songs_sort_error.is_none() || !self.library_loaded)
+                    {
+                        self.liked_music.begin_library_songs(
+                            &loaded.value.songs.items,
+                            crate::providers::spotify_songs_complete(
+                                loaded.value.songs.next.as_deref(),
+                            ),
+                        );
+                    } else {
+                        self.liked_music.cancel_library_songs();
+                    }
+                    if self.library_loaded {
+                        loaded.preserve_unavailable_sections(&mut self.library);
+                    }
+                    let mut errors: Vec<_> = loaded
+                        .spotify_warnings
+                        .into_iter()
+                        .map(|(_, error)| error)
+                        .chain(loaded.songs_sort_error)
+                        .collect();
+                    if self.library_loaded
+                        && let Some((provider, error)) = loaded.failed_provider.take()
+                    {
+                        errors.push(format!("{}: {error}", provider.name()));
+                    }
+                    self.library_error = (!errors.is_empty()).then(|| errors.join("\n"));
+                    self.library = loaded.value;
                     self.library_paging_errors.clear();
-                    self.library_failed_provider = failed_provider;
+                    self.library_failed_provider = loaded.failed_provider;
                     self.library_loaded = true;
+                    crate::providers::sort_library_songs(
+                        &mut self.library.songs.items,
+                        self.library_sort.param(),
+                    );
                     self.resync_local_playlists();
                     self.apply_playlist_order();
-                    // The restored track is the one copy that never went through
-                    // `Resolving`/`Playing`, so `reconcile_state` has not run on it — a liked
-                    // song restored at launch showed an unrated thumb in the bar until the
-                    // next play. Now that Liked Songs is here, fill it in; only blanks are
-                    // filled, so a rating the account disagrees with is never overwritten.
-                    if let Some(mut track) = self.now.track.take() {
-                        self.reconcile_state(&mut track);
-                        self.now.track = Some(track);
-                    }
+                    self.reconcile_current_library_track();
                 }
                 Event::LibraryLoaded { .. } => {}
                 Event::LibraryProviderRetried {
@@ -6621,8 +6642,19 @@ impl App {
                     self.library_source_retry = None;
                     match result {
                         Ok(loaded) => {
-                            self.liked_music
-                                .note_library_songs(&loaded.value.songs.items);
+                            if provider == crate::model::Provider::Spotify {
+                                let next = loaded.value.songs.next.as_deref();
+                                if next
+                                    != Some(&moosik_spotify::library_start_cursor(
+                                        moosik_spotify::LibrarySection::Songs,
+                                    ))
+                                {
+                                    self.liked_music.begin_library_songs(
+                                        &loaded.value.songs.items,
+                                        next.is_none(),
+                                    );
+                                }
+                            }
                             crate::providers::merge_recovered_library(
                                 &mut self.library,
                                 loaded.value,
@@ -6634,10 +6666,7 @@ impl App {
                             for warning in loaded.warnings {
                                 self.toast_error(&warning);
                             }
-                            if let Some(mut track) = self.now.track.take() {
-                                self.reconcile_state(&mut track);
-                                self.now.track = Some(track);
-                            }
+                            self.reconcile_current_library_track();
                         }
                         Err(error) => self.library_failed_provider = Some((provider, error)),
                     }
@@ -6680,16 +6709,8 @@ impl App {
                     && generation == self.liked_music.generation(provider) =>
                 {
                     self.liked_music.loaded(provider, result);
-                    if provider == crate::model::Provider::Spotify
-                        && let Some(mut track) = self.now.track.take()
-                    {
-                        self.reconcile_state(&mut track);
-                        if track.is_spotify()
-                            && let Some(liked) = self.liked_music.spotify_liked(&track.video_id)
-                        {
-                            self.playlist_picker.note_liked(&track.video_id, liked);
-                        }
-                        self.now.track = Some(track);
+                    if provider == crate::model::Provider::Spotify {
+                        self.reconcile_current_library_track();
                     }
                 }
                 Event::LikedMusicPage { .. } => {}
@@ -6707,8 +6728,14 @@ impl App {
                         crate::api::LibrarySection::Songs => {
                             self.liked_music.note_library_songs(
                                 page.items.iter().filter_map(crate::model::Entry::track),
+                                crate::providers::spotify_songs_complete(page.next.as_deref()),
                             );
-                            crate::providers::append_library_songs(&mut self.library.songs, page)
+                            crate::providers::append_library_songs(&mut self.library.songs, page);
+                            crate::providers::sort_library_songs(
+                                &mut self.library.songs.items,
+                                self.library_sort.param(),
+                            );
+                            self.reconcile_current_library_track();
                         }
                         crate::api::LibrarySection::Artists => self.library.artists.extend(
                             page.items
@@ -10005,6 +10032,18 @@ impl App {
             .filter_map(|r| r.entry.track())
         {
             f(t);
+        }
+    }
+
+    fn reconcile_current_library_track(&mut self) {
+        if let Some(mut track) = self.now.track.take() {
+            self.reconcile_state(&mut track);
+            if track.is_spotify()
+                && let Some(liked) = self.liked_music.spotify_liked(&track.video_id)
+            {
+                self.playlist_picker.note_liked(&track.video_id, liked);
+            }
+            self.now.track = Some(track);
         }
     }
 

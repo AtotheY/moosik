@@ -604,6 +604,17 @@ impl RendererLease {
                         .map_or(true, |status| status.is_some())
             })
     }
+
+    fn retire(&self) {
+        let mut pool = RENDERER_POOL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pool.ownership.active == Some(self.token)
+            && let Some(renderer) = pool.child.take()
+        {
+            retire_renderer(renderer);
+        }
+    }
 }
 
 impl Drop for RendererLease {
@@ -1260,6 +1271,7 @@ async fn watch_renderer(active: Weak<Inner>) {
         let message = if active.renderer.exited() {
             "Spotify protected renderer closed"
         } else if inner.missing_state(Instant::now()) {
+            active.renderer.retire();
             "Spotify protected renderer stopped reporting playback"
         } else {
             continue;
