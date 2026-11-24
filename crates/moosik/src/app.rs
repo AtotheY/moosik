@@ -1671,6 +1671,7 @@ pub struct App {
     pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
     library_songs_generation: u64,
     library_song_sort_needs_refresh: bool,
+    library_spotify_songs_recovering: bool,
     pub(crate) library_failed_provider: Option<(crate::model::Provider, String)>,
     pub(crate) library_source_retry: Option<(crate::model::Provider, u64)>,
     library_source_retry_id: u64,
@@ -2338,6 +2339,7 @@ impl App {
             library_paging_errors: Vec::new(),
             library_songs_generation: 0,
             library_song_sort_needs_refresh: false,
+            library_spotify_songs_recovering: false,
             library_failed_provider: None,
             library_source_retry: None,
             library_source_retry_id: 0,
@@ -5580,7 +5582,8 @@ impl App {
             self.retry_library_provider();
         } else if crate::providers::restart_spotify_song_paging(&mut self.library.songs) {
             self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
-            self.liked_music.begin_library_songs(&[], false);
+            self.library_spotify_songs_recovering = true;
+            self.liked_music.cancel_library_songs();
             self.library_paging_errors
                 .retain(|(section, _)| *section != crate::api::LibrarySection::Songs);
         }
@@ -6604,6 +6607,7 @@ impl App {
                     self.organizer.page_failed = false;
                     self.library_song_sort_needs_refresh =
                         loaded.song_sort_needs_refresh(self.library_loaded);
+                    self.library_spotify_songs_recovering = loaded.spotify_songs_head_failed();
                     if loaded.spotify_songs_fresh
                         && (loaded.songs_sort_error.is_none() || !self.library_loaded)
                     {
@@ -6737,6 +6741,16 @@ impl App {
                 {
                     match section {
                         crate::api::LibrarySection::Songs => {
+                            if self.library_spotify_songs_recovering
+                                && crate::providers::spotify_songs_head_recovered(
+                                    self.library.songs.next.as_deref(),
+                                    page.next.as_deref(),
+                                )
+                            {
+                                self.library_spotify_songs_recovering = false;
+                                self.library.songs.items.retain(|track| !track.is_spotify());
+                                self.liked_music.begin_library_songs(&[], false);
+                            }
                             self.liked_music.note_library_songs(
                                 page.items.iter().filter_map(crate::model::Entry::track),
                                 crate::providers::spotify_songs_complete(page.next.as_deref()),
@@ -8633,6 +8647,7 @@ impl App {
         self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
         self.library_refresh_pending = false;
         self.library_song_sort_needs_refresh = false;
+        self.library_spotify_songs_recovering = false;
         self.backend.set_browsing_epoch(self.browsing_epoch);
         self.artist_sources.clear();
         self.releases = None;

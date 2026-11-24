@@ -230,9 +230,13 @@ fn assemble_library(
 impl LibraryLoad {
     pub(crate) fn song_sort_needs_refresh(&self, keeping_cached_sections: bool) -> bool {
         self.failed_provider.is_some()
-            || (keeping_cached_sections
-                && (self.songs_sort_error.is_some()
-                    || self.source_failed(Source::Spotify, moosik_spotify::LibrarySection::Songs)))
+            || (keeping_cached_sections && self.songs_sort_error.is_some())
+    }
+
+    pub(crate) fn spotify_songs_head_failed(&self) -> bool {
+        self.spotify_warnings
+            .iter()
+            .any(|(section, _)| *section == moosik_spotify::LibrarySection::Songs)
     }
 
     fn source_failed(&self, source: Source, section: moosik_spotify::LibrarySection) -> bool {
@@ -279,6 +283,18 @@ impl LibraryLoad {
                     Provider::Local => None,
                 },
             );
+            if self.spotify_songs_head_failed() {
+                let mut cursor = self
+                    .value
+                    .songs
+                    .next
+                    .as_deref()
+                    .and_then(|next| Cursor::decode(next).ok())
+                    .unwrap_or_default();
+                cursor.spotify = Some(spotify_songs_start());
+                cursor.spotify_next = true;
+                self.value.songs.next = cursor.encode();
+            }
         }
         preserve_sources(
             &mut self.value.artists,
@@ -540,13 +556,26 @@ pub(crate) fn restart_spotify_song_paging(songs: &mut Paged<Track>) -> bool {
     if cursor.spotify.is_none() {
         return false;
     }
-    cursor.spotify = Some(moosik_spotify::library_start_cursor(
-        moosik_spotify::LibrarySection::Songs,
-    ));
+    cursor.spotify = Some(spotify_songs_start());
     cursor.spotify_next = true;
     songs.next = cursor.encode();
     songs.loading = false;
     true
+}
+
+fn spotify_songs_start() -> String {
+    moosik_spotify::library_start_cursor(moosik_spotify::LibrarySection::Songs)
+}
+
+pub(crate) fn spotify_songs_head_recovered(previous: Option<&str>, next: Option<&str>) -> bool {
+    let start = spotify_songs_start();
+    let spotify_cursor = |token: Option<&str>| {
+        token
+            .and_then(|token| Cursor::decode(token).ok())
+            .and_then(|cursor| cursor.spotify)
+    };
+    spotify_cursor(previous).as_deref() == Some(start.as_str())
+        && spotify_cursor(next).as_deref() != Some(start.as_str())
 }
 
 pub(crate) fn append_library_songs(songs: &mut Paged<Track>, page: Page) {
@@ -702,6 +731,50 @@ fn merge_release_shelves(shelves: impl IntoIterator<Item = Shelf>) -> Vec<Shelf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_spotify_songs_head_restarts_at_page_one_and_unblocks_sort() {
+        let mut previous = merge_library(
+            Library::default(),
+            Library {
+                songs: Paged::new(
+                    vec![song("spotify:track:0000000000000000000001", "Cached")],
+                    Some("old-tail".into()),
+                ),
+                ..Default::default()
+            },
+        );
+        let mut loaded = assemble_library(
+            Some(Ok(Library {
+                songs: Paged::new(vec![song("yt", "Zulu")], Some("youtube-tail".into())),
+                ..Default::default()
+            })),
+            Some(Ok(Library {
+                songs: Paged::new(Vec::new(), Some(spotify_songs_start())),
+                ..Default::default()
+            })),
+            vec![(
+                moosik_spotify::LibrarySection::Songs,
+                "Songs request failed".into(),
+            )],
+        )
+        .unwrap();
+        assert!(!loaded.song_sort_needs_refresh(true));
+        loaded.preserve_unavailable_sections(&mut previous);
+        let start = loaded.value.songs.next.as_deref().unwrap();
+        let mut fallback = Cursor::decode(start).unwrap();
+        assert_eq!(
+            fallback.spotify.as_deref(),
+            Some(spotify_songs_start().as_str())
+        );
+        assert_eq!(loaded.value.songs.items.len(), 2);
+        fallback.youtube = None;
+        assert!(!spotify_songs_head_recovered(
+            Some(start),
+            fallback.encode().as_deref()
+        ));
+        assert!(spotify_songs_head_recovered(Some(start), None));
+    }
 
     #[test]
     fn alphabetical_library_sort_waits_for_the_missing_source_and_all_pages() {
