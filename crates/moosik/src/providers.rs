@@ -311,16 +311,18 @@ where
             page.next,
         );
     }
+    sort_library_songs(&mut songs.items, sort);
+    Ok(songs)
+}
+
+pub(crate) fn sort_library_songs(songs: &mut [Track], sort: LibrarySortParam) {
     match sort {
-        LibrarySortParam::NameAsc => songs
-            .items
-            .sort_by_cached_key(|track| track.title.to_lowercase()),
-        LibrarySortParam::NameDesc => songs
-            .items
-            .sort_by_cached_key(|track| std::cmp::Reverse(track.title.to_lowercase())),
+        LibrarySortParam::NameAsc => songs.sort_by_cached_key(|track| track.title.to_lowercase()),
+        LibrarySortParam::NameDesc => {
+            songs.sort_by_cached_key(|track| std::cmp::Reverse(track.title.to_lowercase()))
+        }
         LibrarySortParam::RecentlySaved => {}
     }
-    Ok(songs)
 }
 
 pub async fn sidebar_playlists(api: &Api, youtube: bool, spotify: bool) -> Result<Loaded<Page>> {

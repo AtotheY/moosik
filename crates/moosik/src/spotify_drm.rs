@@ -339,7 +339,8 @@ struct Inner {
     ctx: egui::Context,
     state: Mutex<Snapshot>,
     error: Mutex<Option<String>>,
-    commands: Mutex<VecDeque<Value>>,
+    recoverable: AtomicBool,
+    commands: Mutex<PlaybackCommands>,
     changed: Notify,
     started: Notify,
     playing: AtomicBool,
@@ -347,6 +348,36 @@ struct Inner {
     canceled: AtomicBool,
     reporting: Mutex<Option<PlaybackReporting>>,
     resources: Mutex<Option<Resources>>,
+}
+
+#[derive(serde::Serialize)]
+struct PlaybackCommand {
+    sequence: u64,
+    kind: &'static str,
+    value: Value,
+}
+
+#[derive(Default)]
+struct PlaybackCommands {
+    sequence: u64,
+    pending: VecDeque<PlaybackCommand>,
+}
+
+impl PlaybackCommands {
+    fn push(&mut self, kind: &'static str, value: Value) {
+        self.pending.retain(|command| command.kind != kind);
+        self.sequence += 1;
+        self.pending.push_back(PlaybackCommand {
+            sequence: self.sequence,
+            kind,
+            value,
+        });
+    }
+
+    fn acknowledge(&mut self, sequence: u64) {
+        // i fucking hate this, even localhost can lose a response after we send it.
+        self.pending.retain(|command| command.sequence > sequence);
+    }
 }
 
 struct PlaybackReporting {
@@ -687,7 +718,8 @@ impl Handle {
             ctx,
             state: Mutex::new(Snapshot::default()),
             error: Mutex::new(None),
-            commands: Mutex::new(VecDeque::new()),
+            recoverable: AtomicBool::new(false),
+            commands: Mutex::new(PlaybackCommands::default()),
             changed: Notify::new(),
             started: Notify::new(),
             playing: AtomicBool::new(false),
@@ -710,15 +742,19 @@ impl Handle {
             .clone()
     }
 
-    fn command(&self, kind: &str, value: Value) {
+    pub(crate) fn recovery_state(&self) -> Option<(f64, bool)> {
+        self.0
+            .recoverable
+            .load(Ordering::SeqCst)
+            .then(|| (self.state().position, self.0.paused.load(Ordering::SeqCst)))
+    }
+
+    fn command(&self, kind: &'static str, value: Value) {
         if self.0.canceled.load(Ordering::SeqCst) {
             return;
         }
         let mut commands = self.0.commands.lock().unwrap_or_else(|e| e.into_inner());
-        commands.retain(|command| command["kind"] != kind);
-        if commands.len() < 16 {
-            commands.push_back(json!({"kind":kind,"value":value}));
-        }
+        commands.push(kind, value);
         drop(commands);
         self.0.changed.notify_waiters();
     }
@@ -814,7 +850,6 @@ impl Handle {
 }
 
 struct Broker {
-    transport: Transport,
     uri: Arc<str>,
     playback: watch::Receiver<Option<Arc<ValidatedPlayback>>>,
     media: AsyncMutex<JoinSet<Option<CachedAudio>>>,
@@ -882,6 +917,7 @@ impl Drop for RendererServer {
 }
 
 struct ValidatedPlayback {
+    transport: Transport,
     track: PreparedTrack,
     certificate: Vec<u8>,
 }
@@ -903,6 +939,20 @@ pub async fn play(
 ) -> Result<()> {
     let result = start(transport, uri, handle.clone(), volume, start_at).await;
     if let Err(error) = &result {
+        if matches!(
+            error.downcast_ref::<moosik_spotify::Error>(),
+            Some(
+                moosik_spotify::Error::Network(_)
+                    | moosik_spotify::Error::Timeout(_)
+                    | moosik_spotify::Error::DealerClosed
+                    | moosik_spotify::Error::Http {
+                        status: 500..=599,
+                        ..
+                    }
+            )
+        ) {
+            handle.0.recoverable.store(true, Ordering::SeqCst);
+        }
         handle.fail(format!("{error:#}"));
     }
     result
@@ -930,9 +980,15 @@ async fn start(
         let report_turn = REPORT_TURN.lock().await;
         let report_wait_ms = waiting.elapsed().as_millis();
         let started = Instant::now();
-        let track = transport.prepare_for_playback(uri).await?;
+        let (track, transport) =
+            crate::spotify::with_transport(&transport, |transport| async move {
+                let track = transport.prepare_for_playback(uri).await?;
+                Ok((track, transport))
+            })
+            .await?;
         Result::<_>::Ok((
             track,
+            transport,
             started.elapsed().as_millis(),
             report_wait_ms,
             report_turn,
@@ -940,7 +996,10 @@ async fn start(
     };
     let service_certificate = async {
         let started = Instant::now();
-        let value = transport.service_certificate().await?;
+        let value = crate::spotify::with_transport(&transport, |transport| async move {
+            transport.service_certificate().await
+        })
+        .await?;
         let certificate = certificate(&value)
             .context("Spotify returned an invalid service certificate")?
             .to_vec();
@@ -964,7 +1023,6 @@ async fn start(
         });
     }
     let broker = Arc::new(Broker {
-        transport: transport.clone(),
         uri: uri_key,
         playback,
         media: AsyncMutex::new(media),
@@ -987,8 +1045,10 @@ async fn start(
         reused
     };
     let renderer_started = Instant::now();
-    let ((track, prepare_ms, report_wait_ms, report_turn), (certificate, certificate_ms)) =
-        tokio::try_join!(prepare, service_certificate)?;
+    let (
+        (track, transport, prepare_ms, report_wait_ms, report_turn),
+        (certificate, certificate_ms),
+    ) = tokio::try_join!(prepare, service_certificate)?;
     if let Some(error) = handle.last_error() {
         bail!(error);
     }
@@ -996,7 +1056,11 @@ async fn start(
         !handle.0.canceled.load(Ordering::SeqCst),
         "Spotify playback canceled"
     );
-    let playback = Arc::new(ValidatedPlayback { track, certificate });
+    let playback = Arc::new(ValidatedPlayback {
+        transport: transport.clone(),
+        track,
+        certificate,
+    });
     if playback.track.can_report_playback() {
         let mut reporting = handle.0.reporting.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(
@@ -1165,6 +1229,7 @@ async fn watch_renderer(active: Weak<Inner>) {
             .as_ref()
             .is_some_and(|resources| resources.renderer.exited());
         if exited {
+            inner.recoverable.store(true, Ordering::SeqCst);
             *inner.error.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some("Spotify protected renderer closed".to_owned());
             resources.take();
@@ -1289,7 +1354,7 @@ async fn serve_track(
             let mut response_started = false;
             match tokio::time::timeout(
                 MEDIA_DOWNLOAD_TIMEOUT,
-                serve_media(socket, broker, &playback.track, &mut response_started),
+                serve_media(socket, broker, &playback, &mut response_started),
             )
             .await
             {
@@ -1300,9 +1365,13 @@ async fn serve_track(
             }
         }
         ("POST", "license") => {
-            broker.validated_playback().await?;
+            let playback = broker.validated_playback().await?;
             let started = Instant::now();
-            match broker.transport.license(body).await {
+            match crate::spotify::with_transport(&playback.transport, |transport| async move {
+                transport.license(body).await
+            })
+            .await
+            {
                 Ok(license) => {
                     tracing::info!(
                         elapsed_ms = started.elapsed().as_millis(),
@@ -1310,34 +1379,30 @@ async fn serve_track(
                     );
                     respond(socket, 200, "application/octet-stream", &license).await
                 }
-                Err(_) => respond(socket, 502, "text/plain", b"").await,
+                Err(error) => {
+                    tracing::warn!(%error, "Spotify license request failed");
+                    respond(socket, 502, "text/plain", b"").await
+                }
             }
         }
-        ("GET", "commands") => {
+        ("GET", route) if route.starts_with("commands/") => {
+            let acknowledged = route["commands/".len()..].parse::<u64>()?;
             let notified = inner.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let empty = inner
-                .commands
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_empty();
+            let empty = {
+                let mut commands = inner.commands.lock().unwrap_or_else(|e| e.into_inner());
+                commands.acknowledge(acknowledged);
+                commands.pending.is_empty()
+            };
             if empty {
                 let _ = tokio::time::timeout(Duration::from_secs(20), notified).await;
             }
-            let commands: Vec<Value> = inner
-                .commands
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .drain(..)
-                .collect();
-            respond(
-                socket,
-                200,
-                "application/json",
-                &serde_json::to_vec(&commands)?,
-            )
-            .await
+            let commands = {
+                let commands = inner.commands.lock().unwrap_or_else(|e| e.into_inner());
+                serde_json::to_vec(&commands.pending)?
+            };
+            respond(socket, 200, "application/json", &commands).await
         }
         ("POST", "state") => {
             let state: BrowserState = serde_json::from_slice(body)?;
@@ -1360,9 +1425,10 @@ async fn serve_track(
 async fn serve_media(
     socket: &mut TcpStream,
     broker: &Broker,
-    track: &PreparedTrack,
+    playback: &ValidatedPlayback,
     response_started: &mut bool,
 ) -> Result<()> {
+    let track = &playback.track;
     let mut preloaded = broker.media.lock().await;
     let started = Instant::now();
     let preloaded = preloaded.join_next().await.and_then(Result::ok).flatten();
@@ -1408,10 +1474,7 @@ async fn serve_media(
         return Ok(());
     }
 
-    let mut range = broker
-        .transport
-        .fetch_range(track, 0, FIRST_MEDIA_RANGE - 1)
-        .await?;
+    let mut range = fetch_media_range(&playback.transport, track, 0, FIRST_MEDIA_RANGE - 1).await?;
     let total = range.total_len;
     ensure!(
         (1..=LIMIT).contains(&total),
@@ -1451,10 +1514,13 @@ async fn serve_media(
             break;
         }
         drop(range);
-        range = broker
-            .transport
-            .fetch_range(track, offset, (offset + MEDIA_RANGE - 1).min(total - 1))
-            .await?;
+        range = fetch_media_range(
+            &playback.transport,
+            track,
+            offset,
+            (offset + MEDIA_RANGE - 1).min(total - 1),
+        )
+        .await?;
         check_media_range(&range, offset, total)?;
         socket.write_all(&range.bytes).await?;
     }
@@ -1476,6 +1542,35 @@ async fn serve_media(
         "Spotify media ready"
     );
     Ok(())
+}
+
+async fn fetch_media_range(
+    transport: &Transport,
+    track: &PreparedTrack,
+    start: u64,
+    end: u64,
+) -> Result<RangeData> {
+    let result = crate::spotify::with_transport(transport, |transport| async move {
+        transport.fetch_range(track, start, end).await
+    })
+    .await;
+    if matches!(
+        result.as_ref().err().and_then(|error| error.downcast_ref()),
+        Some(
+            moosik_spotify::Error::Network(_)
+                | moosik_spotify::Error::Http {
+                    status: 500..=599,
+                    ..
+                }
+        )
+    ) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        return crate::spotify::with_transport(transport, |transport| async move {
+            transport.fetch_range(track, start, end).await
+        })
+        .await;
+    }
+    result
 }
 
 fn check_media_range(range: &RangeData, offset: u64, total: u64) -> Result<()> {
@@ -1546,18 +1641,6 @@ impl BrowserState {
                 && (0.0..=100.0).contains(&self.volume),
             "Invalid renderer state"
         );
-        if let Some(code) = self.error_code {
-            let message = match code {
-                1 => "Spotify playback was interrupted",
-                2 => "Spotify audio could not be fetched",
-                3 => "Spotify protected audio could not be decoded",
-                4 => "Spotify audio format is unsupported",
-                11 => "This WebView2 runtime does not support Spotify protected playback",
-                12 => "This WebView2 runtime does not support Spotify audio streaming",
-                _ => "Spotify protected playback failed. Sign in again and retry",
-            };
-            *inner.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.to_owned());
-        }
         {
             let mut reporting = inner.reporting.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(reporter) = reporting.as_mut() {
@@ -1593,6 +1676,26 @@ impl BrowserState {
         let ready =
             self.playing || (self.ready && self.paused && inner.paused.load(Ordering::SeqCst));
         let became_ready = ready && !inner.playing.swap(true, Ordering::SeqCst);
+        if let Some(code) = self.error_code {
+            inner
+                .recoverable
+                .store(matches!(code, 1 | 2 | 3 | 10), Ordering::SeqCst);
+            tracing::warn!(
+                code,
+                position = self.position,
+                "Spotify renderer reported a playback error"
+            );
+            let message = match code {
+                1 => "Spotify playback was interrupted",
+                2 => "Spotify audio could not be fetched",
+                3 => "Spotify protected audio could not be decoded",
+                4 => "Spotify audio format is unsupported",
+                11 => "This WebView2 runtime does not support Spotify protected playback",
+                12 => "This WebView2 runtime does not support Spotify audio streaming",
+                _ => "Spotify protected playback failed",
+            };
+            *inner.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(message.to_owned());
+        }
         inner.started.notify_waiters();
         if changed || became_ready || self.error_code.is_some() {
             inner.ctx.request_repaint();
@@ -2047,6 +2150,22 @@ mod tests {
     }
 
     #[test]
+    fn commands_survive_a_lost_response_without_replaying_acknowledged_updates() {
+        let mut commands = PlaybackCommands::default();
+        commands.push("seek", json!(5));
+        commands.push("pause", json!(true));
+        commands.acknowledge(0);
+        assert_eq!(commands.pending.len(), 2);
+
+        commands.push("seek", json!(10));
+        commands.acknowledge(2);
+        assert_eq!(commands.pending.len(), 1);
+        assert_eq!(commands.pending[0].value, json!(10));
+        commands.acknowledge(3);
+        assert!(commands.pending.is_empty());
+    }
+
+    #[test]
     fn volume_commands_apply_logarithmic_gain() {
         let handle = Handle::new(egui::Context::default());
         for (volume, gain) in [
@@ -2058,15 +2177,22 @@ mod tests {
             (150.0, 1.0),
         ] {
             handle.set_volume(volume);
-            let command = handle.0.commands.lock().unwrap().pop_front().unwrap();
-            assert_eq!(command["kind"], "volume");
-            let sent = command["value"].as_f64().unwrap();
+            let command = handle
+                .0
+                .commands
+                .lock()
+                .unwrap()
+                .pending
+                .pop_front()
+                .unwrap();
+            assert_eq!(command.kind, "volume");
+            let sent = command.value.as_f64().unwrap();
             assert!((sent / 100.0 - gain).abs() < 1e-12);
             assert_eq!(handle.state().volume, sent);
         }
         for volume in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             handle.set_volume(volume);
-            assert!(handle.0.commands.lock().unwrap().is_empty());
+            assert!(handle.0.commands.lock().unwrap().pending.is_empty());
             assert_eq!(handle.state().volume, 100.0);
         }
     }
@@ -2078,7 +2204,7 @@ mod tests {
         handle.set_volume(15.0);
         assert_eq!(handle.state().volume, 70.0);
         assert!(!handle.state().buffering);
-        assert!(handle.0.commands.lock().unwrap().is_empty());
+        assert!(handle.0.commands.lock().unwrap().pending.is_empty());
     }
 
     #[test]

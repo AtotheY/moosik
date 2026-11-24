@@ -17,11 +17,22 @@ struct Source {
     cursors: HashSet<String>,
     ids: HashSet<String>,
     generation: u64,
+    replace_on_load: bool,
 }
 
 impl Source {
     fn complete(&self) -> bool {
         self.loaded && self.songs.next.is_none() && self.error.is_none()
+    }
+
+    fn restart(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.loaded = false;
+        self.error = None;
+        self.cursors.clear();
+        self.songs.loading = false;
+        self.songs.next = None;
+        self.replace_on_load = true;
     }
 }
 
@@ -86,6 +97,10 @@ impl State {
             source.error = Some("The next page repeated an earlier page.".to_owned());
             return;
         }
+        if std::mem::take(&mut source.replace_on_load) {
+            source.songs.items.clear();
+            source.ids.clear();
+        }
         let songs = page
             .items
             .into_iter()
@@ -98,6 +113,10 @@ impl State {
             })
             .map(|mut track| {
                 track.like = LikeStatus::Like;
+                if provider == Provider::Spotify {
+                    track.in_library = true;
+                    track.set_video_id = None;
+                }
                 track
             })
             .collect();
@@ -115,23 +134,35 @@ impl State {
     }
 
     pub(crate) fn spotify_liked(&self, id: &str) -> Option<bool> {
+        let spotify = self.source(Provider::Spotify);
         if self.removed_spotify.contains(id) {
             Some(false)
-        } else if self.source(Provider::Spotify).ids.contains(id) {
+        } else if spotify.ids.contains(id) {
             Some(true)
         } else {
-            None
+            spotify.complete().then_some(false)
         }
+    }
+
+    pub(crate) fn refresh_spotify(&mut self) {
+        self.removed_spotify.clear();
+        self.source_mut(Provider::Spotify).restart();
     }
 
     pub(crate) fn save_spotify_track(&mut self, mut track: Track) {
         self.removed_spotify.remove(&track.video_id);
         let spotify = self.source_mut(Provider::Spotify);
-        if spotify.ids.insert(track.video_id.clone()) {
+        let inserted = spotify.ids.insert(track.video_id.clone());
+        if inserted {
             track.in_library = true;
             track.like = LikeStatus::Like;
             track.set_video_id = None;
             spotify.songs.items.insert(0, track);
+        }
+        if !spotify.complete() {
+            spotify.restart();
+        }
+        if inserted {
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -142,12 +173,7 @@ impl State {
         spotify.ids.remove(id);
         spotify.songs.items.retain(|track| track.video_id != id);
         if !spotify.complete() {
-            spotify.generation = spotify.generation.wrapping_add(1);
-            spotify.loaded = false;
-            spotify.error = None;
-            spotify.cursors.clear();
-            spotify.songs.loading = false;
-            spotify.songs.next = None;
+            spotify.restart();
         }
         self.revision = self.revision.wrapping_add(1);
     }
@@ -538,6 +564,29 @@ mod tests {
         assert_eq!(state.source(youtube).songs.len(), 1);
         state.save_spotify_track(removed);
         assert_eq!(state.source(spotify).songs.len(), 2);
+    }
+
+    #[test]
+    fn spotify_refresh_replaces_old_rows_and_reloads_tracks_liked_elsewhere() {
+        let [_, spotify] = SOURCES;
+        let removed = song("spotify:track:0000000000000000000001");
+        let restored = song("spotify:track:0000000000000000000002");
+        let mut state = State::default();
+        state.loaded(
+            spotify,
+            Ok(Paged::new(vec![removed.clone(), restored.clone()], None)),
+        );
+        state.remove_spotify_track(&restored.video_id);
+        state.refresh_spotify();
+
+        assert_eq!(state.request(spotify, false), Some(None));
+        state.loaded(spotify, Err("offline".into()));
+        assert_eq!(state.spotify_liked(&removed.video_id), Some(true));
+        state.clear_errors();
+        assert_eq!(state.request(spotify, false), Some(None));
+        state.loaded(spotify, Ok(Paged::new(vec![restored.clone()], None)));
+        assert_eq!(state.spotify_liked(&removed.video_id), Some(false));
+        assert_eq!(state.spotify_liked(&restored.video_id), Some(true));
     }
 
     #[test]

@@ -69,8 +69,8 @@ function startPlayback(prefix) {
 
   function publish() {
     if (terminalStateQueued) return;
-    terminalStateQueued = stopped || errorCode !== null;
     queuedState = snapshot();
+    terminalStateQueued = queuedState.ended || queuedState.errorCode !== null;
     if (queuedState.playing) {
       if (progressTimer === null) {
         progressTimer = setTimeout(() => {
@@ -87,6 +87,7 @@ function startPlayback(prefix) {
 
   async function sendStates() {
     sendingState = true;
+    let failures = 0;
     try {
       while (queuedState) {
         const state = queuedState;
@@ -102,9 +103,16 @@ function startPlayback(prefix) {
               ? timeout
               : AbortSignal.any([requests.signal, timeout]),
           });
-          if (!response.ok && !stopped && errorCode === null) fail(10);
+          if (!response.ok) throw new Error();
+          failures = 0;
         } catch (_) {
-          if (!stopped && errorCode === null) fail(10);
+          if (++failures < 3 && (state.ended || state.errorCode !== null || !requests.signal.aborted)) {
+            queuedState ??= state;
+            await new Promise(resolve => setTimeout(resolve, 250 * failures));
+          } else if (!state.ended && !stopped && errorCode === null) {
+            failures = 0;
+            fail(10);
+          }
         }
       }
     } finally {
@@ -213,14 +221,16 @@ function startPlayback(prefix) {
   }
 
   async function commands() {
-    while (!stopped && errorCode === null) {
+    let acknowledged = 0;
+    let failures = 0;
+    while (!terminalStateQueued) {
       try {
-        const response = await request('commands');
+        const response = await request('commands/' + acknowledged);
         const values = await response.json();
         if (!Array.isArray(values)) throw new Error();
         for (const command of values) {
-          if (stopped || errorCode !== null) break;
-          if (!command || typeof command !== 'object') continue;
+          if (terminalStateQueued) break;
+          if (!Number.isSafeInteger(command?.sequence) || command.sequence <= acknowledged) continue;
           if (command.kind === 'pause' && typeof command.value === 'boolean') {
             desiredPaused = command.value;
             void applyPause();
@@ -235,10 +245,17 @@ function startPlayback(prefix) {
           } else if (command.kind === 'stop') {
             stop();
           }
+          acknowledged = command.sequence;
           publish();
         }
+        failures = 0;
       } catch (_) {
-        if (!stopped) fail(10);
+        if (terminalStateQueued) return;
+        if (++failures >= 3) {
+          fail(10);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 250 * failures));
+        }
       }
     }
   }

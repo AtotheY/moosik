@@ -3545,6 +3545,9 @@ impl App {
     /// The transport, once a pass: see [`eframe::App::logic`] for why it is not in `ui`.
     fn transport_step(&mut self, ctx: &egui::Context) {
         if let Some(error) = self.player.as_mut().and_then(Player::take_error) {
+            if self.recover_spotify_playback(&error) {
+                return;
+            }
             self.play_generation = self.backend.cancel_play();
             self.playback_started = false;
             self.now.resolving = false;
@@ -3757,6 +3760,49 @@ impl App {
         if let Some(at) = self.stall.pending_at() {
             ctx.request_repaint_after(at.saturating_duration_since(Instant::now()));
         }
+    }
+
+    fn recover_spotify_playback(&mut self, error: &str) -> bool {
+        if self.following() || self.stall.retries != 0 {
+            return false;
+        }
+        let Some(index) = self
+            .q
+            .current()
+            .filter(|&index| self.q.get(index).is_some_and(Track::is_spotify))
+        else {
+            return false;
+        };
+        let Some((position, paused)) = self
+            .player
+            .as_ref()
+            .and_then(Player::spotify_recovery_state)
+        else {
+            return false;
+        };
+        let position = if position == 0.0 && !self.playback_started {
+            self.stall.start_position().unwrap_or_default()
+        } else {
+            position
+        };
+        tracing::warn!(%error, position, paused, "Recovering Spotify playback");
+        self.stall.retries += 1;
+        self.q.set_resume(Some((index, position)));
+        if paused {
+            self.play_generation = self.backend.cancel_play();
+            self.playback_started = false;
+            self.now.resolving = false;
+            self.now.paused = true;
+            self.spotify_pause = SpotifyPause::Released;
+            self.listening.suspend(position, "paused");
+            if let Some(player) = &mut self.player {
+                player.take_error();
+                player.suspend_spotify();
+            }
+        } else {
+            self.play_index_load(index, true);
+        }
+        true
     }
 
     fn release_paused_spotify(&mut self, ctx: &egui::Context, state: crate::player::PlayerState) {
@@ -4160,11 +4206,8 @@ impl App {
 
     /// Mark the route now on screen as entered, for the pages that must refresh per visit.
     ///
-    /// History is the only one today: it is dated ("Today", "Yesterday"), so a list fetched an
-    /// hour ago would show the wrong day labels. `ensure_route_loaded`'s per-frame safety net cannot do this by itself —
-    /// its `load_*` guards are "already have it" tests — so entry is the one place that knows a
-    /// new visit has begun. The shelves on screen are deliberately kept: a revisit refreshes
-    /// underneath the old list rather than showing the loading skeleton again.
+    /// `ensure_route_loaded`'s per-frame safety net cannot refresh on entry by itself:
+    /// its `load_*` guards skip data that has already loaded.
     fn note_route_entered(&mut self) {
         ui::queue_edit::clear_selection(&self.ctx);
         ui::song_drag::clear_selection(&self.ctx);
@@ -4185,6 +4228,13 @@ impl App {
         if matches!(self.current_route(), Route::History) {
             self.history_error = None;
             self.history_invalidate();
+        }
+        if crate::spotify::is_signed_in() {
+            match self.current_route() {
+                Route::LikedMusic => self.liked_music.refresh_spotify(),
+                Route::Library if self.can_retry_library_provider() => self.fetch_library(),
+                _ => {}
+            }
         }
     }
 
@@ -4512,6 +4562,7 @@ impl App {
     }
 
     fn fetch_library(&mut self) {
+        self.library_error = None;
         self.library_loading = true;
         self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
         self.backend.fetch_library(
@@ -5445,7 +5496,8 @@ impl App {
 
     /// Ask for the next page of one library section, if there is one and none is in flight.
     pub(crate) fn load_more_library(&mut self, section: crate::api::LibrarySection) {
-        if self.library_source_retry.is_some()
+        if self.library_loading
+            || self.library_source_retry.is_some()
             || self
                 .library_paging_errors
                 .iter()
@@ -5494,11 +5546,22 @@ impl App {
         self.load_more_library(section);
     }
 
-    fn remove_spotify_library_song(&mut self, video_id: &str) {
+    fn update_spotify_library_song(&mut self, track: &Track, liked: bool) {
         self.library
             .songs
             .items
-            .retain(|song| song.video_id != video_id);
+            .retain(|song| song.video_id != track.video_id);
+        if liked && self.library_loaded {
+            let mut track = track.clone();
+            track.in_library = true;
+            track.like = LikeStatus::Like;
+            track.set_video_id = None;
+            self.library.songs.items.insert(0, track);
+            crate::providers::sort_library_songs(
+                &mut self.library.songs.items,
+                self.library_sort.param(),
+            );
+        }
         if self.library_loading {
             self.fetch_library();
         } else if matches!(
@@ -6604,6 +6667,17 @@ impl App {
                     && generation == self.liked_music.generation(provider) =>
                 {
                     self.liked_music.loaded(provider, result);
+                    if provider == crate::model::Provider::Spotify
+                        && let Some(mut track) = self.now.track.take()
+                    {
+                        self.reconcile_state(&mut track);
+                        if track.is_spotify()
+                            && let Some(liked) = self.liked_music.spotify_liked(&track.video_id)
+                        {
+                            self.playlist_picker.note_liked(&track.video_id, liked);
+                        }
+                        self.now.track = Some(track);
+                    }
                 }
                 Event::LikedMusicPage { .. } => {}
                 // A further page of one section, appended in order.
@@ -7417,16 +7491,16 @@ impl App {
                     }
                     self.playlist_picker.note_liked(&track.video_id, liked);
                     self.set_library_state(&track.video_id, liked);
+                    self.update_spotify_library_song(&track, liked);
                     if liked {
                         self.liked_music.save_spotify_track(track);
                         self.toast("Added to Spotify Liked Songs");
                     } else {
                         self.liked_music.remove_spotify_track(&track.video_id);
-                        self.remove_spotify_library_song(&track.video_id);
-                        if self.history.current() == &Route::LikedMusic {
-                            self.request_liked_music(crate::model::Provider::Spotify, false);
-                        }
                         self.toast("Removed from Spotify Liked Songs");
+                    }
+                    if self.history.current() == &Route::LikedMusic {
+                        self.request_liked_music(crate::model::Provider::Spotify, false);
                     }
                 }
                 Event::EditablePlaylists { video_id, result } => {
@@ -7658,6 +7732,9 @@ impl App {
                     error,
                     generation,
                 } if generation == self.play_generation => {
+                    if track.is_spotify() && self.recover_spotify_playback(&error) {
+                        continue;
+                    }
                     // The player bar shows this too, but only while it is looked at: a play that
                     // fails while the queue runs on deserves a line in the log either way.
                     tracing::warn!(

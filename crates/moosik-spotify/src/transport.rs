@@ -307,6 +307,14 @@ impl PreparedTrack {
 }
 
 impl Transport {
+    pub fn same_session(&self, other: &Self) -> bool {
+        self.inner.license_cookie == other.inner.license_cookie
+    }
+
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     pub async fn account_profile(&self) -> Result<AccountProfile> {
         let response = self
             .query(
@@ -1004,6 +1012,9 @@ impl Transport {
     }
 
     pub async fn license(&self, challenge: &[u8]) -> Result<Vec<u8>> {
+        if self.inner.expires_at <= now_ms()? {
+            return Err(Error::AuthorizationExpired);
+        }
         if challenge.is_empty() || challenge.len() > LIMIT {
             return Err(Error::Invalid("license challenge"));
         }
@@ -1117,7 +1128,13 @@ impl Transport {
         )
         .await
         .map_err(|_| Error::Timeout("Dealer connect"))?
-        .map_err(|_| Error::Network("Dealer connect"))?;
+        .map_err(|error| match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => Error::Http {
+                stage: "Dealer connect",
+                status: response.status().as_u16(),
+            },
+            _ => Error::Network("Dealer connect"),
+        })?;
         let (connection_tx, connection_rx) = oneshot::channel();
         let (manifest_tx, manifest_rx) = watch::channel(None);
         let (selected_tx, selected) = watch::channel(None);
