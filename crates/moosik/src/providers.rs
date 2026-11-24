@@ -228,6 +228,13 @@ fn assemble_library(
 }
 
 impl LibraryLoad {
+    pub(crate) fn song_sort_needs_refresh(&self, keeping_cached_sections: bool) -> bool {
+        self.failed_provider.is_some()
+            || (keeping_cached_sections
+                && (self.songs_sort_error.is_some()
+                    || self.source_failed(Source::Spotify, moosik_spotify::LibrarySection::Songs)))
+    }
+
     fn source_failed(&self, source: Source, section: moosik_spotify::LibrarySection) -> bool {
         match source {
             Source::YouTubeMusic => self
@@ -461,13 +468,23 @@ where
     Ok(songs)
 }
 
-pub(crate) fn sort_library_songs(songs: &mut [Track], sort: LibrarySortParam) {
+fn sort_library_songs(songs: &mut [Track], sort: LibrarySortParam) {
     match sort {
         LibrarySortParam::NameAsc => songs.sort_by_cached_key(|track| track.title.to_lowercase()),
         LibrarySortParam::NameDesc => {
             songs.sort_by_cached_key(|track| std::cmp::Reverse(track.title.to_lowercase()))
         }
         LibrarySortParam::RecentlySaved => {}
+    }
+}
+
+pub(crate) fn sort_library_songs_if_complete(
+    songs: &mut Paged<Track>,
+    sort: LibrarySortParam,
+    needs_refresh: bool,
+) {
+    if !needs_refresh && songs.next.is_none() {
+        sort_library_songs(&mut songs.items, sort);
     }
 }
 
@@ -687,6 +704,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn alphabetical_library_sort_waits_for_the_missing_source_and_all_pages() {
+        for (sort, expected) in [
+            (LibrarySortParam::NameAsc, ["alpha", "Echo", "Zulu"]),
+            (LibrarySortParam::NameDesc, ["Zulu", "Echo", "alpha"]),
+        ] {
+            let mut songs = Paged::new(vec![song("z", "Zulu"), song("e", "Echo")], None);
+            sort_library_songs_if_complete(&mut songs, sort, true);
+            assert_eq!(songs.items, vec![song("z", "Zulu"), song("e", "Echo")]);
+
+            for next in [None, Some("next".into())] {
+                let mut recovered = songs.clone();
+                recovered.extend(vec![song("a", "alpha")], next);
+                if recovered.next.is_some() {
+                    sort_library_songs_if_complete(&mut recovered, sort, false);
+                    assert_eq!(recovered.items[2].title, "alpha");
+                    recovered.extend(Vec::new(), None);
+                }
+                sort_library_songs_if_complete(&mut recovered, sort, false);
+                assert_eq!(
+                    recovered
+                        .items
+                        .iter()
+                        .map(|track| track.title.as_str())
+                        .collect::<Vec<_>>(),
+                    expected,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn library_refresh_replaces_successful_sections_and_preserves_failed_sources() {
         let artist = |id: &str| crate::model::ArtistRef {
             id: id.to_owned(),
@@ -728,6 +776,7 @@ mod tests {
             )],
         )
         .unwrap();
+        assert!(!fresh.song_sort_needs_refresh(true));
         fresh.preserve_unavailable_sections(&mut previous);
 
         assert_eq!(
@@ -773,6 +822,7 @@ mod tests {
                 Vec::new(),
             )
             .unwrap();
+            assert!(initial.song_sort_needs_refresh(false));
             assert_eq!(
                 initial.failed_provider,
                 Some((failed, "unavailable".into()))

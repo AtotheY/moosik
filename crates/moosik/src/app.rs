@@ -1670,6 +1670,7 @@ pub struct App {
     pub(crate) library_error: Option<String>,
     pub(crate) library_paging_errors: Vec<(crate::api::LibrarySection, String)>,
     library_songs_generation: u64,
+    library_song_sort_needs_refresh: bool,
     pub(crate) library_failed_provider: Option<(crate::model::Provider, String)>,
     pub(crate) library_source_retry: Option<(crate::model::Provider, u64)>,
     library_source_retry_id: u64,
@@ -2336,6 +2337,7 @@ impl App {
             library_error: None,
             library_paging_errors: Vec::new(),
             library_songs_generation: 0,
+            library_song_sort_needs_refresh: false,
             library_failed_provider: None,
             library_source_retry: None,
             library_source_retry_id: 0,
@@ -5566,10 +5568,7 @@ impl App {
             track.like = LikeStatus::Like;
             track.set_video_id = None;
             self.library.songs.items.insert(0, track);
-            crate::providers::sort_library_songs(
-                &mut self.library.songs.items,
-                self.library_sort.param(),
-            );
+            self.apply_library_song_sort();
         }
         if self.library_loading {
             self.fetch_library();
@@ -5604,6 +5603,10 @@ impl App {
         let Some((provider, _)) = self.library_failed_provider.as_ref() else {
             return;
         };
+        if self.library_sort != LibrarySort::Latest {
+            self.fetch_library();
+            return;
+        }
         let provider = *provider;
         self.library_source_retry_id = self.library_source_retry_id.wrapping_add(1);
         let request = self.library_source_retry_id;
@@ -5613,6 +5616,14 @@ impl App {
             self.library_sort.param(),
             self.browsing_epoch,
             request,
+        );
+    }
+
+    fn apply_library_song_sort(&mut self) {
+        crate::providers::sort_library_songs_if_complete(
+            &mut self.library.songs,
+            self.library_sort.param(),
+            self.library_song_sort_needs_refresh,
         );
     }
 
@@ -6591,6 +6602,8 @@ impl App {
                 {
                     self.library_loading = false;
                     self.organizer.page_failed = false;
+                    self.library_song_sort_needs_refresh =
+                        loaded.song_sort_needs_refresh(self.library_loaded);
                     if loaded.spotify_songs_fresh
                         && (loaded.songs_sort_error.is_none() || !self.library_loaded)
                     {
@@ -6622,10 +6635,7 @@ impl App {
                     self.library_paging_errors.clear();
                     self.library_failed_provider = loaded.failed_provider;
                     self.library_loaded = true;
-                    crate::providers::sort_library_songs(
-                        &mut self.library.songs.items,
-                        self.library_sort.param(),
-                    );
+                    self.apply_library_song_sort();
                     self.resync_local_playlists();
                     self.apply_playlist_order();
                     self.reconcile_current_library_track();
@@ -6661,6 +6671,7 @@ impl App {
                                 provider,
                             );
                             self.library_failed_provider = None;
+                            self.library_song_sort_needs_refresh = false;
                             self.organizer.page_failed = false;
                             self.resync_local_playlists();
                             for warning in loaded.warnings {
@@ -6731,10 +6742,7 @@ impl App {
                                 crate::providers::spotify_songs_complete(page.next.as_deref()),
                             );
                             crate::providers::append_library_songs(&mut self.library.songs, page);
-                            crate::providers::sort_library_songs(
-                                &mut self.library.songs.items,
-                                self.library_sort.param(),
-                            );
+                            self.apply_library_song_sort();
                             self.reconcile_current_library_track();
                         }
                         crate::api::LibrarySection::Artists => self.library.artists.extend(
@@ -8624,6 +8632,7 @@ impl App {
     fn invalidate_browsing(&mut self) {
         self.browsing_epoch = self.browsing_epoch.wrapping_add(1);
         self.library_refresh_pending = false;
+        self.library_song_sort_needs_refresh = false;
         self.backend.set_browsing_epoch(self.browsing_epoch);
         self.artist_sources.clear();
         self.releases = None;
