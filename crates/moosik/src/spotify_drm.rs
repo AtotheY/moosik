@@ -391,6 +391,8 @@ impl PlaybackCommands {
     }
 
     fn acknowledge(&mut self, sequence: u64) {
+        // Keep commands until the renderer confirms the last sequence it applied: a poll
+        // response can be lost, so removing them on send would drop them.
         self.pending.retain(|command| command.sequence > sequence);
     }
 }
