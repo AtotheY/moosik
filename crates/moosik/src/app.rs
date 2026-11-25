@@ -5585,6 +5585,7 @@ impl App {
         }
         let restarted = crate::providers::restart_spotify_song_paging(&mut self.library.songs);
         if restarted {
+            self.backend.cancel_library_songs();
             self.library_songs_generation = self.library_songs_generation.wrapping_add(1);
             self.liked_music.cancel_library_songs();
             self.library_paging_errors
@@ -5602,6 +5603,7 @@ impl App {
             self.library_source_retry,
             Some((crate::model::Provider::Spotify, _))
         ) {
+            self.backend.cancel_library_songs();
             self.library_source_retry = None;
             self.retry_library_provider();
         } else if restarted && self.history.current() == &Route::Library {

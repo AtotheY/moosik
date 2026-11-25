@@ -1414,8 +1414,31 @@ async fn search_suggestions(
     Ok(items)
 }
 
+#[derive(Default)]
+struct LibrarySongsRequest {
+    active: Option<tokio::task::AbortHandle>,
+}
+
+impl LibrarySongsRequest {
+    fn spawn(
+        &mut self,
+        runtime: &tokio::runtime::Handle,
+        request: impl Future<Output = ()> + Send + 'static,
+    ) {
+        self.cancel();
+        self.active = Some(runtime.spawn(request).abort_handle());
+    }
+
+    fn cancel(&mut self) {
+        if let Some(request) = self.active.take() {
+            request.abort();
+        }
+    }
+}
+
 pub struct Backend {
     browse_epoch: AtomicU64,
+    library_songs_request: LibrarySongsRequest,
     search_cache: Arc<SearchCache>,
     local_search_tracks: std::sync::RwLock<Arc<Vec<Track>>>,
     search_providers: Arc<std::sync::RwLock<SearchProviders>>,
@@ -1535,6 +1558,7 @@ impl Backend {
 
         Ok(Self {
             browse_epoch: AtomicU64::new(0),
+            library_songs_request: LibrarySongsRequest::default(),
             search_cache: Arc::new(SearchCache::default()),
             local_search_tracks: std::sync::RwLock::new(Arc::new(Vec::new())),
             search_providers: Arc::new(std::sync::RwLock::new(SearchProviders::default())),
@@ -1670,8 +1694,9 @@ impl Backend {
         }
     }
 
-    pub fn set_browsing_epoch(&self, epoch: u64) {
+    pub fn set_browsing_epoch(&mut self, epoch: u64) {
         if self.browse_epoch.swap(epoch, Ordering::AcqRel) != epoch {
+            self.cancel_library_songs();
             self.invalidate_search_cache();
             self.audio_prefetch.lock().unwrap().take();
         }
@@ -2101,8 +2126,12 @@ impl Backend {
         });
     }
 
+    pub(crate) fn cancel_library_songs(&mut self) {
+        self.library_songs_request.cancel();
+    }
+
     pub fn fetch_library(
-        &self,
+        &mut self,
         sort: crate::api::LibrarySortParam,
         epoch: u64,
         songs_generation: u64,
@@ -2110,40 +2139,41 @@ impl Backend {
         minimum_spotify_songs: usize,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
-            let event = match crate::providers::library(
-                &api,
-                sort,
-                youtube,
-                crate::spotify::is_signed_in(),
-                minimum_spotify_songs,
-            )
-            .await
-            {
-                Ok(loaded) => Event::LibraryLoaded {
-                    loaded,
-                    epoch,
-                    songs_generation,
-                },
-                Err(e) => Event::LibraryFailed {
-                    error: format!("{e:#}"),
-                    epoch,
-                    songs_generation,
-                },
-            };
-            Self::emit(&tx, &ctx, event);
-        });
+        self.library_songs_request
+            .spawn(self.rt.handle(), async move {
+                let event = match crate::providers::library(
+                    &api,
+                    sort,
+                    youtube,
+                    crate::spotify::is_signed_in(),
+                    minimum_spotify_songs,
+                )
+                .await
+                {
+                    Ok(loaded) => Event::LibraryLoaded {
+                        loaded,
+                        epoch,
+                        songs_generation,
+                    },
+                    Err(e) => Event::LibraryFailed {
+                        error: format!("{e:#}"),
+                        epoch,
+                        songs_generation,
+                    },
+                };
+                Self::emit(&tx, &ctx, event);
+            });
     }
 
     pub(crate) fn retry_library_provider(
-        &self,
+        &mut self,
         provider: Provider,
         sort: crate::api::LibrarySortParam,
         epoch: u64,
         request: u64,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
+        let load = async move {
             let result = crate::providers::retry_library_provider(&api, provider, sort)
                 .await
                 .map_err(|error| format!("{error:#}"));
@@ -2157,7 +2187,12 @@ impl Backend {
                     result,
                 },
             );
-        });
+        };
+        if provider == Provider::Spotify {
+            self.library_songs_request.spawn(self.rt.handle(), load);
+        } else {
+            self.rt.spawn(load);
+        }
     }
 
     /// Page Liked Music into `Event::LikedPage`s, one page per event, ending with
@@ -2434,7 +2469,7 @@ impl Backend {
 
     /// The next page of one library section.
     pub fn fetch_library_more(
-        &self,
+        &mut self,
         section: crate::api::LibrarySection,
         token: String,
         epoch: u64,
@@ -2442,7 +2477,7 @@ impl Backend {
         minimum_spotify_songs: usize,
     ) {
         let (api, tx, ctx) = (Arc::clone(&self.api), self.tx.clone(), self.ctx.clone());
-        self.rt.spawn(async move {
+        let load = async move {
             let event =
                 match crate::providers::library_more(&api, section, &token, minimum_spotify_songs)
                     .await
@@ -2461,7 +2496,12 @@ impl Backend {
                     },
                 };
             Self::emit(&tx, &ctx, event);
-        });
+        };
+        if section == crate::api::LibrarySection::Songs {
+            self.library_songs_request.spawn(self.rt.handle(), load);
+        } else {
+            self.rt.spawn(load);
+        }
     }
 
     pub(crate) fn folder_tracks(
@@ -4087,6 +4127,30 @@ fn scrobble_nonce() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replacing_a_library_songs_request_cancels_its_pending_page() {
+        use tokio::sync::oneshot;
+
+        let runtime = tokio::runtime::Handle::current();
+        let mut request = LibrarySongsRequest::default();
+        let (started, first_page) = oneshot::channel();
+        let (mut release_page, pending_page) = oneshot::channel::<()>();
+        request.spawn(&runtime, async move {
+            started.send(()).unwrap();
+            let _ = pending_page.await;
+        });
+        first_page.await.unwrap();
+
+        let (finished, replacement) = oneshot::channel();
+        request.spawn(&runtime, async move {
+            finished.send(()).unwrap();
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), release_page.closed())
+            .await
+            .expect("superseded request should drop its pending page");
+        replacement.await.unwrap();
+    }
 
     #[tokio::test]
     async fn prefetch_and_play_share_the_audio_alternative_lookup() {
