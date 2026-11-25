@@ -276,6 +276,13 @@ impl Player {
         Some(error)
     }
 
+    pub(crate) fn spotify_recovery_state(&self) -> Option<(f64, bool)> {
+        match &self.active {
+            Some(PlaybackHandle::Spotify(handle)) => handle.recovery_state(),
+            _ => None,
+        }
+    }
+
     /// The message from a failed one-time init, if any.
     pub fn init_error(&self) -> Option<&str> {
         self.init_error.as_deref()

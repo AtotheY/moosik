@@ -69,28 +69,29 @@ function startPlayback(prefix) {
 
   function publish() {
     if (terminalStateQueued) return;
-    terminalStateQueued = stopped || errorCode !== null;
     queuedState = snapshot();
-    if (queuedState.playing) {
-      if (progressTimer === null) {
-        progressTimer = setTimeout(() => {
-          progressTimer = null;
-          publish();
-        }, 250);
-      }
-    } else if (progressTimer !== null) {
-      clearTimeout(progressTimer);
-      progressTimer = null;
+    terminalStateQueued = queuedState.ended || queuedState.errorCode !== null;
+    clearTimeout(progressTimer);
+    progressTimer = null;
+    if (!terminalStateQueued && (mediaLoaded || audioStartedAt !== null)) {
+      progressTimer = setTimeout(publish, queuedState.playing ? 250 : 2000);
     }
     if (!sendingState) void sendStates();
   }
 
   async function sendStates() {
     sendingState = true;
+    let failures = 0;
+    let sendingTerminal = false;
     try {
       while (queuedState) {
         const state = queuedState;
         queuedState = null;
+        const terminal = state.ended || state.errorCode !== null;
+        if (terminal && !sendingTerminal) {
+          sendingTerminal = true;
+          failures = 0;
+        }
         try {
           const timeout = AbortSignal.timeout(5000);
           const response = await fetch(prefix + 'state', {
@@ -98,13 +99,19 @@ function startPlayback(prefix) {
             headers: {'content-type': 'application/json'},
             body: JSON.stringify(state),
             redirect: 'error',
-            signal: state.ended || state.errorCode !== null
+            signal: terminal
               ? timeout
               : AbortSignal.any([requests.signal, timeout]),
           });
-          if (!response.ok && !stopped && errorCode === null) fail(10);
+          if (!response.ok) throw new Error();
+          failures = 0;
         } catch (_) {
-          if (!stopped && errorCode === null) fail(10);
+          if (++failures < 3 && (terminal || !requests.signal.aborted)) {
+            queuedState ??= state;
+            await new Promise(resolve => setTimeout(resolve, 250 * failures));
+          } else if (!terminalStateQueued) {
+            fail(10);
+          }
         }
       }
     } finally {
@@ -213,14 +220,16 @@ function startPlayback(prefix) {
   }
 
   async function commands() {
-    while (!stopped && errorCode === null) {
+    let acknowledged = 0;
+    let failures = 0;
+    while (!terminalStateQueued) {
       try {
-        const response = await request('commands');
+        const response = await request('commands/' + acknowledged);
         const values = await response.json();
         if (!Array.isArray(values)) throw new Error();
         for (const command of values) {
-          if (stopped || errorCode !== null) break;
-          if (!command || typeof command !== 'object') continue;
+          if (terminalStateQueued) break;
+          if (!Number.isSafeInteger(command?.sequence) || command.sequence <= acknowledged) continue;
           if (command.kind === 'pause' && typeof command.value === 'boolean') {
             desiredPaused = command.value;
             void applyPause();
@@ -235,10 +244,17 @@ function startPlayback(prefix) {
           } else if (command.kind === 'stop') {
             stop();
           }
+          acknowledged = command.sequence;
           publish();
         }
+        failures = 0;
       } catch (_) {
-        if (!stopped) fail(10);
+        if (terminalStateQueued) return;
+        if (++failures >= 3) {
+          fail(10);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 250 * failures));
+        }
       }
     }
   }

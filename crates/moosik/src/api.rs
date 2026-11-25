@@ -146,8 +146,15 @@ impl<T: Clone> ClientCache<T> {
         }
     }
 
-    async fn replace(&self, client: Option<T>) {
-        *self.0.lock().await = Arc::new(OnceCell::new_with(client.map(Ok)));
+    async fn clear(&self) {
+        *self.0.lock().await = Arc::default();
+    }
+
+    async fn replace_after(&self, client: T, update: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut current = self.0.lock().await;
+        update()?;
+        *current = Arc::new(OnceCell::new_with(Some(Ok(client))));
+        Ok(())
     }
 }
 
@@ -339,18 +346,21 @@ impl Api {
             cookie: cookie.clone(),
             source: source.map(str::to_owned),
         };
-        {
-            let mut session = self.session.lock().await;
-            // Refreshes can return the same cookie. Writing and verifying it
-            // again needlessly asks Keychain for access twice per refresh.
-            if session.as_ref() != Some(&next_session) {
-                auth::save_session(&cookie, source)?;
-                *session = Some(next_session);
-            }
-        }
-        *self.refresh_failed.lock().await = None;
-        self.share_with_ytdlp(Some(&cookie));
-        self.browser.replace(Some(Some(yt))).await;
+        let mut session = self.session.lock().await;
+        let mut refresh_failed = self.refresh_failed.lock().await;
+        self.browser
+            .replace_after(Some(yt), || {
+                // Refreshes can return the same cookie. Writing and verifying it
+                // again needlessly asks Keychain for access twice per refresh.
+                if session.as_ref() != Some(&next_session) {
+                    auth::save_session(&cookie, source)?;
+                    *session = Some(next_session);
+                }
+                *refresh_failed = None;
+                self.share_with_ytdlp(Some(&cookie));
+                Ok(())
+            })
+            .await?;
         Ok(account)
     }
 
@@ -378,8 +388,8 @@ impl Api {
     pub async fn switch_account(&self, page_id: Option<String>) -> Result<()> {
         *self.http.lock().await = http_client_for(page_id.as_deref())?;
         // Both derived clients carry the old header; drop them so they rebuild from the new one.
-        self.noauth.replace(None).await;
-        self.browser.replace(None).await;
+        self.noauth.clear().await;
+        self.browser.clear().await;
         Ok(())
     }
 
@@ -392,7 +402,7 @@ impl Api {
     pub async fn forget_session(&self) {
         self.share_with_ytdlp(None);
         *self.session.lock().await = None;
-        self.browser.replace(None).await;
+        self.browser.clear().await;
     }
 
     /// Sign out for real: forget the credential and remove it from disk.
@@ -3275,8 +3285,36 @@ mod tests {
 
         assert_eq!(cache.get_or_build(async || Ok(2)).await.unwrap(), 2);
         assert_eq!(cache.get_or_build(async || Ok(3)).await.unwrap(), 2);
-        cache.replace(Some(4)).await;
+        cache.replace_after(4, || Ok(())).await.unwrap();
         assert_eq!(cache.get_or_build(async || Ok(5)).await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_client_update_leaves_credentials_unchanged() {
+        let cache = ClientCache::new();
+        let saved = std::cell::Cell::new(1);
+        assert_eq!(cache.get_or_build(async || Ok(1)).await.unwrap(), 1);
+
+        let replace = || {
+            cache.replace_after(2, || {
+                saved.set(2);
+                Ok(())
+            })
+        };
+        let held = cache.0.lock().await;
+        tokio::select! {
+            biased;
+            _ = replace() => panic!("replacement must wait for the cache lock"),
+            () = std::future::ready(()) => {}
+        }
+        drop(held);
+
+        assert_eq!(saved.get(), 1);
+        assert_eq!(cache.get_or_build(async || Ok(3)).await.unwrap(), 1);
+
+        replace().await.unwrap();
+        assert_eq!(saved.get(), 2);
+        assert_eq!(cache.get_or_build(async || Ok(3)).await.unwrap(), 2);
     }
 
     #[test]

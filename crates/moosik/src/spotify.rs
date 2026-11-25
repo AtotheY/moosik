@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::OnceLock,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -115,11 +116,23 @@ pub async fn sign_out() -> Result<()> {
 }
 
 pub(crate) async fn transport() -> Result<Transport> {
+    transport_after(None).await
+}
+
+async fn transport_after(rejected: Option<&Transport>) -> Result<Transport> {
     let mut cached = TRANSPORT.get_or_init(|| Mutex::new(None)).lock().await;
-    if let Some(entry) = cached
-        .as_ref()
-        .filter(|entry| entry.expires_at > now_ms().saturating_add(60_000))
-    {
+    if let Some(rejected) = rejected {
+        anyhow::ensure!(
+            cached
+                .as_ref()
+                .is_some_and(|entry| entry.transport.same_session(rejected)),
+            "Spotify account changed"
+        );
+    }
+    if let Some(entry) = cached.as_ref().filter(|entry| {
+        entry.expires_at > now_ms().saturating_add(60_000)
+            && rejected.is_none_or(|rejected| !entry.transport.same_connection(rejected))
+    }) {
         return Ok(entry.transport.clone());
     }
     let bytes = match std::fs::read(session_path()?) {
@@ -129,17 +142,42 @@ pub(crate) async fn transport() -> Result<Transport> {
         }
         Err(_) => bail!("Could not read Spotify session"),
     };
-    let previous: WebSession = serde_json::from_slice(&bytes)
+    let mut previous: WebSession = serde_json::from_slice(&bytes)
         .context("Spotify session is invalid. Sign in again in Settings")?;
+    if rejected.is_some() {
+        previous.expires_at = 0;
+        previous.client_token_expires_at = 0;
+    }
     let session = moosik_spotify::web_session(&previous.cookie, Some(&previous)).await?;
     let expires_at = session.expires_at.min(session.client_token_expires_at);
+    let transport = Transport::build_from_web_session(session.clone()).await?;
+    anyhow::ensure!(
+        rejected.is_none_or(|rejected| transport.same_session(rejected)),
+        "Spotify account changed"
+    );
     save(&session)?;
-    let transport = Transport::build_from_web_session(session).await?;
     *cached = Some(Cached {
         transport: transport.clone(),
         expires_at,
     });
     Ok(transport)
+}
+
+pub(crate) async fn with_transport<T, F>(
+    transport: &Transport,
+    operation: impl Fn(Transport) -> F + Send,
+) -> Result<T>
+where
+    F: Future<Output = moosik_spotify::Result<T>> + Send,
+{
+    use moosik_spotify::Error;
+    match operation(transport.clone()).await {
+        Err(Error::AuthorizationExpired | Error::Http { status: 401, .. }) => {
+            let refreshed = transport_after(Some(transport)).await?;
+            Ok(operation(refreshed).await?)
+        }
+        result => Ok(result?),
+    }
 }
 
 pub fn track_uri(input: &str) -> Option<String> {
@@ -282,7 +320,10 @@ pub async fn playlist_more(token: &str) -> Result<crate::innertube::Page> {
 }
 
 pub async fn set_track_liked(uri: &str, liked: bool) -> Result<()> {
-    Ok(transport().await?.set_track_liked(uri, liked).await?)
+    with_transport(&transport().await?, |transport| async move {
+        transport.set_track_liked(uri, liked).await
+    })
+    .await
 }
 
 pub async fn remove_playlist_item(playlist_id: &str, uid: &str) -> Result<()> {
@@ -300,7 +341,10 @@ pub async fn add_playlist_item(playlist_id: &str, track_uri: &str) -> Result<()>
 }
 
 pub async fn editable_playlists(track_uri: &str) -> Result<crate::model::EditablePlaylists> {
-    let (liked, playlists) = transport().await?.editable_playlists(track_uri).await?;
+    let (liked, playlists) = with_transport(&transport().await?, |transport| async move {
+        transport.editable_playlists(track_uri).await
+    })
+    .await?;
     Ok(crate::model::EditablePlaylists {
         liked,
         playlists: playlists
@@ -369,33 +413,88 @@ pub async fn artist(id: &str) -> Result<Artist> {
 }
 
 pub async fn library() -> Result<Library> {
-    Ok(library_with_warnings().await?.0)
+    Ok(library_with_warnings(0).await?.0)
 }
 
-pub async fn library_with_warnings() -> Result<(Library, Vec<String>)> {
+pub(crate) type LibraryWarnings = Vec<(moosik_spotify::LibrarySection, String)>;
+
+pub(crate) async fn library_with_warnings(
+    minimum_songs: usize,
+) -> Result<(Library, LibraryWarnings)> {
     use moosik_spotify::LibrarySection;
     let transport = transport().await?;
+    let load = |section| load_library_page(&transport, section, None);
     let (songs, artists, albums, playlists) = tokio::join!(
-        transport.library_page(LibrarySection::Songs, None),
-        transport.library_page(LibrarySection::Artists, None),
-        transport.library_page(LibrarySection::Albums, None),
-        transport.library_page(LibrarySection::Playlists, None),
+        saved_songs_pages(None, minimum_songs, |token| {
+            load_library_page(&transport, LibrarySection::Songs, token)
+        }),
+        load(LibrarySection::Artists),
+        load(LibrarySection::Albums),
+        load(LibrarySection::Playlists),
     );
     assemble_library(songs, artists, albums, playlists)
 }
 
+async fn load_library_page(
+    transport: &Transport,
+    section: moosik_spotify::LibrarySection,
+    token: Option<String>,
+) -> Result<moosik_spotify::Page<CatalogItem>> {
+    let token = token.as_deref();
+    with_transport(transport, move |transport| async move {
+        transport.library_page(section, token).await
+    })
+    .await
+}
+
+async fn saved_songs_pages<Fut>(
+    start: Option<String>,
+    minimum: usize,
+    mut fetch: impl FnMut(Option<String>) -> Fut,
+) -> Result<moosik_spotify::Page<CatalogItem>>
+where
+    Fut: Future<Output = Result<moosik_spotify::Page<CatalogItem>>> + Send,
+{
+    let mut page = fetch(start.clone()).await?;
+    if minimum == 0 {
+        return Ok(page);
+    }
+
+    let mut cursors: HashSet<_> = start.into_iter().collect();
+    let mut tracks = HashSet::new();
+    let mut unique = |item: &CatalogItem| match item {
+        CatalogItem::Track(track) => tracks.insert(track.metadata.uri.clone()),
+        _ => false,
+    };
+    page.items.retain(&mut unique);
+    while let Some(token) = page.next.as_ref() {
+        anyhow::ensure!(
+            cursors.insert(token.clone()),
+            "Spotify saved songs continuation repeated"
+        );
+        if page.items.len() >= minimum {
+            break;
+        }
+        let mut next = fetch(Some(token.clone())).await?;
+        next.items.retain(&mut unique);
+        page.items.extend(next.items);
+        page.next = next.next;
+    }
+    Ok(page)
+}
+
 fn assemble_library(
-    songs: moosik_spotify::Result<moosik_spotify::Page<CatalogItem>>,
-    artists: moosik_spotify::Result<moosik_spotify::Page<CatalogItem>>,
-    albums: moosik_spotify::Result<moosik_spotify::Page<CatalogItem>>,
-    playlists: moosik_spotify::Result<moosik_spotify::Page<CatalogItem>>,
-) -> Result<(Library, Vec<String>)> {
+    songs: Result<moosik_spotify::Page<CatalogItem>>,
+    artists: Result<moosik_spotify::Page<CatalogItem>>,
+    albums: Result<moosik_spotify::Page<CatalogItem>>,
+    playlists: Result<moosik_spotify::Page<CatalogItem>>,
+) -> Result<(Library, LibraryWarnings)> {
     use moosik_spotify::LibrarySection;
     let mut warnings = Vec::new();
     let mut take = |result, section, name| match result {
         Ok(page) => page,
         Err(error) => {
-            warnings.push(format!("Spotify {name}: {error}"));
+            warnings.push((section, format!("Spotify {name}: {error}")));
             moosik_spotify::Page {
                 items: Vec::new(),
                 next: Some(moosik_spotify::library_start_cursor(section)),
@@ -407,7 +506,8 @@ fn assemble_library(
     let albums = take(albums, LibrarySection::Albums, "albums");
     let playlists = take(playlists, LibrarySection::Playlists, "playlists");
     if warnings.len() == 4 {
-        bail!("{}", warnings.join("\n"));
+        let errors: Vec<_> = warnings.into_iter().map(|(_, error)| error).collect();
+        bail!("{}", errors.join("\n"));
     }
     Ok((
         Library {
@@ -464,16 +564,25 @@ pub async fn library_more(
     section: crate::api::LibrarySection,
     token: &str,
 ) -> Result<crate::innertube::Page> {
+    library_more_with_depth(section, token, 0).await
+}
+
+pub(crate) async fn library_more_with_depth(
+    section: crate::api::LibrarySection,
+    token: &str,
+    minimum_songs: usize,
+) -> Result<crate::innertube::Page> {
     let section = match section {
         crate::api::LibrarySection::Songs => moosik_spotify::LibrarySection::Songs,
         crate::api::LibrarySection::Artists => moosik_spotify::LibrarySection::Artists,
         crate::api::LibrarySection::Albums => moosik_spotify::LibrarySection::Albums,
         crate::api::LibrarySection::Playlists => moosik_spotify::LibrarySection::Playlists,
     };
-    let page = transport()
-        .await?
-        .library_page(section, Some(token))
-        .await?;
+    let transport = transport().await?;
+    let page = saved_songs_pages(Some(token.to_owned()), minimum_songs, |token| {
+        load_library_page(&transport, section, token)
+    })
+    .await?;
     Ok(crate::innertube::Page {
         items: page.items.into_iter().map(entry).collect(),
         next: page.next,
@@ -481,10 +590,12 @@ pub async fn library_more(
 }
 
 pub async fn sidebar_playlists() -> Result<crate::innertube::Page> {
-    let page = transport()
-        .await?
-        .library_page(moosik_spotify::LibrarySection::Playlists, None)
-        .await?;
+    let page = with_transport(&transport().await?, |transport| async move {
+        transport
+            .library_page(moosik_spotify::LibrarySection::Playlists, None)
+            .await
+    })
+    .await?;
     Ok(crate::innertube::Page {
         items: page.items.into_iter().map(entry).collect(),
         next: page.next,
@@ -671,6 +782,61 @@ pub async fn play(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn reloading_saved_songs_fetches_enough_unique_rows_to_replace_the_cache() {
+        let track = |id: &str| {
+            CatalogItem::Track(CatalogTrack {
+                metadata: TrackMetadata {
+                    uri: id.to_owned(),
+                    title: id.to_owned(),
+                    artist_names: vec![],
+                    album: None,
+                    duration_ms: None,
+                    cover_url: None,
+                    explicit: false,
+                },
+                artists: vec![],
+                album_uri: None,
+                saved: true,
+                plays: None,
+                added_at: None,
+                playlist_item_uid: None,
+            })
+        };
+        let page = saved_songs_pages(Some("start".into()), 3, |token| async move {
+            let (items, next) = match token.as_deref() {
+                Some("start") => (vec![track("a"), track("b")], "second"),
+                Some("second") => (vec![track("b")], "third"),
+                Some("third") => (vec![track("c")], "fourth"),
+                _ => panic!("unexpected continuation"),
+            };
+            Ok(moosik_spotify::Page {
+                items,
+                next: Some(next.into()),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.next.as_deref(), Some("fourth"));
+    }
+
+    #[tokio::test]
+    async fn reloading_saved_songs_does_not_return_a_partial_batch_on_failure() {
+        let result = saved_songs_pages(None, 100, |token| async move {
+            match token.as_deref() {
+                None => Ok(moosik_spotify::Page {
+                    items: vec![],
+                    next: Some("second".into()),
+                }),
+                Some("second") => bail!("Spotify unavailable"),
+                _ => panic!("unexpected continuation"),
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "Spotify unavailable");
+    }
+
     #[test]
     fn album_entries_keep_artist_credits_and_unknown_explicitness() {
         let Entry::Album(album) = entry(CatalogItem::Album(moosik_spotify::AlbumSummary {
@@ -717,7 +883,7 @@ mod tests {
     #[test]
     fn partial_library_keeps_loaded_sections_and_failed_section_retry() {
         let (library, warnings) = assemble_library(
-            Err(moosik_spotify::Error::Network("saved tracks")),
+            Err(moosik_spotify::Error::Network("saved tracks").into()),
             Ok(moosik_spotify::Page {
                 items: Vec::new(),
                 next: Some("artists-next".to_owned()),
@@ -749,12 +915,13 @@ mod tests {
         );
         assert!(library.playlists.next.is_none());
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("saved songs"));
+        assert_eq!(warnings[0].0, moosik_spotify::LibrarySection::Songs);
+        assert!(warnings[0].1.contains("saved songs"));
     }
 
     #[test]
     fn library_reports_failure_when_every_section_failed() {
-        let failed = || Err(moosik_spotify::Error::Network("library"));
+        let failed = || Err(moosik_spotify::Error::Network("library").into());
         let error = assemble_library(failed(), failed(), failed(), failed()).unwrap_err();
         let message = error.to_string();
         for section in ["saved songs", "followed artists", "albums", "playlists"] {
